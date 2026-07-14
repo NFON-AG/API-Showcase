@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON Portal API Demo</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css?v=web-demo-20260622l">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="../index.html?v=web-demo-20260622l" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+          <h1>NFON Portal API Demo</h1>
+          <p id="account-label">Verbinde</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="nav-button is-active" data-view="overview" type="button">Übersicht</button>
+        <button class="nav-button" data-view="phonebook" type="button">Telefonbuch</button>
+        <button class="nav-button" data-view="extensions" type="button">Nebenstellen</button>
+        <button class="nav-button" data-view="services" type="button">Warteschlangen</button>
+        <button class="nav-button" data-view="callflow" type="button">Callflow</button>
+        <button class="nav-button" data-view="changes" type="button">Setup</button>
+        <button class="icon-button" id="refresh-button" type="button" title="Aktualisieren" aria-label="Aktualisieren">↻</button>
+        <span class="connection" id="connection-state">Verbinde</span>
+        <label class="demo-switch daynight-header-switch" id="daynight-mode-switch" title="Tag- und Nachtmodus umschalten" hidden>
+          <input id="daynight-mode-toggle" type="checkbox" disabled>
+          <span id="daynight-mode-label">Tag/Nacht</span>
+        </label>
+      </div>
+    </header>
+
+    <div class="daynight-mode-modal" id="daynight-mode-modal" hidden role="dialog" aria-modal="true" aria-labelledby="daynight-mode-modal-title">
+      <button class="daynight-mode-backdrop" type="button" data-daynight-mode-close aria-label="Hinweis schließen"></button>
+      <section class="daynight-mode-dialog">
+        <div class="daynight-mode-symbol" id="daynight-mode-modal-symbol" aria-hidden="true"></div>
+        <div>
+          <h2 id="daynight-mode-modal-title">Nachtmodus aktiv</h2>
+          <p id="daynight-mode-modal-message">Die Anlage wurde umgeschaltet.</p>
+        </div>
+        <button class="secondary-button" type="button" data-daynight-mode-close>Schließen</button>
+      </section>
+    </div>
+
+    <main class="app-shell">
+      <section class="metrics" id="metrics" aria-label="Kennzahlen"></section>
+
+      <section class="view is-active" id="view-overview" aria-label="Übersicht">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Rufnummern-Routing aus der Portal API</h2>
+          </div>
+          <div id="routing-preview" class="routing-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-phonebook" aria-label="Telefonbuch">
+        <section class="panel phonebook-sync-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Telefonbuch-Sync</h2>
+              <p class="panel-subtitle">Kontakte per Datei oder manuell vorbereiten und mit dem aktuellen NFON-Telefonbuch abgleichen.</p>
+            </div>
+            <div class="sync-header-actions">
+              <button class="primary-button" id="stage-phonebook-sync" type="button">Übernehmen</button>
+            </div>
+          </div>
+          <div id="phonebook-sync-summary" class="phonebook-sync-summary"></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-extensions" aria-label="Nebenstellen">
+        <section class="panel extension-workspace-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Nebenstellen</h2>
+            </div>
+            <input id="extension-filter" type="search" placeholder="Name oder Nummer suchen">
+          </div>
+          <nav class="extension-section-tabs" aria-label="Nebenstellenbereiche">
+            <button class="extension-section-tab is-active" data-extension-section="overview" type="button">Bestand</button>
+            <button class="extension-section-tab" data-extension-section="batch" type="button">Batch Import</button>
+          </nav>
+          <div id="extension-summary" class="extension-summary"></div>
+          <div class="extension-workspace extension-section" id="extension-section-overview">
+            <section>
+              <div id="extension-list" class="extension-list" aria-live="polite"></div>
+            </section>
+            <aside class="extension-side">
+              <section class="extension-side-card extension-detail-card">
+                <div class="panel-header is-compact">
+                  <h3>Ausgewählte Nebenstelle</h3>
+                </div>
+                <div id="extension-detail"></div>
+              </section>
+            </aside>
+            <section class="extension-side-card extension-actions-card">
+              <div class="panel-header is-compact">
+                <h3>Aktionen</h3>
+              </div>
+              <div id="extension-actions"></div>
+            </section>
+            <section class="extension-side-card extension-plan-card" id="extension-action-plan-card" hidden>
+              <div class="panel-header is-compact">
+                <h3>Vorbereitete Änderung</h3>
+              </div>
+              <div id="extension-action-plan" class="action-plan is-compact"></div>
+            </section>
+          </div>
+          <section class="extension-batch-card extension-section" id="extension-section-batch" hidden>
+            <div class="panel-header">
+              <div>
+                <h3>Batch Import</h3>
+                <p class="panel-subtitle">Mehrere Nebenstellen per CSV oder manueller Liste prüfen und gesammelt anlegen.</p>
+              </div>
+              <div class="toolbar">
+                <button class="secondary-button" id="add-extension-batch-row" type="button">Zeile hinzufügen</button>
+                <button class="primary-button" id="plan-extension-batch" type="button">Batch prüfen</button>
+              </div>
+            </div>
+            <div id="extension-batch"></div>
+          </section>
+        </section>
+      </section>
+
+      <section class="view" id="view-callflow" aria-label="Callflow">
+        <section class="panel flow-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Callflow Builder</h2>
+              <p class="panel-subtitle">Visuelle Einrichtung der Anlage.</p>
+            </div>
+            <div class="toolbar">
+              <button class="secondary-button" id="clear-flow-draft" type="button" hidden>Lokalen Entwurf löschen</button>
+              <button class="secondary-button" id="export-flow-pdf" type="button">Callflow als PDF</button>
+              <button class="primary-button" id="stage-flow" type="button">Übernehmen</button>
+            </div>
+          </div>
+          <div class="flow-command-row">
+            <div id="flow-feedback" class="flow-feedback" aria-live="polite"></div>
+          </div>
+          <div class="callflow-layout">
+            <aside class="flow-picker" id="flow-menu-panel">
+              <div class="flow-picker-header">
+                <h3 id="flow-menu-title">Rufnummern</h3>
+                <button class="icon-button is-light" id="toggle-did-rail" type="button" title="Menü ausblenden" aria-label="Menü ausblenden">‹</button>
+              </div>
+              <section class="flow-menu-content is-active" data-flow-menu-content="dids">
+                <div id="did-list" class="did-list"></div>
+              </section>
+              <div class="flow-resource-palette" id="flow-resource-palette"></div>
+            </aside>
+            <div class="flow-canvas-shell">
+              <div class="flow-menu-launcher" aria-label="Callflow Menüs">
+                <button class="flow-menu-tab is-green" data-flow-menu="extensions" type="button">Nebenstellen</button>
+                <button class="flow-menu-tab is-amber" data-flow-menu="queues" type="button">Warteschlangen</button>
+                <button class="flow-menu-tab is-coral" data-flow-menu="ivrs" type="button">Sprachdialoge</button>
+                <button class="flow-menu-tab is-teal" data-flow-menu="skills" type="button">Skillgruppen</button>
+                <button class="flow-menu-tab is-purple" data-flow-menu="timeControls" type="button">Zeitsteuerung</button>
+                <button class="flow-menu-tab is-muted" data-flow-empty-step type="button">Leerer Schritt</button>
+              </div>
+              <div id="callflow-canvas" class="flow-canvas" aria-live="polite"></div>
+              <div class="canvas-controls" aria-label="Canvas Zoom">
+                <button class="icon-button is-light" id="zoom-out" type="button" aria-label="Zoom verkleinern">−</button>
+                <span id="zoom-label">100%</span>
+                <button class="icon-button is-light" id="zoom-in" type="button" aria-label="Zoom vergrößern">+</button>
+              </div>
+            </div>
+            <aside class="flow-helper" id="flow-helper"></aside>
+            <aside class="flow-plan-panel" id="flow-plan-panel"></aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-services" aria-label="Warteschlangen und Skillgruppen">
+        <section class="panel service-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Warteschlangen & Skillgruppen</h2>
+              <p class="panel-subtitle">Nebenstellen per Drag & Drop zuordnen.</p>
+            </div>
+            <div class="toolbar">
+              <button class="secondary-button" id="undo-service-draft" type="button">Rückgängig</button>
+              <button class="primary-button" id="apply-service-draft" type="button">Änderungen übernehmen</button>
+            </div>
+          </div>
+          <div id="service-feedback" class="flow-feedback" aria-live="polite"></div>
+          <div class="service-tabs" role="tablist" aria-label="Service-Typ">
+            <button class="segmented-button is-active" data-service-mode="queues" type="button">Warteschlangen</button>
+            <button class="segmented-button" data-service-mode="skills" type="button">Skillgruppen</button>
+          </div>
+          <div class="service-create-slot" id="service-create-slot"></div>
+          <div class="service-workspace">
+            <aside class="service-extension-pool">
+              <div class="panel-header is-compact">
+                <h3>Nebenstellen</h3>
+                <input id="service-extension-filter" type="search" placeholder="Name oder Nummer suchen">
+              </div>
+              <div id="service-extension-list" class="service-extension-list"></div>
+            </aside>
+            <section class="service-board" id="service-board" aria-live="polite"></section>
+            <aside class="service-inspector" id="service-inspector"></aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-changes" aria-label="Änderungen">
+        <section class="panel settings-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Setup</h2>
+              <p class="panel-subtitle">Einstellungen und Login.</p>
+            </div>
+          </div>
+          <div id="settings-summary" class="settings-summary"></div>
+        </section>
+        <section class="panel auth-panel is-wide">
+          <div id="auth-login-panel" class="auth-login-panel"></div>
+        </section>
+        <section class="panel daynight-panel is-wide">
+          <div class="panel-header">
+            <div>
+              <h2>Tag/Nacht-Schaltung</h2>
+              <p class="panel-subtitle">Rufnummern gesammelt zwischen Tagesrouting und vorbereitetem Nachtziel umschalten.</p>
+            </div>
+          </div>
+          <div class="daynight-body">
+          <div class="daynight-layout">
+            <section class="daynight-card daynight-prepare-card">
+              <h3>Schaltung vorbereiten</h3>
+              <div class="daynight-risk-warning" role="alert">
+                <span aria-hidden="true">!</span>
+                <strong>Diese Funktion kann die Zuordnung aller Rufnummern zu Warteschlangen, Sprachdialogen und Nebenstellen verändern. Bitte vorab unbedingt sichern.</strong>
+              </div>
+              <div class="flow-profile-actions" aria-label="Tag/Nacht Profile">
+                <button class="secondary-button" id="save-standard-flow-profile" type="button">Standard sichern</button>
+                <button class="secondary-button" id="stage-standard-flow-profile" type="button">Standard wiederherstellen</button>
+                <input id="standard-flow-import-file" type="file" accept=".json,application/json" hidden>
+              </div>
+            </section>
+            <aside class="daynight-card daynight-status-card">
+              <h3>Status</h3>
+              <div id="daynight-summary" class="daynight-summary"></div>
+            </aside>
+          </div>
+          <div id="daynight-gateway-preview" class="daynight-gateway-preview"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel endpoint-panel">
+        <div class="panel-header">
+          <div>
+            <h2>API - Details</h2>
+            <p class="panel-subtitle">Diagnose der Portal-Endpunkte.</p>
+          </div>
+          <button class="text-button" id="toggle-technical" type="button">Details anzeigen</button>
+        </div>
+        <div id="endpoint-status" class="endpoint-grid is-collapsed"></div>
+      </section>
+    </main>
+
+    <div class="resource-modal" id="resource-modal" aria-hidden="true">
+      <div class="resource-modal-backdrop" data-close-resource-modal></div>
+      <section class="resource-dialog" role="dialog" aria-modal="true" aria-labelledby="resource-modal-title">
+        <div class="resource-dialog-header">
+          <div>
+            <h2 id="resource-modal-title">Ressourcen</h2>
+            <p id="resource-modal-subtitle"></p>
+          </div>
+          <button class="helper-close-button" data-close-resource-modal type="button" aria-label="Popup schließen">×</button>
+        </div>
+        <div class="resource-dialog-body" id="resource-modal-body"></div>
+      </section>
+    </div>
+
+    <div class="resource-modal" id="resource-create-modal" aria-hidden="true">
+      <div class="resource-modal-backdrop" data-close-resource-create></div>
+      <section class="resource-dialog is-form" role="dialog" aria-modal="true" aria-labelledby="resource-create-title">
+        <div class="resource-dialog-header">
+          <div>
+            <h2 id="resource-create-title">Ressource anlegen</h2>
+            <p id="resource-create-subtitle"></p>
+          </div>
+          <button class="helper-close-button" data-close-resource-create type="button" aria-label="Popup schließen">×</button>
+        </div>
+        <div class="resource-dialog-body" id="resource-create-body"></div>
+      </section>
+    </div>
+
+    <div class="app-dialog-modal" id="app-dialog-modal" aria-hidden="true">
+      <div class="app-dialog-backdrop" data-app-dialog-cancel></div>
+      <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">
+        <div class="app-dialog-status" id="app-dialog-status" aria-hidden="true"></div>
+        <div>
+          <h2 id="app-dialog-title"></h2>
+          <p id="app-dialog-message"></p>
+        </div>
+        <div class="app-dialog-actions">
+          <button class="secondary-button" id="app-dialog-cancel" type="button" data-app-dialog-cancel>Abbrechen</button>
+          <button class="primary-button" id="app-dialog-confirm" type="button" data-app-dialog-confirm>OK</button>
+        </div>
+      </section>
+    </div>
+
+    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
+    <script src="../i18n.js?v=v1.0.0-i18n"></script>
+    <script src="./app.js?v=web-demo-20260622l"></script>
+  </body>
+</html>

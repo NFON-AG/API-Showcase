@@ -1,0 +1,17 @@
+{
+  "name": "nfon-callhistory-api-showcase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Demo app for the NFON Call History API",
+  "author": "NFON AG <integration@nfon.com>",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check public/app.js && node --check public/i18n.js",
+    "test": "npm run check && node --test --test-concurrency=1 test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

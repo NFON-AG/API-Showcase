@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON Call History API Demo</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css?v=web-demo-20260622i">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="../index.html?v=web-demo-20260622g" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+          <h1>NFON Call History API Demo</h1>
+          <p id="account-label">Prüft Konfiguration</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="nav-button is-active" data-view="history" type="button">Rufliste</button>
+        <button class="nav-button" data-view="transcripts" type="button">Transcripts</button>
+        <button class="nav-button" data-view="crm" type="button">CRM Demo</button>
+        <button class="nav-button" data-view="setup" type="button">Setup</button>
+        <button class="icon-button" id="refresh-button" type="button" title="Aktualisieren" aria-label="Aktualisieren">↻</button>
+        <span class="connection" id="connection-state">Prüft</span>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="metrics" id="metrics" aria-label="Kennzahlen"></section>
+      <section class="analytics-panel" id="analytics-panel" aria-label="Auswertung"></section>
+      <section id="status-note" class="status-note" aria-live="polite"></section>
+
+      <section class="filter-panel panel" aria-label="Filter">
+        <div class="filter-grid">
+          <label data-filter-field="range">
+            <span class="filter-label-text">Zeitraum</span>
+            <select id="range-filter">
+              <option value="today">Heute</option>
+              <option value="7d">7 Tage</option>
+              <option value="30d">30 Tage</option>
+            </select>
+          </label>
+          <label data-filter-field="direction">
+            <span class="filter-label-text">Richtung</span>
+            <select id="direction-filter">
+              <option value="all">Alle Richtungen</option>
+              <option value="inbound">Eingehend</option>
+              <option value="outbound">Ausgehend</option>
+            </select>
+          </label>
+          <label data-filter-field="outcome">
+            <span class="filter-label-text">Ergebnis</span>
+            <select id="outcome-filter">
+              <option value="all">Alle Ergebnisse</option>
+              <option value="answered">Angenommen</option>
+              <option value="missed">Verpasst</option>
+              <option value="cancelled">Abgebrochen</option>
+              <option value="busy">Besetzt</option>
+              <option value="failed">Fehler</option>
+            </select>
+          </label>
+          <label data-filter-field="transcript">
+            <span class="filter-label-text">Transkript</span>
+            <select id="transcript-filter">
+              <option value="all">Alle</option>
+              <option value="with">Ja</option>
+              <option value="without">Nein</option>
+            </select>
+          </label>
+          <label data-filter-field="party">
+            <span class="filter-label-text">Teilnehmer</span>
+            <input id="party-filter" type="search" placeholder="Name, Nummer, Ticket">
+          </label>
+          <label data-filter-field="queue">
+            <span class="filter-label-text">Queue</span>
+            <input id="queue-filter" type="search" placeholder="Queue">
+          </label>
+        </div>
+      </section>
+
+      <section class="view is-active" id="view-history" aria-label="Rufliste">
+        <div class="history-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Anrufliste</h2>
+                <p class="panel-subtitle" id="history-subtitle">Lade Call History</p>
+              </div>
+            </div>
+            <div class="history-list" role="table" aria-label="Anrufliste">
+              <div class="history-list-header" role="row">
+                <span role="columnheader">Datum / Zeit</span>
+                <span role="columnheader">Status</span>
+                <span role="columnheader">Teilnehmer</span>
+                <span role="columnheader">Queue</span>
+                <span role="columnheader">Nebenstelle</span>
+              </div>
+              <div id="calls-body" class="history-rows" role="rowgroup"></div>
+            </div>
+          </section>
+
+          <aside class="panel detail-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Call-Detail</h2>
+                <p class="panel-subtitle" id="detail-subtitle">Kein Call ausgewählt</p>
+              </div>
+            </div>
+            <div id="call-detail"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-crm" aria-label="Mini CRM">
+        <div class="crm-layout">
+          <section class="panel crm-board">
+            <div class="panel-header">
+              <div>
+                <h2>Automatisierte Supportabrechnung</h2>
+                <p class="panel-subtitle">Jeder Call wird als Ticket geführt, dem Kundenkonto zugeordnet und abrechenbar vorbereitet.</p>
+              </div>
+            </div>
+            <div id="crm-summary" class="crm-summary"></div>
+            <div class="crm-ticket-header">
+              <span>Ticket</span>
+              <span>Kunde</span>
+              <span>Owner</span>
+              <span>Abrechnung</span>
+              <span>Status</span>
+            </div>
+            <div id="crm-ticket-list" class="crm-ticket-list"></div>
+          </section>
+        </div>
+        <div id="crm-account-detail"></div>
+      </section>
+
+      <section class="view" id="view-transcripts" aria-label="Transcripts">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Transcript-Zuordnung</h2>
+              <p class="panel-subtitle">Calls mit Summary oder Transcript als Quelle für User- und Ticket-Mapping.</p>
+            </div>
+          </div>
+          <div id="transcript-grid" class="transcript-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-setup" aria-label="Setup">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Konfigurationsstatus</h2>
+              <p class="panel-subtitle">OAuth, API-Endpunkte und lokale Laufzeitdaten.</p>
+            </div>
+          </div>
+          <div class="setup-grid">
+            <div class="setup-status" id="setup-status"></div>
+            <div class="redirect-status" id="redirect-status"></div>
+          </div>
+        </section>
+        <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Anmeldung"></section>
+      </section>
+    </main>
+    <div id="customer-record-modal"></div>
+
+    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
+    <script src="../i18n.js?v=v1.0.0-i18n"></script>
+    <script src="./app.js?v=web-demo-20260622i"></script>
+  </body>
+</html>

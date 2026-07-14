@@ -1,0 +1,42 @@
+[
+  {
+    "id": "tr-demo-1001",
+    "language": "de",
+    "confidence": 0.92,
+    "summary": "Demo Kontakt A moechte fuer Demo Account A drei Standorte portieren. Demo Agent A soll ein Angebot vorbereiten und bis morgen eine Rueckmeldung senden.",
+    "text": "Kundin: Wir planen drei neue Standorte und moechten die bestehenden Rufnummern portieren. Agentin: Ich pruefe die benoetigten Daten und bereite ein Angebot vor. Kundin: Bitte schicken Sie mir die Zusammenfassung per Mail.",
+    "topics": ["Portierung", "Angebot", "Standorte"],
+    "ticketSuggestion": { "id": "NFON-1842", "title": "Angebot Standort-Portierung", "priority": "normal" },
+    "assignee": { "name": "Demo Agent A", "email": "agent-a@example.local" }
+  },
+  {
+    "id": "tr-demo-1002",
+    "language": "de",
+    "confidence": 0.88,
+    "summary": "Demo Agent B bestaetigt, dass das Audioproblem nach Firmware-Check und Headset-Neustart nicht mehr auftritt. Ticket bleibt bis zur Kundenrueckmeldung offen.",
+    "text": "Agent: Wir sehen die alte Firmware auf dem Endgeraet. Kunde: Nach dem Neustart klingt es stabil. Agent: Ich dokumentiere die Pruefung und lasse das Ticket bis morgen offen.",
+    "topics": ["Headset", "Firmware", "Support"],
+    "ticketSuggestion": { "id": "NFON-1837", "title": "Headset Audio bricht ab", "priority": "high" },
+    "assignee": { "name": "Demo Agent B", "email": "agent-b@example.local" }
+  },
+  {
+    "id": "tr-demo-1004",
+    "language": "de",
+    "confidence": 0.9,
+    "summary": "Demo Kontakt D bestaetigt den neuen Onboarding-Termin. Demo Agent D soll eine kurze Mail mit Agenda und Teilnehmern senden.",
+    "text": "Kunde: Der neue Termin am Donnerstag passt. Agentin: Ich sende Ihnen die Agenda und die Teilnehmerliste gleich per Mail. Kunde: Danke, dann ist alles vorbereitet.",
+    "topics": ["Onboarding", "Termin", "Mail"],
+    "ticketSuggestion": { "id": "NFON-1829", "title": "Onboarding Termin abstimmen", "priority": "normal" },
+    "assignee": { "name": "Demo Agent D", "email": "agent-d@example.local" }
+  },
+  {
+    "id": "tr-demo-1006",
+    "language": "de",
+    "confidence": 0.86,
+    "summary": "Demo Kontakt F meldet Routing-Probleme nach einer Feiertagsregel. Demo Agent B identifiziert eine Zeitsteuerung als Ursache und plant die Korrektur im Portal.",
+    "text": "Kunde: Seit dem Feiertag landen Anrufe in der falschen Queue. Agent: Die Zeitsteuerung ist noch aktiv. Ich bereite eine Portal-Aenderung vor und dokumentiere den alten Zustand.",
+    "topics": ["Routing", "Zeitsteuerung", "Portal API"],
+    "ticketSuggestion": { "id": "NFON-1794", "title": "Routing nach Feiertag pruefen", "priority": "urgent" },
+    "assignee": { "name": "Demo Agent B", "email": "agent-b@example.local" }
+  }
+]

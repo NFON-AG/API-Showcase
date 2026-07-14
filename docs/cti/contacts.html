@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="0; url=./setup.html">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON CTI API Demo</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+    <script>window.location.replace("./setup.html");</script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="../index.html?v=web-demo-20260622g" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+          <h1>NFON CTI API Demo</h1>
+          <p id="account-label">Nicht verbunden</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="nav-button" href="./index.html">Übersicht</a>
+        <a class="nav-button" href="./analytics.html">Auswertungen</a>
+        <a class="nav-button is-active" href="./setup.html" aria-current="page">Setup</a>
+        <span class="connection" id="connection-state">Verbinde</span>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="contacts-layout">
+        <div class="panel contacts-list-panel">
+          <div class="panel-header">
+            <h2>Google Kontakte</h2>
+            <input id="contact-filter" type="search" placeholder="Suchen">
+          </div>
+          <div id="contacts-list" class="contacts-list"></div>
+        </div>
+
+        <aside class="panel contacts-side-panel">
+          <div class="panel-header">
+            <h2>Optionales Modul</h2>
+          </div>
+          <div id="contacts-status" class="contacts-status"></div>
+          <div class="contacts-actions">
+            <a class="primary-button link-button" id="contacts-login" href="#demo-google-login">Verbinden</a>
+            <button class="secondary-button" id="contacts-sync" type="button">Synchronisieren</button>
+            <button class="secondary-button danger-button" id="contacts-disconnect" type="button">Trennen</button>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <div id="call-popup" class="call-popup" hidden></div>
+
+    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
+    <script src="../i18n.js?v=v1.0.0-i18n"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

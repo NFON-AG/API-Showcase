@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON CTI API Demo</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+        <h1>NFON CTI API Demo</h1>
+        <p id="account-label">Nicht verbunden</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="nav-button" href="/">Übersicht</a>
+        <a class="nav-button is-active" href="/analytics.html" aria-current="page">Auswertungen</a>
+        <a class="nav-button" href="/setup.html">Setup</a>
+        <span class="connection" id="connection-state">Verbinde</span>
+        <label class="demo-switch" title="Demo-Daten zuschalten">
+          <input id="demo-toggle" type="checkbox">
+          <span>Demo</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="metrics" aria-label="Kennzahlen">
+        <div class="metric">
+          <span class="metric-label">Anrufe heute</span>
+          <strong id="metric-events">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Angenommen</span>
+          <strong id="metric-answered">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Aktive Calls</span>
+          <strong id="metric-active">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Nebenstellen</span>
+          <strong id="metric-extensions">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Bereit</span>
+          <strong id="metric-available">0</strong>
+        </div>
+      </section>
+
+      <section class="analytics-showcase" aria-label="Analytics">
+        <div class="panel chart-panel wide-panel">
+          <div class="panel-header">
+            <h2>Tagesverlauf</h2>
+            <span class="panel-kicker" id="timeline-kicker">Heute</span>
+          </div>
+          <div id="timeline-chart" class="line-chart timeline-line-chart"></div>
+        </div>
+
+        <div class="panel chart-panel">
+          <div class="panel-header">
+            <h2>Trend</h2>
+            <span class="panel-kicker" id="trend-kicker">7 Tage</span>
+          </div>
+          <div id="trend-chart" class="trend-bar-chart"></div>
+        </div>
+
+        <div class="panel chart-panel">
+          <div class="panel-header">
+            <h2>Richtung</h2>
+            <span class="panel-kicker" id="direction-kicker">Inbound / Outbound</span>
+          </div>
+          <div id="direction-chart" class="donut-chart"></div>
+        </div>
+
+        <div class="panel leaderboard-panel">
+          <div class="panel-header">
+            <h2>Team</h2>
+            <span class="panel-kicker" id="team-kicker">Calls</span>
+          </div>
+          <div id="team-ranking" class="ranking-list"></div>
+        </div>
+
+        <div class="panel mix-panel">
+          <div class="panel-header">
+            <h2>Qualität</h2>
+            <span class="panel-kicker" id="quality-kicker">Heute</span>
+          </div>
+          <div id="quality-panel" class="quality-grid"></div>
+        </div>
+
+        <div class="panel active-panel">
+          <div class="panel-header">
+            <h2>Aktive Calls</h2>
+          </div>
+          <div id="active-calls" class="empty-list">Keine aktiven Calls</div>
+        </div>
+
+        <div class="panel history-panel wide-panel">
+          <div class="panel-header">
+            <h2>Call History</h2>
+            <div class="panel-actions">
+              <button class="ghost-button" id="export-csv" type="button">CSV</button>
+              <button class="ghost-button" id="export-excel" type="button">Excel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Status</th>
+                  <th>Richtung</th>
+                  <th>Von</th>
+                  <th>Zu</th>
+                </tr>
+              </thead>
+              <tbody id="history-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="insight-popover" class="insight-popover" role="tooltip" hidden></div>
+    <div id="call-popup" class="call-popup" hidden></div>
+
+    <script src="/i18n.js?v=v1.0.0-i18n"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON CTI API Demo</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+        <h1>NFON CTI API Demo</h1>
+        <p id="account-label">Nicht verbunden</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="nav-button" href="/">Übersicht</a>
+        <a class="nav-button" href="/analytics.html">Auswertungen</a>
+        <a class="nav-button is-active" href="/setup.html" aria-current="page">Setup</a>
+        <span class="connection" id="connection-state">Verbinde</span>
+        <label class="demo-switch" title="Demo-Daten zuschalten">
+          <input id="demo-toggle" type="checkbox">
+          <span>Demo</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Anmeldung"></section>
+
+      <section class="setup-layout">
+        <div class="panel setup-storage-panel">
+          <div class="panel-header">
+            <h2>Lokale Speicherung & Sicherung</h2>
+            <button class="secondary-button" id="storage-refresh" type="button">Aktualisieren</button>
+          </div>
+          <div class="storage-backup-grid">
+            <div id="storage-summary" class="setup-summary"></div>
+            <div class="backup-actions">
+              <a class="primary-button link-button" id="backup-download" href="/api/storage/backup">Backup erstellen</a>
+              <label class="secondary-button file-button" for="backup-import">Backup laden</label>
+              <input id="backup-import" class="file-input" type="file" accept="application/json,.json">
+              <div id="backup-message" class="backup-message"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="contacts-layout setup-contacts-layout">
+        <div class="panel contacts-panel">
+          <div class="panel-header">
+            <h2 id="contacts-list-title">Google Kontakte</h2>
+            <input id="contact-filter" type="search" placeholder="Suchen">
+          </div>
+          <div class="contacts-source-grid">
+            <div id="contacts-list" class="contacts-list"></div>
+            <aside class="contacts-source-panel" id="contacts-module-panel">
+              <div class="contacts-source-header">
+                <h3>Kontaktquelle</h3>
+              </div>
+              <div id="contacts-status" class="contacts-status"></div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="call-popup" class="call-popup" hidden></div>
+
+    <script src="/i18n.js?v=v1.0.0-i18n"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

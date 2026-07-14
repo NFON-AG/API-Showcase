@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
+    <style>html.i18n-booting body{visibility:hidden}</style>
+    <title>NFON CTI API Demo</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-title-row">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 11.5 12 4l9 7.5"></path>
+            <path d="M5.5 10.5V20h13v-9.5"></path>
+            <path d="M9.5 20v-6h5v6"></path>
+          </svg>
+        </a>
+        <div>
+        <h1>NFON CTI API Demo</h1>
+        <p id="account-label">Nicht verbunden</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="nav-button is-active" href="/" aria-current="page">Übersicht</a>
+        <a class="nav-button" href="/analytics.html">Auswertungen</a>
+        <a class="nav-button" href="/setup.html">Setup</a>
+        <span class="connection" id="connection-state">Verbinde</span>
+        <label class="demo-switch" title="Demo-Daten zuschalten">
+          <input id="demo-toggle" type="checkbox">
+          <span>Demo</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="metrics" aria-label="Kennzahlen">
+        <div class="metric">
+          <span class="metric-label">Anrufe heute</span>
+          <strong id="metric-events">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Angenommen</span>
+          <strong id="metric-answered">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Aktive Calls</span>
+          <strong id="metric-active">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Nebenstellen</span>
+          <strong id="metric-extensions">0</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Bereit</span>
+          <strong id="metric-available">0</strong>
+        </div>
+      </section>
+
+      <section class="workspace-grid no-dial" id="dashboard-workspace">
+        <div class="panel extensions-panel">
+          <div class="panel-header">
+            <h2>Nebenstellen</h2>
+            <input id="extension-filter" type="search" placeholder="Suchen">
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Nebenstelle</th>
+                  <th>Präsenz</th>
+                  <th>Leitung</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="extensions-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="side-stack is-hidden" id="dial-stack">
+          <form class="panel dial-panel" id="dial-form" hidden>
+            <div class="panel-header">
+              <h2>Click-to-Dial</h2>
+            </div>
+            <label>
+              Von
+              <select id="caller-select"></select>
+            </label>
+            <label>
+              Ziel
+              <input id="callee-input" autocomplete="off" placeholder="+49 oder Nebenstelle">
+            </label>
+            <button class="primary-button" type="submit">Anruf starten</button>
+            <p class="form-message" id="dial-message"></p>
+          </form>
+        </aside>
+      </section>
+
+      <section class="workspace-grid lower-grid events-only-grid">
+        <div class="panel events-panel">
+          <div class="panel-header">
+            <h2>Live Events</h2>
+          </div>
+          <ol id="events-list" class="event-list"></ol>
+        </div>
+      </section>
+    </main>
+
+    <div id="insight-popover" class="insight-popover" role="tooltip" hidden></div>
+    <div id="call-popup" class="call-popup" hidden></div>
+
+    <script src="/i18n.js?v=v1.0.0-i18n"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
