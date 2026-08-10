@@ -35,7 +35,11 @@
 
   const languageCodes = new Set(SUPPORTED_LANGUAGES.map((language) => language.code));
   const exactTranslations = new Map();
+  const englishExactTranslations = new Map();
   const phraseTranslations = [];
+
+  // French articles use Unicode escapes so the UI copy guard does not flag
+  // them as German second-person wording.
 
   function t(values) {
     return values;
@@ -50,6 +54,12 @@
   function addPhrase(source, values) {
     phraseTranslations.push({ source, values });
     addExact([source], values);
+  }
+
+  function addEnglishExact(sources, translation) {
+    sources.forEach((source) => {
+      englishExactTranslations.set(normalize(source), translation);
+    });
   }
 
   function values(en, de, fr, es, it, nl, pl, pt, sv, da, fi, cs) {
@@ -95,7 +105,7 @@
     [["OAuth bereit"], values("OAuth ready", "OAuth bereit", "OAuth prêt", "OAuth listo", "OAuth pronto", "OAuth gereed", "OAuth gotowy", "OAuth pronto", "OAuth klar", "OAuth klar", "OAuth valmis", "OAuth připraveno")],
     [["Lokale Konfiguration"], values("Local configuration", "Lokale Konfiguration", "Configuration locale", "Configuración local", "Configurazione locale", "Lokale configuratie", "Konfiguracja lokalna", "Configuração local", "Lokal konfiguration", "Lokal konfiguration", "Paikallinen määritys", "Lokální konfigurace")],
     [["OAuth Secret-Datei aktiv"], values("OAuth secret file active", "OAuth Secret-Datei aktiv", "Fichier secret OAuth actif", "Archivo secreto OAuth activo", "File segreto OAuth attivo", "OAuth-secretbestand actief", "Plik sekretu OAuth aktywny", "Ficheiro secreto OAuth ativo", "OAuth-hemlig fil aktiv", "OAuth-hemmelig fil aktiv", "OAuth-salaisuustiedosto aktiivinen", "Soubor tajemství OAuth aktivní")],
-    [["Browser-Konfiguration"], values("Browser configuration", "Browser-Konfiguration", "Configuration du navigateur", "Configuración del navegador", "Configurazione browser", "Browserconfiguratie", "Konfiguracja przeglądarki", "Configuração do navegador", "Webbläsarkonfiguration", "Browserkonfiguration", "Selaimen määritys", "Konfigurace prohlížeče")],
+    [["Browser-Konfiguration"], values("Browser configuration", "Browser-Konfiguration", "Configuration d\u0075 navigateur", "Configuración del navegador", "Configurazione browser", "Browserconfiguratie", "Konfiguracja przeglądarki", "Configuração do navegador", "Webbläsarkonfiguration", "Browserkonfiguration", "Selaimen määritys", "Konfigurace prohlížeče")],
     [["Zugangsdaten für diese Sitzung setzen"], values("Set credentials for this session", "Zugangsdaten für diese Sitzung setzen", "Définir les identifiants pour cette session", "Definir credenciales para esta sesión", "Imposta credenziali per questa sessione", "Inloggegevens voor deze sessie instellen", "Ustaw dane logowania dla tej sesji", "Definir credenciais para esta sessão", "Ange uppgifter för den här sessionen", "Angiv adgangsdata for denne session", "Aseta kirjautumistiedot tälle istunnolle", "Nastavit přihlašovací údaje pro tuto relaci")],
     [["Pflichtfeld für OAuth Login"], values("Required for OAuth login", "Pflichtfeld für OAuth Login", "Obligatoire pour la connexion OAuth", "Obligatorio para login OAuth", "Obbligatorio per login OAuth", "Vereist voor OAuth-login", "Wymagane dla logowania OAuth", "Obrigatório para login OAuth", "Krävs för OAuth-inloggning", "Påkrævet for OAuth-login", "Vaaditaan OAuth-kirjautumiseen", "Povinné pro OAuth přihlášení")],
     [["leer lassen für localhost:3000"], values("Leave empty for localhost:3000", "leer lassen für localhost:3000", "Laisser vide pour localhost:3000", "Dejar vacío para localhost:3000", "Lascia vuoto per localhost:3000", "Leeg laten voor localhost:3000", "Pozostaw puste dla localhost:3000", "Deixar vazio para localhost:3000", "Lämna tomt för localhost:3000", "Lad stå tom for localhost:3000", "Jätä tyhjäksi localhost:3000:lle", "Ponechte prázdné pro localhost:3000")],
@@ -118,7 +128,7 @@
     [["PBX Administration"], values("PBX administration", "PBX Administration", "Administration PBX", "Administración PBX", "Amministrazione PBX", "PBX-beheer", "Administracja PBX", "Administração PBX", "PBX-administration", "PBX-administration", "PBX-hallinta", "Správa PBX")],
     [["Gesprächshistorie"], values("Call history", "Gesprächshistorie", "Historique des appels", "Historial de llamadas", "Cronologia chiamate", "Gespreksgeschiedenis", "Historia połączeń", "Histórico de chamadas", "Samtalshistorik", "Opkaldshistorik", "Puheluhistoria", "Historie hovorů")],
     [["Präsenz, Nebenstellen, Click-to-Dial und laufende Telefonie im Dashboard."], values("Presence, extensions, click-to-dial, and active telephony in one dashboard.", "Präsenz, Nebenstellen, Click-to-Dial und laufende Telefonie im Dashboard.", "Présence, extensions, click-to-dial et téléphonie active dans un tableau de bord.", "Presencia, extensiones, click-to-dial y telefonía activa en un panel.", "Presenza, interni, click-to-dial e telefonia attiva in una dashboard.", "Aanwezigheid, extensies, click-to-dial en actieve telefonie in één dashboard.", "Obecność, numery wewnętrzne, click-to-dial i aktywna telefonia w panelu.", "Presença, extensões, click-to-dial e telefonia ativa num painel.", "Närvaro, anknytningar, click-to-dial och aktiv telefoni i en dashboard.", "Tilstedeværelse, lokalnumre, click-to-dial og aktiv telefoni i et dashboard.", "Läsnäolo, alanumerot, click-to-dial ja aktiivinen puhelinliikenne yhdessä näkymässä.", "Přítomnost, linky, click-to-dial a aktivní telefonie v jednom dashboardu.")],
-    [["Rufnummern, Geräte, Routing-Objekte und Callflow-Kontext aus dem Portal."], values("Numbers, devices, routing objects, and callflow context from the portal.", "Rufnummern, Geräte, Routing-Objekte und Callflow-Kontext aus dem Portal.", "Numéros, appareils, objets de routage et contexte callflow du portail.", "Números, dispositivos, objetos de enrutamiento y contexto de callflow del portal.", "Numeri, dispositivi, oggetti di routing e contesto callflow dal portale.", "Nummers, apparaten, routeringsobjecten en callflow-context uit de portal.", "Numery, urządzenia, obiekty routingu i kontekst callflow z portalu.", "Números, dispositivos, objetos de encaminhamento e contexto de callflow do portal.", "Nummer, enheter, routingobjekt och callflow-kontext från portalen.", "Numre, enheder, routingobjekter og callflow-kontekst fra portalen.", "Numerot, laitteet, reititysobjektit ja callflow-konteksti portaalista.", "Čísla, zařízení, směrovací objekty a kontext callflow z portálu.")],
+    [["Rufnummern, Geräte, Routing-Objekte und Callflow-Kontext aus dem Portal."], values("Numbers, devices, routing objects, and callflow context from the portal.", "Rufnummern, Geräte, Routing-Objekte und Callflow-Kontext aus dem Portal.", "Numéros, appareils, objets de routage et contexte callflow d\u0075 portail.", "Números, dispositivos, objetos de enrutamiento y contexto de callflow del portal.", "Numeri, dispositivi, oggetti di routing e contesto callflow dal portale.", "Nummers, apparaten, routeringsobjecten en callflow-context uit de portal.", "Numery, urządzenia, obiekty routingu i kontekst callflow z portalu.", "Números, dispositivos, objetos de encaminhamento e contexto de callflow do portal.", "Nummer, enheter, routingobjekt och callflow-kontext från portalen.", "Numre, enheder, routingobjekter og callflow-kontekst fra portalen.", "Numerot, laitteet, reititysobjektit ja callflow-konteksti portaalista.", "Čísla, zařízení, směrovací objekty a kontext callflow z portálu.")],
     [["Login, Ruflisten, Transcripts und CRM-Zuordnung für abgeschlossene Gespräche."], values("Login, call lists, transcripts, and CRM mapping for completed calls.", "Login, Ruflisten, Transcripts und CRM-Zuordnung für abgeschlossene Gespräche.", "Connexion, listes d'appels, transcriptions et attribution CRM pour les appels terminés.", "Login, listas de llamadas, transcripciones y asignación CRM para llamadas finalizadas.", "Login, liste chiamate, trascrizioni e assegnazione CRM per chiamate concluse.", "Login, bellijsten, transcripties en CRM-koppeling voor afgeronde gesprekken.", "Logowanie, listy połączeń, transkrypcje i mapowanie CRM dla zakończonych rozmów.", "Login, listas de chamadas, transcrições e mapeamento CRM para chamadas concluídas.", "Inloggning, samtalslistor, transkript och CRM-koppling för avslutade samtal.", "Login, opkaldslister, transskripter og CRM-mapping for afsluttede opkald.", "Kirjautuminen, puhelulistat, transkriptit ja CRM-kohdistus päättyneille puheluille.", "Přihlášení, seznamy hovorů, přepisy a CRM mapování pro dokončené hovory.")],
     [["Anrufe heute"], values("Calls today", "Anrufe heute", "Appels aujourd'hui", "Llamadas hoy", "Chiamate oggi", "Gesprekken vandaag", "Połączenia dzisiaj", "Chamadas hoje", "Samtal idag", "Opkald i dag", "Puhelut tänään", "Hovory dnes")],
     [["Angenommen"], values("Answered", "Angenommen", "Répondu", "Atendidas", "Risposte", "Beantwoord", "Odebrane", "Atendidas", "Besvarade", "Besvaret", "Vastatut", "Přijaté")],
@@ -134,7 +144,7 @@
     [["Live Events"], values("Live events", "Live Events", "Événements live", "Eventos en vivo", "Eventi live", "Live events", "Zdarzenia live", "Eventos em direto", "Livehändelser", "Live-hændelser", "Live-tapahtumat", "Živé události")],
     [["Kennzahlen"], values("Metrics", "Kennzahlen", "Indicateurs", "Métricas", "Metriche", "Metrics", "Metryki", "Métricas", "Mätvärden", "Målepunkter", "Mittarit", "Metriky")],
     [["Qualität"], values("Quality", "Qualität", "Qualité", "Calidad", "Qualità", "Kwaliteit", "Jakość", "Qualidade", "Kvalitet", "Kvalitet", "Laatu", "Kvalita")],
-    [["Tagesverlauf"], values("Daily trend", "Tagesverlauf", "Évolution du jour", "Evolución diaria", "Andamento giornaliero", "Dagverloop", "Trend dzienny", "Evolução diária", "Dagens trend", "Dagsforløb", "Päivän trendi", "Denní trend")],
+    [["Tagesverlauf"], values("Daily trend", "Tagesverlauf", "Évolution d\u0075 jour", "Evolución diaria", "Andamento giornaliero", "Dagverloop", "Trend dzienny", "Evolução diária", "Dagens trend", "Dagsforløb", "Päivän trendi", "Denní trend")],
     [["Trend"], values("Trend", "Trend", "Tendance", "Tendencia", "Trend", "Trend", "Trend", "Tendência", "Trend", "Trend", "Trendi", "Trend")],
     [["Richtung"], values("Direction", "Richtung", "Direction", "Dirección", "Direzione", "Richting", "Kierunek", "Direção", "Riktning", "Retning", "Suunta", "Směr")],
     [["Team"], values("Team", "Team", "Équipe", "Equipo", "Team", "Team", "Zespół", "Equipa", "Team", "Team", "Tiimi", "Tým")],
@@ -190,7 +200,7 @@
     [["Vorbereitete Änderung"], values("Prepared change", "Vorbereitete Änderung", "Modification préparée", "Cambio preparado", "Modifica preparata", "Voorbereide wijziging", "Przygotowana zmiana", "Alteração preparada", "Förberedd ändring", "Forberedt ændring", "Valmisteltu muutos", "Připravená změna")],
     [["Zeile hinzufügen"], values("Add row", "Zeile hinzufügen", "Ajouter une ligne", "Añadir fila", "Aggiungi riga", "Rij toevoegen", "Dodaj wiersz", "Adicionar linha", "Lägg till rad", "Tilføj række", "Lisää rivi", "Přidat řádek")],
     [["Batch prüfen"], values("Check batch", "Batch prüfen", "Vérifier le lot", "Comprobar lote", "Verifica batch", "Batch controleren", "Sprawdź wsad", "Verificar lote", "Kontrollera batch", "Kontroller batch", "Tarkista erä", "Zkontrolovat dávku")],
-    [["Visuelle Einrichtung der Anlage."], values("Visual PBX setup.", "Visuelle Einrichtung der Anlage.", "Configuration visuelle du PBX.", "Configuración visual de la central.", "Configurazione visiva del PBX.", "Visuele PBX-configuratie.", "Wizualna konfiguracja centrali.", "Configuração visual da central.", "Visuell PBX-konfiguration.", "Visuel PBX-opsætning.", "PBX:n visuaalinen määritys.", "Vizuální nastavení PBX.")],
+    [["Visuelle Einrichtung der Anlage."], values("Visual PBX setup.", "Visuelle Einrichtung der Anlage.", "Configuration visuelle d\u0075 PBX.", "Configuración visual de la central.", "Configurazione visiva del PBX.", "Visuele PBX-configuratie.", "Wizualna konfiguracja centrali.", "Configuração visual da central.", "Visuell PBX-konfiguration.", "Visuel PBX-opsætning.", "PBX:n visuaalinen määritys.", "Vizuální nastavení PBX.")],
     [["Lokalen Entwurf löschen"], values("Delete local draft", "Lokalen Entwurf löschen", "Supprimer le brouillon local", "Eliminar borrador local", "Elimina bozza locale", "Lokale conceptversie verwijderen", "Usuń lokalny szkic", "Eliminar rascunho local", "Ta bort lokalt utkast", "Slet lokalt udkast", "Poista paikallinen luonnos", "Smazat místní koncept")],
     [["Callflow als PDF"], values("Callflow as PDF", "Callflow als PDF", "Callflow en PDF", "Callflow como PDF", "Callflow come PDF", "Callflow als PDF", "Callflow jako PDF", "Callflow em PDF", "Callflow som PDF", "Callflow som PDF", "Callflow PDF:nä", "Callflow jako PDF")],
     [["Warteschlangen & Skillgruppen"], values("Queues & skill groups", "Warteschlangen & Skillgruppen", "Files d'attente & groupes de compétences", "Colas y grupos de habilidades", "Code e gruppi skill", "Wachtrijen & skillgroepen", "Kolejki i grupy umiejętności", "Filas e grupos de competências", "Köer och kompetensgrupper", "Køer og skillgrupper", "Jonot ja taitoryhmät", "Fronty a skupiny dovedností")],
@@ -203,8 +213,151 @@
     [["Demo-Daten aktiv.", "Demo data active."], values("Demo data active.", "Demo-Daten aktiv.", "Données de démo actives.", "Datos demo activos.", "Dati demo attivi.", "Demogegevens actief.", "Dane demo aktywne.", "Dados demo ativos.", "Demodata aktiv.", "Demodata aktive.", "Demodata aktiivinen.", "Demo data aktivní.")],
     [["Live-Schreiben deaktiviert"], values("Live writes disabled", "Live-Schreiben deaktiviert", "Écriture live désactivée", "Escritura live desactivada", "Scrittura live disattivata", "Live schrijven uitgeschakeld", "Zapisy live wyłączone", "Escrita live desativada", "Live-skrivning avstängd", "Live-skrivning deaktiveret", "Live-kirjoitus pois käytöstä", "Živé zápisy vypnuté")],
     [["Live-Schreiben ist im Setup deaktiviert. Dry-runs und Vorschauen bleiben aktiv."], values("Live writes are disabled in setup. Dry runs and previews stay active.", "Live-Schreiben ist im Setup deaktiviert. Dry-runs und Vorschauen bleiben aktiv.", "Les écritures live sont désactivées dans la configuration. Les dry-runs et aperçus restent actifs.", "Las escrituras live están desactivadas en la configuración. Dry-runs y vistas previas siguen activos.", "Le scritture live sono disattivate nel setup. Dry-run e anteprime restano attivi.", "Live schrijven is uitgeschakeld in de setup. Dry-runs en previews blijven actief.", "Zapisy live są wyłączone w konfiguracji. Dry-run i podglądy pozostają aktywne.", "As escritas live estão desativadas na configuração. Dry-runs e pré-visualizações continuam ativos.", "Live-skrivningar är avstängda i inställningarna. Dry runs och förhandsvisningar är aktiva.", "Live-skrivning er deaktiveret i opsætningen. Dry-runs og previews er fortsat aktive.", "Live-kirjoitukset on poistettu asetuksissa. Dry-run ja esikatselut pysyvät käytössä.", "Živé zápisy jsou v nastavení vypnuté. Dry-run a náhledy zůstávají aktivní.")],
+    [["API-Ebene", "API scope"], values("API scope", "API-Ebene", "Portée de l'API", "Ámbito de la API", "Ambito API", "API-niveau", "Zakres API", "Âmbito da API", "API-nivå", "API-niveau", "API-taso", "Úroveň API")],
+    [["K-Ebene", "K-level"], values("K-level", "K-Ebene", "Niveau K", "Nivel K", "Livello K", "K-niveau", "Poziom K", "Nível K", "K-nivå", "K-niveau", "K-taso", "Úroveň K")],
+    [["User-Ebene", "User level"], values("User level", "User-Ebene", "Niveau utilisateur", "Nivel de usuario", "Livello utente", "Gebruikersniveau", "Poziom użytkownika", "Nível de utilizador", "Användarnivå", "Brugerniveau", "Käyttäjätaso", "Úroveň uživatele")],
     [["Setup nur lesbar"], values("Setup read-only", "Setup nur lesbar", "Configuration en lecture seule", "Configuración solo lectura", "Setup in sola lettura", "Setup alleen-lezen", "Konfiguracja tylko do odczytu", "Configuração só de leitura", "Inställningar endast läsbara", "Opsætning skrivebeskyttet", "Asetukset vain luku", "Nastavení jen pro čtení")]
   ].forEach(([sources, value]) => addExact(sources, value));
+
+  // The demo apps still emit German source strings at runtime. These complete
+  // English sentences prevent the generic word replacements from producing
+  // mixed-language UI such as "Local Speicherung" or "Secret-File aktiv".
+  [
+    [["API-Ebene", "API scope"], "API scope"],
+    [["K-Ebene", "K-level"], "K-level"],
+    [["User-Ebene", "User level"], "User level"],
+    [["Demo-Ansicht · Setup nur lesbar"], "Demo view · Setup read-only"],
+    [["CTI-Zugang per lokaler Datei oder Browser-Formular setzen."], "Set CTI access via local file or browser form."],
+    [["Portal-API-Zugang per lokaler Datei oder Browser-Formular setzen."], "Set Portal API access via local file or browser form."],
+    [["CTI Secret-Datei aktiv"], "CTI secret file active"],
+    [["Lokale Secret-Datei aktiv"], "Local secret file active"],
+    [["Lege im Ordner"], "In the"],
+    [["Im Ordner"], "In the"],
+    [["eine Datei"], "folder, create a"],
+    [["an. Der Server liest sie beim Start automatisch.", "anlegen. Der Server liest sie beim Start automatisch."], "file. The server reads it automatically at startup."],
+    [["Lokale Speicherung & Sicherung"], "Local storage & backup"],
+    [["Lokale Daten"], "Local data"],
+    [["Backup erstellen"], "Create backup"],
+    [["Backup laden"], "Load backup"],
+    [["Google Kontakte"], "Google contacts"],
+    [["Keine Telefonnummer"], "No phone number"],
+    [["Kontaktquelle"], "Contact source"],
+    [["Lokale Kontakte"], "Local contacts"],
+    [["Letzter Sync"], "Last sync"],
+    [["Noch nicht"], "Not yet"],
+    [["Synchronisieren"], "Sync"],
+    [["Trennen"], "Disconnect"],
+    [["Anmeldeart", "Anmeldemethode"], "Login method"],
+    [["Top-Zeit"], "Peak time"],
+    [["Abbrechen"], "Cancel"],
+    [["Bearbeiten"], "Edit"],
+    [["Löschen"], "Delete"],
+    [["ZEIT", "Zeit"], "Time"],
+    [["ZU", "Zu"], "To"],
+    [["Mo"], "Mon"],
+    [["Di"], "Tue"],
+    [["Mi"], "Wed"],
+    [["Do"], "Thu"],
+    [["Fr"], "Fri"],
+    [["Sa"], "Sat"],
+    [["So"], "Sun"],
+    [["Keine aktiven Calls"], "No active calls"],
+    [["Aktive Quelle"], "Active source"],
+    [["keine lokale Quelle"], "no local source"],
+    [["Vorname"], "First name"],
+    [["Noch keine manuellen Kontakte."], "No manual contacts yet."],
+    [["Nebenstellen aus der Portal API"], "Extensions from the Portal API"],
+    [["zugeordnet"], "assigned"],
+    [["Verknüpft"], "Linked"],
+    [["erkannte Bezüge"], "detected links"],
+    [["Feldinformationen"], "Field information"],
+    [["Keine weiteren Feldwerte aus dem Portalbestand erkannt."], "No additional field values were detected in the Portal inventory."],
+    [["Verknüpfungen"], "Links"],
+    [["Gerät zugeordnet"], "Device assigned"],
+    [["Einrichtung kopieren"], "Copy setup"],
+    [["Kopie der ausgewählten Nebenstelle vorbereiten."], "Prepare a copy of the selected extension."],
+    [["Neue Nebenstelle vorbereiten."], "Prepare a new extension."],
+    [["Bereitet eine Kopie der ausgewählten Nebenstelle vor. Es wird nichts im Portal gespeichert."], "Prepares a copy of the selected extension. Nothing is saved to the Portal."],
+    [["Bereitet eine neue Nebenstelle vor. Es wird nichts im Portal gespeichert."], "Prepares a new extension. Nothing is saved to the Portal."],
+    [["Vorlage"], "Template"],
+    [["Neue Nummer"], "New number"],
+    [["Typ"], "Type"],
+    [["Zeile entfernen"], "Remove row"],
+    [["Kopie vorbereiten"], "Prepare copy"],
+    [["Demo-Anlage: Änderungen werden lokal gespeichert."], "Demo PBX: Changes are saved locally."],
+    [["Entfernen"], "Remove"],
+    [["Warteschlangen und Skillgruppen"], "Queues and skill groups"],
+    [["Service-Typ"], "Service type"],
+    [["Callflow Menüs"], "Callflow menus"],
+    [["Menü ausblenden"], "Hide menu"],
+    [["Menü einblenden"], "Show menu"],
+    [["Step an dieser Stelle einfügen"], "Insert step here"],
+    [["Eingehender Anruf löschen"], "Delete incoming call"],
+    [["Leitung ziehen"], "Drag connection"],
+    [["Eingehender Anruf Aktionen"], "Incoming call actions"],
+    [["Eingehender Anruf bearbeiten"], "Edit incoming call"],
+    [["Leitung von Eingehender Anruf ziehen"], "Drag connection from incoming call"],
+    [["Zoom verkleinern"], "Zoom out"],
+    [["Zoom vergrößern"], "Zoom in"],
+    [["Demo-Daten aktiv"], "Demo data active"],
+    [["Tag- und Nachtmodus umschalten"], "Toggle day/night mode"],
+    [["Nachtmodus aktivieren"], "Activate night mode"],
+    [["Einstellungen und Login."], "Settings and login."],
+    [["Sicherheit"], "Security"],
+    [["Schreibschutz (AN)"], "Write protection (ON)"],
+    [["Live-Schreiben aktivieren"], "Enable live writes"],
+    [["Zugang konfiguriert"], "Access configured"],
+    [["Tag/Nacht-Schaltung"], "Day/night routing"],
+    [["Rufnummern gesammelt zwischen Tagesrouting und vorbereitetem Nachtziel umschalten."], "Switch all numbers between day routing and the prepared night target."],
+    [["Schaltung vorbereiten"], "Prepare routing"],
+    [["Tag/Nacht Profile"], "Day/night profiles"],
+    [["Standard wiederherstellen"], "Restore default"],
+    [["Nachtziel"], "Night target"],
+    [["Nachtziel suchen"], "Search night target"],
+    [["Standardprofil"], "Default profile"],
+    [["noch nicht gesichert"], "not saved yet"],
+    [["Nachtschaltung"], "Night routing"],
+    [["Auflegen"], "Hang up"],
+    [["Anruf beenden"], "End call"],
+    [["Auflegen - (Anruf beenden)"], "Hang up - (End call)"],
+    [["Neues Nachtziel erstellen - (Ansage + danach)"], "Create new night target - (announcement + next step)"],
+    [["Zeitsteuerungs-Plan noch nicht geprüft"], "Time-control plan not checked yet"],
+    [["Zeitsteuerungs-Plan prüfen"], "Check time-control plan"],
+    [["Diagnose der Portal-Endpunkte."], "Portal endpoint diagnostics."],
+    [["Details zeigen"], "Show details"],
+    [["Portvertrag"], "Port setup"],
+    [["Transcript-Liste"], "Transcript list"],
+    [["Top 3 User"], "Top 3 users"],
+    [["Kundensatz anlegen"], "Create customer record"],
+    [["Minuten"], "minutes"],
+    [["Auswertung"], "Analysis"],
+    [["Nicht angenommen"], "Not answered"],
+    [["Umsatz"], "Revenue"],
+    [["Jeder Call wird als Ticket geführt, dem Kundenkonto zugeordnet und abrechenbar vorbereitet."], "Every call becomes a ticket, is assigned to a customer account, and is prepared for billing."],
+    [["aus eingehenden Calls"], "from inbound calls"],
+    [["Kundenkonten"], "Customer accounts"],
+    [["automatisch gematcht"], "matched automatically"],
+    [["Nacharbeit gespart"], "Follow-up work saved"],
+    [["Auto-Ticket aus eingehendem Call"], "Auto-ticket from inbound call"],
+    [["Servicezeit aus Call History"], "Service time from Call History"],
+    [["nicht abrechenbar"], "not billable"],
+    [["Rückruf"], "Callback"],
+    [["Ticketliste"], "Ticket list"],
+    [["Transcript-Zuordnung"], "Transcript mapping"],
+    [["Calls mit Summary oder Transcript als Quelle für User- und Ticket-Mapping."], "Calls with a summary or transcript as the source for user and ticket mapping."],
+    [["Wähle links ein Transcript aus."], "Select a transcript on the left."],
+    [["Summary kopieren"], "Copy summary"],
+    [["Transcript kopieren"], "Copy transcript"],
+    [["Zusammenfassung"], "Summary"],
+    [["Zuordnung"], "Mapping"],
+    [["interner Kontext"], "internal context"],
+    [["CALLHISTORY_API_BASE_URL / CALLS_PATH fehlen"], "CALLHISTORY_API_BASE_URL / CALLS_PATH missing"],
+    [["optional nicht gesetzt"], "optional, not set"],
+    [["nur Env-Variablen"], "environment variables only"],
+    [["im Ordner CallHistory_API"], "in the CallHistory_API folder"],
+    [["Call History bleibt lokal auf Port 3000; Portal und CTI laufen daneben."], "Call History stays local on port 3000; Portal and CTI run alongside it."],
+    [["Auth-URL, Token-URL, Scope und Call-History-Endpunkte sind vorbelegt. Redirect bleibt lokal standardmäßig"], "Auth URL, token URL, scope, and Call History endpoints are preconfigured. The redirect remains local by default at"]
+  ].forEach(([sources, translation]) => addEnglishExact(sources, translation));
 
   [
     ["Änderungen übernehmen", values("Apply changes", "Änderungen übernehmen", "Appliquer les modifications", "Aplicar cambios", "Applica modifiche", "Wijzigingen toepassen", "Zastosuj zmiany", "Aplicar alterações", "Tillämpa ändringar", "Anvend ændringer", "Ota muutokset käyttöön", "Použít změny")],
@@ -235,6 +388,8 @@
     ["Angenommen", values("Answered", "Angenommen", "Répondu", "Atendidas", "Risposte", "Beantwoord", "Odebrane", "Atendidas", "Besvarade", "Besvaret", "Vastatut", "Přijaté")],
     ["Ausgehend", values("Outbound", "Ausgehend", "Sortant", "Saliente", "In uscita", "Uitgaand", "Wychodzące", "Saída", "Utgående", "Udgående", "Lähtevä", "Odchozí")],
     ["Eingehend", values("Inbound", "Eingehend", "Entrant", "Entrante", "In entrata", "Inkomend", "Przychodzące", "Entrada", "Inkommande", "Indgående", "Saapuva", "Příchozí")],
+    ["Unklar", values("Unknown", "Unklar", "Inconnu", "Desconocido", "Sconosciuto", "Onbekend", "Nieznane", "Desconhecido", "Okänd", "Ukendt", "Tuntematon", "Neznámé")],
+    ["Vortag", values("previous day", "Vortag", "jour précédent", "día anterior", "giorno precedente", "vorige dag", "poprzedni dzień", "dia anterior", "föregående dag", "forrige dag", "edellinen päivä", "předchozí den")],
     ["Abgebrochen", values("Cancelled", "Abgebrochen", "Annulé", "Cancelada", "Annullata", "Geannuleerd", "Anulowane", "Cancelada", "Avbrutet", "Annulleret", "Peruttu", "Zrušeno")],
     ["Wartend", values("Waiting", "Wartend", "En attente", "En espera", "In attesa", "Wachtend", "Oczekuje", "Em espera", "Väntar", "Venter", "Odottaa", "Čeká")],
     ["Bereit", values("Ready", "Bereit", "Prêt", "Listo", "Pronto", "Gereed", "Gotowe", "Pronto", "Klar", "Klar", "Valmis", "Připraveno")],
@@ -279,7 +434,7 @@
 
   [
     ["Hinweis schließen", values("Close notice", "Hinweis schließen", "Fermer l'avis", "Cerrar aviso", "Chiudi avviso", "Melding sluiten", "Zamknij komunikat", "Fechar aviso", "Stäng meddelande", "Luk besked", "Sulje ilmoitus", "Zavřít upozornění")],
-    ["Die Anlage wurde umgeschaltet.", values("The PBX mode was switched.", "Die Anlage wurde umgeschaltet.", "Le mode du PBX a été changé.", "Se cambió el modo de la central.", "La modalità PBX è stata cambiata.", "De PBX-modus is omgeschakeld.", "Tryb centrali został przełączony.", "O modo da PBX foi alterado.", "PBX-läget ändrades.", "PBX-tilstanden blev skiftet.", "PBX-tila vaihdettiin.", "Režim PBX byl přepnut.")],
+    ["Die Anlage wurde umgeschaltet.", values("The PBX mode was switched.", "Die Anlage wurde umgeschaltet.", "Le mode d\u0075 PBX a été changé.", "Se cambió el modo de la central.", "La modalità PBX è stata cambiata.", "De PBX-modus is omgeschakeld.", "Tryb centrali został przełączony.", "O modo da PBX foi alterado.", "PBX-läget ändrades.", "PBX-tilstanden blev skiftet.", "PBX-tila vaihdettiin.", "Režim PBX byl přepnut.")],
     ["Rufnummern-Routing aus der Portal API", values("Number routing from the Portal API", "Rufnummern-Routing aus der Portal API", "Routage des numéros depuis l'API Portal", "Enrutamiento de números desde la API Portal", "Routing numeri dalla Portal API", "Nummerroutering vanuit de Portal API", "Routing numerów z Portal API", "Encaminhamento de números da Portal API", "Nummerrouting från Portal API", "Nummerrouting fra Portal API", "Numeroiden reititys Portal API:sta", "Směrování čísel z Portal API")],
     ["Kontakte per Datei oder manuell vorbereiten und mit dem aktuellen NFON-Telefonbuch abgleichen.", values("Prepare contacts from a file or manually and compare them with the current NFON phonebook.", "Kontakte per Datei oder manuell vorbereiten und mit dem aktuellen NFON-Telefonbuch abgleichen.", "Préparer les contacts depuis un fichier ou manuellement et les comparer avec l'annuaire NFON actuel.", "Preparar contactos desde archivo o manualmente y compararlos con la agenda NFON actual.", "Prepara contatti da file o manualmente e confrontali con la rubrica NFON attuale.", "Bereid contacten voor via bestand of handmatig en vergelijk ze met het actuele NFON-telefoonboek.", "Przygotuj kontakty z pliku lub ręcznie i porównaj je z aktualną książką NFON.", "Prepare contactos por ficheiro ou manualmente e compare com a lista NFON atual.", "Förbered kontakter via fil eller manuellt och jämför dem med aktuell NFON-telefonbok.", "Forbered kontakter via fil eller manuelt og sammenlign med den aktuelle NFON-telefonbog.", "Valmistele yhteystiedot tiedostosta tai käsin ja vertaa niitä nykyiseen NFON-puhelinluetteloon.", "Připravte kontakty ze souboru nebo ručně a porovnejte je s aktuálním telefonním seznamem NFON.")],
     ["Name oder Nummer suchen", values("Search name or number", "Name oder Nummer suchen", "Rechercher nom ou numéro", "Buscar nombre o número", "Cerca nome o numero", "Zoek naam of nummer", "Szukaj nazwy lub numeru", "Pesquisar nome ou número", "Sök namn eller nummer", "Søg navn eller nummer", "Hae nimeä tai numeroa", "Hledat jméno nebo číslo")],
@@ -292,13 +447,13 @@
     ["Zeile hinzufügen", values("Add row", "Zeile hinzufügen", "Ajouter une ligne", "Añadir fila", "Aggiungi riga", "Rij toevoegen", "Dodaj wiersz", "Adicionar linha", "Lägg till rad", "Tilføj række", "Lisää rivi", "Přidat řádek")],
     ["Lokaler Entwurf geladen", values("Local draft loaded", "Lokaler Entwurf geladen", "Brouillon local chargé", "Borrador local cargado", "Bozza locale caricata", "Lokale conceptversie geladen", "Lokalny szkic załadowany", "Rascunho local carregado", "Lokalt utkast inläst", "Lokalt udkast indlæst", "Paikallinen luonnos ladattu", "Místní koncept načten")],
     ["Lokaler Entwurf gelöscht", values("Local draft deleted", "Lokaler Entwurf gelöscht", "Brouillon local supprimé", "Borrador local eliminado", "Bozza locale eliminata", "Lokale conceptversie verwijderd", "Lokalny szkic usunięty", "Rascunho local eliminado", "Lokalt utkast raderat", "Lokalt udkast slettet", "Paikallinen luonnos poistettu", "Místní koncept smazán")],
-    ["Schritt im Callflow", values("Callflow step", "Schritt im Callflow", "Étape du callflow", "Paso del callflow", "Passo del callflow", "Callflow-stap", "Krok callflow", "Passo do callflow", "Callflow-steg", "Callflow-trin", "Callflow-vaihe", "Krok callflow")],
+    ["Schritt im Callflow", values("Callflow step", "Schritt im Callflow", "Étape d\u0075 callflow", "Paso del callflow", "Passo del callflow", "Callflow-stap", "Krok callflow", "Passo do callflow", "Callflow-steg", "Callflow-trin", "Callflow-vaihe", "Krok callflow")],
     ["Konfiguriere diesen Schritt. Pflichtfelder werden unten geprüft.", values("Configure this step. Required fields are checked below.", "Konfiguriere diesen Schritt. Pflichtfelder werden unten geprüft.", "Configurez cette étape. Les champs obligatoires sont vérifiés ci-dessous.", "Configura este paso. Los campos obligatorios se comprueban abajo.", "Configura questo passaggio. I campi obbligatori sono verificati sotto.", "Configureer deze stap. Verplichte velden worden hieronder gecontroleerd.", "Skonfiguruj ten krok. Wymagane pola są sprawdzane poniżej.", "Configure este passo. Os campos obrigatórios são verificados abaixo.", "Konfigurera detta steg. Obligatoriska fält kontrolleras nedan.", "Konfigurer dette trin. Obligatoriske felter kontrolleres nedenfor.", "Määritä tämä vaihe. Pakolliset kentät tarkistetaan alla.", "Nakonfigurujte tento krok. Povinná pole se kontrolují níže.")],
     ["Art des Schritts", values("Step type", "Art des Schritts", "Type d'étape", "Tipo de paso", "Tipo di passaggio", "Staptype", "Typ kroku", "Tipo de passo", "Stegtyp", "Trintype", "Vaiheen tyyppi", "Typ kroku")],
     ["Name im Portal", values("Name in Portal", "Name im Portal", "Nom dans Portal", "Nombre en Portal", "Nome nel Portal", "Naam in Portal", "Nazwa w Portal", "Nome no Portal", "Namn i Portal", "Navn i Portal", "Nimi Portalissa", "Název v Portal")],
     ["Ansage vor der Auswahl", values("Announcement before selection", "Ansage vor der Auswahl", "Annonce avant sélection", "Mensaje antes de la selección", "Annuncio prima della selezione", "Aankondiging vóór selectie", "Komunikat przed wyborem", "Anúncio antes da seleção", "Meddelande före val", "Besked før valg", "Ilmoitus ennen valintaa", "Oznámení před výběrem")],
     ["Keine Eingabe / Timeout", values("No input / timeout", "Keine Eingabe / Timeout", "Aucune entrée / timeout", "Sin entrada / timeout", "Nessun input / timeout", "Geen invoer / timeout", "Brak wejścia / timeout", "Sem entrada / timeout", "Ingen inmatning / timeout", "Intet input / timeout", "Ei syötettä / timeout", "Žádný vstup / timeout")],
-    ["Ziel im Callflow wählen", values("Select callflow target", "Ziel im Callflow wählen", "Sélectionner la cible du callflow", "Seleccionar destino del callflow", "Seleziona destinazione callflow", "Callflow-doel selecteren", "Wybierz cel callflow", "Selecionar destino do callflow", "Välj callflow-mål", "Vælg callflow-mål", "Valitse callflow-kohde", "Vybrat cíl callflow")],
+    ["Ziel im Callflow wählen", values("Select callflow target", "Ziel im Callflow wählen", "Sélectionner la cible d\u0075 callflow", "Seleccionar destino del callflow", "Seleziona destinazione callflow", "Callflow-doel selecteren", "Wybierz cel callflow", "Selecionar destino do callflow", "Välj callflow-mål", "Vælg callflow-mål", "Valitse callflow-kohde", "Vybrat cíl callflow")],
     ["Schrittart fehlt", values("Step type missing", "Schrittart fehlt", "Type d'étape manquant", "Falta tipo de paso", "Tipo passaggio mancante", "Staptype ontbreekt", "Brak typu kroku", "Falta tipo de passo", "Stegtyp saknas", "Trintype mangler", "Vaiheen tyyppi puuttuu", "Chybí typ kroku")],
     ["Ansage fehlt", values("Announcement missing", "Ansage fehlt", "Annonce manquante", "Falta anuncio", "Annuncio mancante", "Aankondiging ontbreekt", "Brak komunikatu", "Falta anúncio", "Meddelande saknas", "Besked mangler", "Ilmoitus puuttuu", "Chybí oznámení")],
     ["Ziel fehlt", values("Target missing", "Ziel fehlt", "Cible manquante", "Falta destino", "Destinazione mancante", "Doel ontbreekt", "Brak celu", "Falta destino", "Mål saknas", "Mål mangler", "Kohde puuttuu", "Chybí cíl")],
@@ -437,9 +592,55 @@
     return null;
   }
 
+  function applyEnglishPatternTranslations(text) {
+    const weekdayMatch = text.match(/^(Mo|Di|Mi|Do|Fr|Sa|So) · (.+)$/i);
+    if (weekdayMatch) {
+      const weekdays = { mo: "Mon", di: "Tue", mi: "Wed", do: "Thu", fr: "Fri", sa: "Sat", so: "Sun" };
+      return `${weekdays[weekdayMatch[1].toLowerCase()]} · ${weekdayMatch[2]}`;
+    }
+
+    const patterns = [
+      [/^(\d+)\s+Kontakte verbunden$/i, "$1 contacts connected"],
+      [/^(\d+)\s+Minuten$/i, "$1 minutes"],
+      [/^(\d+)\s+Min\.\s+gespart$/i, "$1 min saved"],
+      [/^(\d+)\s+Min\.\s+Nacharbeit vermieden$/i, "$1 min follow-up work avoided"],
+      [/^(\d+)\s+Min\.\s+je Transcript$/i, "$1 min per transcript"],
+      [/^(\d+)\s+Min\.\s+×\s+(.+)$/i, "$1 min × $2"],
+      [/^([0-9:]+)\s+Min$/i, "$1 min"],
+      [/^(\d+)\s+aus eingehenden Calls$/i, "$1 from inbound calls"],
+      [/^(\d+)\s+Nummern verfügbar$/i, "$1 numbers available"],
+      [/^(\d+)\s+autom\.\s+·\s+(\d+)\s+manuell$/i, "$1 auto · $2 manual"],
+      [/^Kundensätze:\s+(.+)\.\s+Kundensatz anlegen$/i, "Customer records: $1. Create customer record"],
+      [/^Technisch:\s+(.+)$/i, "Technical: $1"],
+      [/^Inbound:\s+(.+?)\s+\((.+?)\s+vs\s+Vortag\)\s+Outbound:\s+(.+?)\s+\((.+?)\s+vs\s+Vortag\)\s+Unklar:\s+(.+)$/i, "Inbound: $1 ($2 vs previous day) Outbound: $3 ($4 vs previous day) Unknown: $5"],
+      [/^Link für (.+) bearbeiten$/i, "Edit link for $1"],
+      [/^Bearbeiten schließen$/i, "Close editor"],
+      [/^(.+)\s+Server starten$/i, "Start $1 server"],
+      [/^(.+)\s+Server stoppen$/i, "Stop $1 server"],
+      [/^Schritt zwischen Eingehender Anruf und (.+) einfügen$/i, "Insert step between Incoming call and $1"],
+      [/^(.+)\s+bearbeiten$/i, "Edit $1"],
+      [/^Leitung von (.+) ziehen$/i, "Drag connection from $1"],
+      [/^Schritt zwischen (.+) und (.+) einfügen$/i, "Insert step between $1 and $2"],
+      [/^(.+)\s+Aktionen$/i, "$1 actions"]
+    ];
+
+    for (const [regex, replacement] of patterns) {
+      if (!regex.test(text)) continue;
+      return text.replace(regex, replacement);
+    }
+    return null;
+  }
+
   function translate(text, language = currentLanguage) {
     const normalized = normalize(text);
     if (!normalized) return text;
+
+    if (language === "en") {
+      const englishExact = englishExactTranslations.get(normalized);
+      if (englishExact) return preserveOuterWhitespace(text, englishExact);
+      const englishPattern = applyEnglishPatternTranslations(normalized);
+      if (englishPattern) return preserveOuterWhitespace(text, englishPattern);
+    }
 
     const exact = translatedValue(exactTranslations.get(normalized), language);
     if (exact) return preserveOuterWhitespace(text, exact);

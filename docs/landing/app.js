@@ -5,6 +5,7 @@ const SHOWCASES = [
     name: "NFON CTI API",
     nameLines: ["NFON CTI", "API"],
     source: "Live-Telefonie",
+    scope: "K-Ebene",
     purpose: "Präsenz, Nebenstellen, Click-to-Dial und laufende Telefonie im Dashboard.",
     focus: "Realtime",
     index: "01",
@@ -16,6 +17,7 @@ const SHOWCASES = [
     name: "NFON Portal API",
     nameLines: ["NFON Portal", "API"],
     source: "PBX Administration",
+    scope: "K-Ebene",
     purpose: "Rufnummern, Geräte, Routing-Objekte und Callflow-Kontext aus dem Portal.",
     focus: "Inventory",
     index: "02",
@@ -27,6 +29,7 @@ const SHOWCASES = [
     name: "NFON Call History API",
     nameLines: ["NFON Call History", "API"],
     source: "Gesprächshistorie",
+    scope: "User-Ebene",
     purpose: "Login, Ruflisten, Transcripts und CRM-Zuordnung für abgeschlossene Gespräche.",
     focus: "History",
     index: "03",
@@ -269,6 +272,10 @@ function renderCards() {
                   <div>
                     <dt>Status</dt>
                     <dd>${escapeHtml(service.detail)}</dd>
+                  </div>
+                  <div>
+                    <dt>API-Ebene</dt>
+                    <dd>${escapeHtml(item.scope)}</dd>
                   </div>
                 </dl>
                 <div class="card-footer">
