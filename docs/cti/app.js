@@ -443,11 +443,12 @@ function renderDirection(analytics) {
   const other = Math.max(0, analytics.today.total - inbound - outbound);
   const yesterdayInbound = analytics.yesterday?.inbound || 0;
   const yesterdayOutbound = analytics.yesterday?.outbound || 0;
-  const hoverDetails = [
+  const hoverDetailsSource = [
     `Eingehend: ${inbound} (${signedCount(inbound - yesterdayInbound)} vs Vortag)`,
     `Ausgehend: ${outbound} (${signedCount(outbound - yesterdayOutbound)} vs Vortag)`,
     `Unklar: ${other}`,
   ].join("\n");
+  const hoverDetails = window.NFON_I18N?.translate(hoverDetailsSource) || hoverDetailsSource;
   const total = Math.max(1, inbound + outbound + other);
   const inboundDeg = Math.round((inbound / total) * 360);
   const outboundDeg = Math.round((outbound / total) * 360);

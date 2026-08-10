@@ -1,6 +1,6 @@
 {
   "name": "nfon-api-showcase",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Interactive demos for the NFON APIs",
   "author": "NFON AG <integration@nfon.com>",
@@ -9,7 +9,7 @@
   "scripts": {
     "check": "npm --prefix CTI_API run check && npm --prefix Portal_API run check && npm --prefix CallHistory_API run check && npm --prefix landing run check && node --check docs/i18n.js && node --check docs/demo-runtime.js && node --check docs/landing/app.js && node --check docs/cti/app.js && node --check docs/portal/app.js && node --check docs/call-history/app.js",
     "secret-scan": "node scripts/secret-scan.mjs",
-    "test": "npm run check && npm --prefix CTI_API test && npm --prefix Portal_API test && npm --prefix CallHistory_API test && npm --prefix landing test && npm run secret-scan",
+    "test": "npm run check && node --test test/*.test.mjs && npm --prefix CTI_API test && npm --prefix Portal_API test && npm --prefix CallHistory_API test && npm --prefix landing test && npm run secret-scan",
     "test:apis": "npm --prefix CTI_API test && npm --prefix Portal_API test && npm --prefix CallHistory_API test",
     "start:callhistory": "npm --prefix CallHistory_API start",
     "start:portal": "npm --prefix Portal_API start",
