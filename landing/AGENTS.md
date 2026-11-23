@@ -7,9 +7,23 @@ Treat it as a map, not a spec — when in doubt, verify against the code.
 ## What this app is
 
 The **optional** all-in-one cockpit for the showcase: product cards, health checks, start/stop
-controls for the sibling APIs, editable upstream links, and gateway routes that proxy to each app.
+controls for the sibling APIs, editable upstream links, and gateway routes that redirect to each app.
 The individual API tools must run without it — this app may know sibling paths only to start/stop
 local services and route to configured upstreams.
+
+## v1.2 appearance and language contract
+
+Admin Portal is the default theme. The older visual rules below apply to Classic only.
+Shared tokens and shell behavior live in `../shared/appearance.css` and `../shared/appearance.js`;
+app-specific Admin Portal adapters must be scoped to `html[data-nfon-theme="admin-portal"]`.
+Both themes share the same controls, application state and security guards. The switch above the header changes
+only appearance; it must preserve drafts, filters, selections and authentication.
+
+Use explicit keys in `i18n-messages.json` for complete messages in all twelve selectable languages.
+First visits use English; only an explicit saved language choice overrides it. Protect real names,
+API data and edited values from translation; keep generated defaults distinguishable.
+Run `npm run sync:shared` at the repository root after catalog/shared changes, then `npm test`.
+Do not edit generated `public/messages.js` or the copied shared appearance files.
 
 ## Tech & conventions (do not break)
 
@@ -31,7 +45,7 @@ local services and route to configured upstreams.
 
 | Path | Role |
 | --- | --- |
-| `src/server.js` | Node `http` server: cockpit API, health checks, service start/stop, upstream override persistence, gateway proxy, CSRF guard, static serving. |
+| `src/server.js` | Node `http` server: cockpit API, health checks, service start/stop, upstream override persistence, gateway redirects, CSRF guard, static serving. |
 | `public/index.html` | Cockpit markup (`/combined/`). |
 | `public/app.js` | Client logic: product cards, health polling, edit-flip, start/stop controls. |
 | `public/styles.css` | All styling and design tokens. |
@@ -44,7 +58,7 @@ local services and route to configured upstreams.
 
 - `GET  /api/status` — health + CSRF token
 - `POST /api/services/<id>/start`, `/stop`, `/upstream` — service control (CSRF-protected)
-- Gateway: `/cti`, `/portal`, `/core-history` (alias `/call-history`) proxy to the configured upstreams
+- Gateway: `/cti`, `/portal`, `/core-history` (alias `/call-history`) redirect (302) to the configured upstreams
 - `/combined/` and static files from `public/`
 
 Service ids: `cti`, `portal`, `core-history`. Upstream overrides persist to
@@ -63,7 +77,7 @@ Configure via `.env` (`PORT`, `LANDING_HOST`, `*_UPSTREAM`, `LANDING_ENABLE_SERV
 
 - **Look & feel / card styling** → `public/styles.css`.
 - **Cards, health polling, edit-flip, start/stop UI** → `public/app.js`.
-- **Health checks, service control, upstream persistence, gateway proxy, CSRF** → `src/server.js`.
+- **Health checks, service control, upstream persistence, gateway redirects, CSRF** → `src/server.js`.
 
 ## Before committing or pushing
 

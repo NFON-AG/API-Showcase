@@ -5,11 +5,12 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const PORT = 43101;
-const BASE_URL = `http://127.0.0.1:${PORT}`;
+const http=require("node:http");
+const {once}=require("node:events");
+let PORT, BASE_URL;
 
 function makeWorkdir(t) {
-  const sourceRoot = process.cwd();
+  const sourceRoot = path.resolve(__dirname,"..");
   const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "portal-api-test-"));
   fs.cpSync(sourceRoot, workdir, {
     recursive: true,
@@ -22,24 +23,31 @@ function makeWorkdir(t) {
   return workdir;
 }
 
-function startServer(t) {
+async function startServer(t) {
+  const reservation=http.createServer(); reservation.listen(0,"127.0.0.1");await once(reservation,"listening");PORT=reservation.address().port;BASE_URL=`http://127.0.0.1:${PORT}`;await new Promise(resolve=>reservation.close(resolve));
   const workdir = makeWorkdir(t);
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, ["--require",path.join(__dirname,"helpers/egress.cjs"),"src/server.js"], {
     cwd: workdir,
     env: {
-      ...process.env,
+      PATH:process.env.PATH, HOME:workdir, TEST_PROVIDER_PORT:"0",
+      NFON_SHOWCASE_CONFIG_DIR: path.join(workdir, "test-config"),
+      Portal_API_ENV_FILE: "",
+      PORTAL_DATA_DIR: path.join(workdir, "test-data"),
+      PORTAL_SECRET_FILE: path.join(workdir, "test-secrets", "missing.txt"),
+      NFON_SECRET_FILE: path.join(workdir, "test-secrets", "missing.txt"),
+      PORTAL_GOOGLE_CONTACTS_FILE: path.join(workdir, "test-data", "missing.json"),
       HOST: "127.0.0.1",
       PORT: String(PORT),
       PORTAL_ALLOWED_ORIGIN: `http://localhost:${PORT}`,
       PORTAL_API_KEY_ID: "",
       PORTAL_API_KEY_SECRET: "",
       PORTAL_CUSTOMER_ACCOUNT: "",
-      PORTAL_ENABLE_LIVE_WRITES: "",
-      PORTAL_DISABLE_LIVE_WRITES: "",
+      PORTAL_ENABLE_LIVE_WRITES: "false",
+      PORTAL_DISABLE_LIVE_WRITES: "false",
     },
     stdio: ["ignore", "ignore", "ignore"],
   });
-  t.after(() => child.kill());
+  t.after(async () => {if(child.exitCode===null){const exit=once(child,"exit");child.kill();await exit;}});
   return child;
 }
 
@@ -60,7 +68,7 @@ async function waitForStatus() {
 }
 
 test("live writes are disabled by default and settings require CSRF", async (t) => {
-  startServer(t);
+  await startServer(t);
 
   const status = await waitForStatus();
   assert.equal(status.settings.liveWritesEnabled, false);
@@ -79,6 +87,7 @@ test("live writes are disabled by default and settings require CSRF", async (t) 
     headers: {
       "Content-Type": "application/json",
       "X-CSRF-Token": status.settings.csrfToken,
+      "X-Portal-Context": status.settings.writeContext,
     },
     body: JSON.stringify({ enabled: false }),
   });
@@ -86,7 +95,7 @@ test("live writes are disabled by default and settings require CSRF", async (t) 
 });
 
 test("JSON bodies are bounded", async (t) => {
-  startServer(t);
+  await startServer(t);
 
   const status = await waitForStatus();
   const oversized = await fetch(`${BASE_URL}/api/settings/live-writes`, {
@@ -94,6 +103,7 @@ test("JSON bodies are bounded", async (t) => {
     headers: {
       "Content-Type": "application/json",
       "X-CSRF-Token": status.settings.csrfToken,
+      "X-Portal-Context": status.settings.writeContext,
     },
     body: JSON.stringify({ payload: "x".repeat(1024 * 1024 + 1) }),
   });

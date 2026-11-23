@@ -37,6 +37,40 @@
   const exactTranslations = new Map();
   const englishExactTranslations = new Map();
   const phraseTranslations = [];
+  const messages = window.NFON_MESSAGES || {};
+  const renderedMessages = new Map();
+  const staticMessages = new Map();
+  const messagePatterns = [];
+
+  // Whole messages keep API values intact; unsupported locales fall back to English.
+  function message(key, params = {}, language = currentLanguage) {
+    const entry = Object.prototype.hasOwnProperty.call(messages, key) ? messages[key] : null;
+    if (!entry) return "";
+    const template = entry[language] || entry.en;
+    if (typeof template !== "string") return "";
+    const output = template.replace(/\{([A-Za-z][\w]*)\}/g, (match, name) =>
+      Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
+    if (renderedMessages.size > 5000) renderedMessages.clear();
+    renderedMessages.set(normalize(output), { key, params: { ...params } });
+    return output;
+  }
+
+  for (const [key, entry] of Object.entries(messages)) {
+    for (const value of [...Object.values(entry), ...(Array.isArray(entry.sources) ? entry.sources : [])]) {
+      if (typeof value === "string" && !/\{[A-Za-z][\w]*\}/.test(value)) {
+        staticMessages.set(normalize(value), { key, params: {} });
+      } else if (typeof value === "string") {
+        const template = normalize(value);
+        const parts = template.split(/(\{[A-Za-z][\w]*\})/g);
+        const literals = parts.filter((_, index) => index % 2 === 0).join("");
+        // Only recognize complete system sentences; short data-like templates need explicit keys.
+        if (literals.length < 16) continue;
+        const names = parts.filter((_, index) => index % 2 === 1).map((part) => part.slice(1, -1));
+        const pattern = parts.map((part, index) => index % 2 ? "(.*?)" : escapeRegExp(part)).join("");
+        messagePatterns.push({ key, names, prefix: parts[0], regexp: new RegExp(`^${pattern}$`, "u") });
+      }
+    }
+  }
 
   // French articles use Unicode escapes so the UI copy guard does not flag
   // them as German second-person wording.
@@ -323,6 +357,83 @@
     [["Neues Nachtziel erstellen - (Ansage + danach)"], "Create new night target - (announcement + next step)"],
     [["Zeitsteuerungs-Plan noch nicht geprüft"], "Time-control plan not checked yet"],
     [["Zeitsteuerungs-Plan prüfen"], "Check time-control plan"],
+    [["Tag/Nacht-Zeitsteuerungs-Check"], "Day/night time-control check"],
+    [["Zeitsteuerungs-Check"], "Time-control check"],
+    [["Zeitsteuerungs-Plan wird geprüft"], "Checking time-control plan"],
+    [["Portal API wird nur gelesen. Es werden keine Änderungen geschrieben."], "The Portal API is read only. No changes are written."],
+    [["Zeitsteuerungs-Check fehlgeschlagen"], "Time-control check failed"],
+    [["Plan prüfen"], "Check plan"],
+    [["API-Daten eindeutig"], "API data is unambiguous"],
+    [["Blocker prüfen"], "Check blockers"],
+    [["Zeitsteuerungen anlegen/aktualisieren"], "Create/update time controls"],
+    [["Rufnummern umhängen"], "Reassign numbers"],
+    [["separater Live-Schritt"], "separate live step"],
+    [["erst nach Zeitsteuerungs-Anlage"], "after creating time controls"],
+    [["Plan erneut prüfen"], "Check plan again"],
+    [["Zeitsteuerungen werden geschrieben..."], "Writing time controls..."],
+    [["Alte Zeitsteuerungen löschen"], "Delete old time controls"],
+    [["Zeitsteuerungen löschen"], "Delete time controls"],
+    [["Löscht..."], "Deleting..."],
+    [["Setzt zurück..."], "Resetting..."],
+    [["Nachtschaltung zurücksetzen"], "Reset night routing"],
+    [["Rufnummern werden umgehängt..."], "Reassigning numbers..."],
+    [["Rufnummern auf Zeitsteuerungen umhängen"], "Reassign numbers to time controls"],
+    [["Live-Schreiben aus"], "Live writes off"],
+    [["Zeitsteuerungen offen"], "Pending time controls"],
+    [["Ziel ändern"], "Targets to update"],
+    [["Ansagen"], "Announcements"],
+    [["Aktuelles Tagesziel"], "Current day target"],
+    [["Bewertung"], "Assessment"],
+    [["Ziel aktualisieren"], "Update target"],
+    [["passend"], "matching"],
+    [["neu"], "new"],
+    [["prüfbar"], "eligible"],
+    [["Blocker vor Live-Migration"], "Blockers before live migration"],
+    [["Namenskonvention TN <Rufnummer>"], "Naming convention TN <number>"],
+    [["Originalziel bleibt als Tagesziel hinter der Zeitsteuerung erhalten."], "The original target remains the day target behind the time control."],
+    [["Frontdesk/Nia bleibt Tagesziel hinter der Zeitsteuerung. Die KI-Loesung wird nicht veraendert; nur die Rufnummer wuerde initial vor den Frontdesk auf die Zeitsteuerung zeigen."], "Frontdesk/Nia remains the day target behind the time control. The AI solution is not changed; only the number would initially point to the time control before Frontdesk."],
+    [["Rufnummer ist tagsueber unbelegt. Im Zeitsteuerungsfenster wird das als Auflegen abgebildet; nach der Wiederherstellung bleibt sie wieder ohne Ziel."], "The number is unassigned during the day. Within the time-control window this is represented as hang up; after restoration it remains without a target."],
+    [["Nächster Schritt"], "Next step"],
+    [["Bitte korrigieren"], "Please correct"],
+    [["Lege das neue Nachtziel an. Danach wird es automatisch als Nachtziel ausgewählt und der Zeitsteuerungs-Plan kann geprüft werden."], "Create the new night target. It is then selected automatically and the time-control plan can be checked."],
+    [["Der Plan ist noch nicht vollständig."], "The plan is not complete yet."],
+    [["Zeitsteuerungen werden geschrieben"], "Writing time controls"],
+    [["Portal API legt fehlende Zeitsteuerungen an und aktualisiert vorhandene Zeitsteuerungen auf das Nachtziel. Rufnummern bleiben unverändert."], "The Portal API creates missing time controls and updates existing time controls to the night target. Numbers remain unchanged."],
+    [["Zeitsteuerungen geschrieben"], "Time controls written"],
+    [["Zeitsteuerungs-Anlage fehlgeschlagen"], "Creating time controls failed"],
+    [["Zeitsteuerungen bereinigt"], "Time controls cleaned up"],
+    [["Cleanup fehlgeschlagen"], "Cleanup failed"],
+    [["Nachtschaltung wird zurückgesetzt"], "Resetting night routing"],
+    [["Portal API stellt betroffene Rufnummern zurück und löscht danach die verwalteten TN-Zeitsteuerungen."], "The Portal API restores affected numbers and then deletes the managed TN time controls."],
+    [["Nachtschaltung zurückgesetzt"], "Night routing reset"],
+    [["Reset fehlgeschlagen"], "Reset failed"],
+    [["Der Tagmodus wird wiederhergestellt. Die vorbereiteten Zeitsteuerungen bleiben erhalten."], "Day mode is being restored. The prepared time controls are retained."],
+    [["Tagmodus aktiviert"], "Day mode activated"],
+    [["Tagmodus fehlgeschlagen"], "Activating day mode failed"],
+    [["Der Tagmodus konnte nicht wiederhergestellt werden."], "Day mode could not be restored."],
+    [["Der Nachtmodus wird aktiviert. Die Portal API hängt Rufnummern auf die vorbereiteten Zeitsteuerungen."], "Night mode is being activated. The Portal API reassigns numbers to the prepared time controls."],
+    [["Rufnummern werden umgehängt"], "Reassigning numbers"],
+    [["Portal API entfernt die bisherigen DID-Zuordnungen und hängt sie an die vorbereiteten Zeitsteuerungen. Bei Fehlern wird ein Rollback versucht."], "The Portal API removes the previous DID assignments and reassigns them to the prepared time controls. A rollback is attempted if an error occurs."],
+    [["Rufnummern umgehängt"], "Numbers reassigned"],
+    [["Rufnummern-Migration fehlgeschlagen"], "Number migration failed"],
+    [["Zeitsteuerungen angelegt"], "Time controls created"],
+    [["Rufnummern noch nicht bereit"], "Numbers are not ready yet"],
+    [["Nachtmodus vorbereitet"], "Night mode prepared"],
+    [["Tagesziele vor der Aktivierung gesichert."], "Day targets saved before activation."],
+    [["Rufnummern auf Zeitsteuerungen umgehängt"], "Numbers reassigned to time controls"],
+    [["Keine Zeitsteuerungen zu löschen"], "No time controls to delete"],
+    [["Alle Zeitsteuerungen nach Namenskonvention passen zur aktuellen Rufnummernliste."], "All time controls following the naming convention match the current number list."],
+    [["Reset blockiert"], "Reset blocked"],
+    [["Mindestens eine Rufnummer zeigt auf eine verwaltete Zeitsteuerung, aber der gespeicherte Restore-Plan fehlt."], "At least one number points to a managed time control, but the saved restore plan is missing."],
+    [["Nachtmodus aktiv"], "Night mode active"],
+    [["Die Rufnummern laufen jetzt über die vorbereiteten Zeitsteuerungen. Live-Änderungen in der App sind gesperrt."], "The numbers now route through the prepared time controls. Live changes in the app are locked."],
+    [["Tagmodus aktiv"], "Day mode active"],
+    [["Die Tagesziele wurden wiederhergestellt. Live-Änderungen sind wieder möglich."], "The day targets have been restored. Live changes are available again."],
+    [["Die Portal API verarbeitet die Umschaltung. Das kann einen Moment dauern."], "The Portal API is processing the switch. This may take a moment."],
+    [["Setup unvollständig"], "Setup incomplete"],
+    [["Bitte erst in Setup den Standard sichern und den Zeitsteuerungs-Plan vollständig vorbereiten."], "First save the default in Setup and prepare the complete time-control plan."],
+    [["Umschaltung fehlgeschlagen"], "Switch failed"],
+    [["Die Portal API konnte die Umschaltung nicht vollständig ausführen. Bitte Setup prüfen."], "The Portal API could not complete the switch. Check Setup."],
     [["Diagnose der Portal-Endpunkte."], "Portal endpoint diagnostics."],
     [["Details zeigen"], "Show details"],
     [["Portvertrag"], "Port setup"],
@@ -540,13 +651,13 @@
   phraseTranslations.sort((a, b) => b.source.length - a.source.length);
 
   function detectLanguage() {
+    try {
+      const linked = new URL(location.href).searchParams.get('lang');
+      if (languageCodes.has(linked)) { safeLocalStorageSet(STORAGE_KEY, linked); return linked; }
+    } catch { /* Optional URL selection. */ }
     const saved = safeLocalStorageGet(STORAGE_KEY);
     if (languageCodes.has(saved)) return saved;
-    const browserLanguages = navigator.languages?.length ? navigator.languages : [navigator.language];
-    for (const language of browserLanguages) {
-      const code = String(language || "").toLowerCase().split("-")[0];
-      if (languageCodes.has(code)) return code;
-    }
+    // A first visit is always English. Only an explicit saved selection wins.
     return "en";
   }
 
@@ -609,6 +720,36 @@
       [/^([0-9:]+)\s+Min$/i, "$1 min"],
       [/^(\d+)\s+aus eingehenden Calls$/i, "$1 from inbound calls"],
       [/^(\d+)\s+Nummern verfügbar$/i, "$1 numbers available"],
+      [/^(\d+)\s+Rufnummern verfügbar$/i, "$1 numbers available"],
+      [/^(\d+)\s+von\s+(\d+)\s+Rufnummern sind fuer eine Zeitsteuerungs-Migration eindeutig bewertbar\.$/i, "$1 of $2 numbers can be evaluated unambiguously for a time-control migration."],
+      [/^(\d+)\s+passend,\s+(\d+)\s+neu,\s+(\d+)\s+Ziel ändern$/i, "$1 matching, $2 new, $3 targets to update"],
+      [/^Ziel aktualisieren\s+·\s+Zeitsteuerung\s+(.+)$/i, "Update target · Time control $1"],
+      [/^passend\s+·\s+Zeitsteuerung\s+(.+)$/i, "matching · Time control $1"],
+      [/^neu\s+·\s+Zeitsteuerung\s+(.+)$/i, "new · Time control $1"],
+      [/^Sprachdialog\s+(.+)$/i, "Voice dialog $1"],
+      [/^Zeitsteuerung\s+(.+)$/i, "Time control $1"],
+      [/^(\d+)\s+nicht mehr benötigte Zeitsteuerungen? können gelöscht werden\.$/i, "$1 obsolete time controls can be deleted."],
+      [/^(\d+)\s+Rufnummern? zurückgestellt$/i, "$1 numbers restored"],
+      [/^(\d+)\s+Zeitsteuerungen? gelöscht$/i, "$1 time controls deleted"],
+      [/^(\d+)\s+alte Zeitsteuerungen? gelöscht$/i, "$1 old time controls deleted"],
+      [/^(\d+)\s+angelegt,\s+(\d+)\s+aktualisiert,\s+(\d+)\s+unverändert$/i, "$1 created, $2 updated, $3 unchanged"],
+      [/^(\d+)\s+fehlgeschlagen$/i, "$1 failed"],
+      [/^um\s+(\d{1,2}:\d{2}(?::\d{2})?)$/i, "at $1"],
+      [/^(\d+)\s+Zeitsteuerungen? angelegt,\s+(\d+)\s+aktualisiert,\s+(\d+)\s+unveraendert\. Rufnummern wurden nicht veraendert\.$/i, "$1 time controls created, $2 updated, $3 unchanged. Numbers were not changed."],
+      [/^(\d+)\s+Zeitsteuerungen? konnten nicht angelegt oder aktualisiert werden\. Rufnummern wurden nicht veraendert\.$/i, "$1 time controls could not be created or updated. Numbers were not changed."],
+      [/^(\d+)\s+Zeitsteuerungen? fehlen noch\. Lege zuerst die Zeitsteuerungen an\.$/i, "$1 time controls are still missing. Create the time controls first."],
+      [/^(\d+)\s+Rufnummern? wurden auf die vorbereiteten Tag\/Nacht-Zeitsteuerungen geroutet\.$/i, "$1 numbers were routed to the prepared day/night time controls."],
+      [/^(\d+)\s+nicht mehr benötigte Zeitsteuerungen? nach Namenskonvention gelöscht\.$/i, "$1 obsolete time controls following the naming convention were deleted."],
+      [/^(\d+)\s+Rufnummern? wiederhergestellt,\s+(\d+)\s+verwaltete Zeitsteuerungen? gelöscht\.$/i, "$1 numbers restored, $2 managed time controls deleted."],
+      [/^(\d+)\s+Rufnummern? wiederhergestellt\. Vorbereitete Zeitsteuerungen bleiben für den nächsten Nachtmodus erhalten\.$/i, "$1 numbers restored. Prepared time controls are retained for the next night mode."],
+      [/^(.+): Rufnummer hat keinen stabilen DID-Identifier\.$/i, "$1: Number has no stable DID identifier."],
+      [/^(.+): Trunk kann fuer Restore nicht eindeutig bestimmt werden\.$/i, "$1: Trunk cannot be identified unambiguously for restoration."],
+      [/^(.+): Nachtziel fehlt oder kann nicht eindeutig gebildet werden\.$/i, "$1: Night target is missing or cannot be created unambiguously."],
+      [/^(.+): Aktueller Zieltyp fehlt\.$/i, "$1: Current target type is missing."],
+      [/^(.+): Aktuelle Zielroute fehlt\.$/i, "$1: Current target route is missing."],
+      [/^(.+): Aktueller Ziel-Href kann nicht gebildet werden\.$/i, "$1: Current target href cannot be created."],
+      [/^(.+): Zieltyp (.+) ist noch nicht fuer Zeitsteuerungs-Restore bewertet\.$/i, "$1: Target type $2 has not yet been evaluated for time-control restoration."],
+      [/^(.+): kein gespeicherter Restore-Plan und kein Tagesziel in der Zeitsteuerung gefunden\.$/i, "$1: No saved restore plan or day target was found in the time control."],
       [/^(\d+)\s+autom\.\s+·\s+(\d+)\s+manuell$/i, "$1 auto · $2 manual"],
       [/^Kundensätze:\s+(.+)\.\s+Kundensatz anlegen$/i, "Customer records: $1. Create customer record"],
       [/^Technisch:\s+(.+)$/i, "Technical: $1"],
@@ -634,6 +775,21 @@
   function translate(text, language = currentLanguage) {
     const normalized = normalize(text);
     if (!normalized) return text;
+    if (normalized.length === 1) return text;
+    // Explicit complete legacy messages take precedence over broader templates.
+    if (language === "en") {
+      const englishExact = englishExactTranslations.get(normalized);
+      if (englishExact) return preserveOuterWhitespace(text, englishExact);
+    }
+    const keyed = renderedMessages.get(normalized) || staticMessages.get(normalized);
+    if (keyed) return preserveOuterWhitespace(text, message(keyed.key, keyed.params, language));
+    for (const pattern of messagePatterns) {
+      if (pattern.prefix && !normalized.startsWith(pattern.prefix)) continue;
+      const match = normalized.match(pattern.regexp);
+      if (!match) continue;
+      const params = Object.fromEntries(pattern.names.map((name, index) => [name, match[index + 1]]));
+      return preserveOuterWhitespace(text, message(pattern.key, params, language));
+    }
 
     if (language === "en") {
       const englishExact = englishExactTranslations.get(normalized);
@@ -645,34 +801,15 @@
     const exact = translatedValue(exactTranslations.get(normalized), language);
     if (exact) return preserveOuterWhitespace(text, exact);
 
+    // Legacy patterns contain foreign translations only. Applying their English
+    // fallback to already-German output would turn "Vortag 0" back into English.
+    if (language === SOURCE_LANGUAGE) return text;
+
     const pattern = applyPatternTranslations(normalized, language);
     if (pattern) return preserveOuterWhitespace(text, pattern);
 
-    if (language === SOURCE_LANGUAGE) return text;
-
-    let translated = String(text);
-    for (const phrase of phraseTranslations) {
-      const replacement = translatedValue(phrase.values, language);
-      if (!replacement) continue;
-      translated = translated.replace(phraseRegExp(phrase.source), (match) => matchCase(match, replacement));
-    }
-    return translated;
-  }
-
-  function phraseRegExp(source) {
-    const escaped = escapeRegExp(source);
-    const startsWithLetter = /^[\p{L}\p{M}]/u.test(source);
-    const endsWithLetter = /[\p{L}\p{M}]$/u.test(source);
-    const prefix = startsWithLetter ? "(?<![\\p{L}\\p{M}])" : "";
-    const suffix = endsWithLetter ? "(?![\\p{L}\\p{M}])" : "";
-    return new RegExp(`${prefix}${escaped}${suffix}`, "giu");
-  }
-
-  function matchCase(source, replacement) {
-    if (!source || !replacement) return replacement;
-    if (source === source.toUpperCase()) return replacement.toUpperCase();
-    if (source[0] === source[0].toUpperCase()) return replacement[0].toUpperCase() + replacement.slice(1);
-    return replacement;
+    // Unknown text may contain a customer's name. Never replace words inside it.
+    return text;
   }
 
   function preserveOuterWhitespace(original, translated) {
@@ -685,10 +822,15 @@
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
+  addEnglishExact(["Leitung von Eingehender Anruf ziehen"], "Drag connection from Incoming call");
+  addEnglishExact(["Namenskonvention TN <Rufnummer>"], "Naming convention TN <phone number>");
+
   let currentLanguage = detectLanguage();
   const originalText = new WeakMap();
   const originalAttributes = new WeakMap();
-  let applying = false;
+  const lastText = new WeakMap();
+  const lastAttributes = new WeakMap();
+  let observer;
 
   function shouldSkipNode(node) {
     if (!node) return true;
@@ -699,27 +841,57 @@
 
   function translateTextNode(node) {
     if (shouldSkipNode(node)) return;
-    if (!originalText.has(node)) originalText.set(node, node.nodeValue);
+    if (node.parentElement.closest("[data-i18n-key]")) return;
+    if (!originalText.has(node) || (lastText.has(node) && node.nodeValue !== lastText.get(node))) {
+      originalText.set(node, node.nodeValue);
+    }
     const source = originalText.get(node);
     const translated = translate(source, currentLanguage);
     if (node.nodeValue !== translated) node.nodeValue = translated;
+    lastText.set(node, translated);
+  }
+
+  function keyedParams(element, attribute) {
+    try {
+      const params = JSON.parse((attribute && element.getAttribute(`data-i18n-${attribute}-params`)) || element.getAttribute("data-i18n-params") || "{}");
+      return params && typeof params === "object" && !Array.isArray(params) ? params : {};
+    } catch { return {}; }
+  }
+
+  function translateKeyedElement(element) {
+    if (shouldSkipNode(element)) return;
+    const key = element.getAttribute("data-i18n-key");
+    if (!key) return;
+    const translated = message(key, keyedParams(element));
+    if (translated && element.textContent !== translated) element.textContent = translated;
   }
 
   function translateAttributes(element) {
     if (shouldSkipNode(element)) return;
-    const names = ["aria-label", "title", "placeholder", "alt"];
+    translateKeyedElement(element);
+    const names = ["aria-label", "title", "placeholder", "alt", "data-label"];
     names.forEach((name) => {
+      const key = element.getAttribute(`data-i18n-${name}`);
+      if (key) {
+        const translated = message(key, keyedParams(element, name));
+        if (translated && element.getAttribute(name) !== translated) element.setAttribute(name, translated);
+        return;
+      }
       if (!element.hasAttribute(name)) return;
       let attributeMap = originalAttributes.get(element);
       if (!attributeMap) {
         attributeMap = {};
         originalAttributes.set(element, attributeMap);
       }
-      if (!Object.prototype.hasOwnProperty.call(attributeMap, name)) {
+      const last = lastAttributes.get(element) || {};
+      if (!Object.prototype.hasOwnProperty.call(attributeMap, name) ||
+          (Object.prototype.hasOwnProperty.call(last, name) && element.getAttribute(name) !== last[name])) {
         attributeMap[name] = element.getAttribute(name);
       }
       const translated = translate(attributeMap[name], currentLanguage);
       if (element.getAttribute(name) !== translated) element.setAttribute(name, translated);
+      last[name] = translated;
+      lastAttributes.set(element, last);
     });
   }
 
@@ -755,9 +927,9 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 44px;
-        min-width: 44px;
-        height: 44px;
+        width: 40px;
+        min-width: 40px;
+        height: 40px;
         margin: 0;
         border: 0;
         background: transparent;
@@ -774,7 +946,10 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
-        flex: 0 0 auto;
+        flex: 0 1 auto;
+        flex-wrap: wrap;
+        min-width: 0;
+        max-width: 100%;
       }
       .header-status-group.is-after-header-control {
         margin-left: 18px;
@@ -782,8 +957,8 @@
       .language-trigger {
         display: grid;
         place-items: center;
-        width: 44px;
-        height: 44px;
+        width: 40px;
+        height: 40px;
         padding: 0;
         border: 0;
         border-radius: 0;
@@ -808,12 +983,14 @@
         overflow: hidden;
       }
       .flag-icon svg {
+        outline: 1px solid rgba(127, 127, 127, 0.35);
         display: block;
         width: 100%;
         height: 100%;
       }
       .language-trigger:focus-visible {
-        outline: 0;
+        outline: 2px solid currentColor;
+        outline-offset: 2px;
       }
       .language-menu {
         position: absolute;
@@ -905,7 +1082,7 @@
     trigger.id = "language-trigger";
     trigger.className = "language-trigger";
     trigger.type = "button";
-    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-haspopup", "menu");
     trigger.setAttribute("aria-expanded", "false");
     trigger.setAttribute("aria-label", translate("Language", currentLanguage));
 
@@ -918,7 +1095,7 @@
     menu.id = "language-menu";
     menu.className = "language-menu";
     menu.hidden = true;
-    menu.setAttribute("role", "listbox");
+    menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", translate("Language", currentLanguage));
 
     SUPPORTED_LANGUAGES.forEach((language) => {
@@ -926,8 +1103,8 @@
       option.type = "button";
       option.className = "language-option";
       option.dataset.language = language.code;
-      option.setAttribute("role", "option");
-      option.setAttribute("aria-selected", language.code === currentLanguage ? "true" : "false");
+      option.setAttribute("role", "menuitemradio");
+      option.setAttribute("aria-checked", language.code === currentLanguage ? "true" : "false");
       option.innerHTML = `<span class="language-option-flag">${flagMarkup(language.code)}</span><span>${language.label}</span>`;
       option.addEventListener("click", () => {
         setLanguage(language.code, true);
@@ -944,7 +1121,7 @@
       if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         openLanguageMenu();
-        menu.querySelector(".language-option.is-active, .language-option")?.focus();
+        (menu.querySelector(".language-option.is-active") || menu.querySelector(".language-option"))?.focus();
       }
     });
     menu.addEventListener("keydown", (event) => {
@@ -964,6 +1141,10 @@
     });
     document.addEventListener("click", (event) => {
       if (!picker.contains(event.target)) closeLanguageMenu();
+    });
+    document.addEventListener('focusin', event => { if (!picker.contains(event.target)) closeLanguageMenu(); });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !menu.hidden) { closeLanguageMenu(); trigger.focus(); }
     });
 
     trigger.appendChild(current);
@@ -1021,10 +1202,16 @@
     else closeLanguageMenu();
   }
 
-  function setLanguage(language, persist = false) {
+  function setLanguage(language, persist = false, syncUrl = persist) {
     if (!languageCodes.has(language)) return;
+    const previousLanguage = currentLanguage;
     currentLanguage = language;
     if (persist) safeLocalStorageSet(STORAGE_KEY, language);
+    if (syncUrl) try {
+      const url = new URL(location.href);
+      url.searchParams.set('lang', language);
+      history.replaceState(history.state, '', url.href);
+    } catch { /* file:// and restricted history still support language selection. */ }
     document.documentElement.lang = language;
     document.documentElement.dataset.language = language;
     const selectedLanguage = SUPPORTED_LANGUAGES.find((entry) => entry.code === language);
@@ -1042,53 +1229,36 @@
     document.querySelectorAll(".language-option").forEach((option) => {
       const active = option.dataset.language === language;
       option.classList.toggle("is-active", active);
-      option.setAttribute("aria-selected", active ? "true" : "false");
+      option.setAttribute("aria-checked", active ? "true" : "false");
     });
 
-    applying = true;
     translateTree(document.body);
     document.title = translate(document.title, language);
-    requestAnimationFrame(() => {
-      applying = false;
-    });
+    observer?.takeRecords();
+    if (previousLanguage !== language) {
+      document.dispatchEvent(new CustomEvent("nfon:language-change", { detail: { language, previousLanguage } }));
+    }
   }
-
-  let refreshQueued = false;
 
   function refreshLanguage() {
     if (!document.body) return;
     setLanguage(currentLanguage, false);
   }
 
-  function scheduleLanguageRefresh() {
-    if (refreshQueued) return;
-    refreshQueued = true;
-    requestAnimationFrame(() => {
-      refreshQueued = false;
-      if (applying) {
-        scheduleLanguageRefresh();
-        return;
-      }
-      refreshLanguage();
-    });
-  }
-
   function installObserver() {
-    const observer = new MutationObserver((mutations) => {
-      if (applying) {
-        scheduleLanguageRefresh();
-        return;
+    const pending = new Set();
+    let queued = false;
+    observer = new MutationObserver(records => {
+      for (const record of records) {
+        if (record.type === 'childList') record.addedNodes.forEach(node => pending.add(node));
+        else pending.add(record.target);
       }
-      applying = true;
-      mutations.forEach((mutation) => {
-        if (mutation.type === "characterData") translateTextNode(mutation.target);
-        mutation.addedNodes.forEach((node) => translateTree(node));
-        if (mutation.type === "attributes" && mutation.target instanceof Element) {
-          translateAttributes(mutation.target);
-        }
-      });
+      if (queued || !pending.size) return;
+      queued = true;
       requestAnimationFrame(() => {
-        applying = false;
+        queued = false;
+        for (const node of pending) if (node.isConnected) translateTree(node);
+        pending.clear(); observer.takeRecords();
       });
     });
     observer.observe(document.body, {
@@ -1096,7 +1266,7 @@
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ["aria-label", "title", "placeholder", "alt"]
+      attributeFilter: ["aria-label", "title", "placeholder", "alt", "data-label", "data-i18n-key", "data-i18n-params", "data-i18n-title", "data-i18n-aria-label", "data-i18n-placeholder", "data-i18n-alt", "data-i18n-data-label", "data-i18n-title-params", "data-i18n-aria-label-params", "data-i18n-placeholder-params", "data-i18n-alt-params", "data-i18n-data-label-params"]
     });
   }
 
@@ -1105,6 +1275,9 @@
     installLanguagePicker();
     setLanguage(currentLanguage, false);
     installObserver();
+    window.addEventListener('storage', event => {
+      if (event.key === STORAGE_KEY && languageCodes.has(event.newValue)) setLanguage(event.newValue, false, true);
+    });
     document.documentElement.classList.remove("i18n-booting");
     document.documentElement.classList.add("i18n-ready");
   }
@@ -1114,6 +1287,7 @@
     getLanguage: () => currentLanguage,
     setLanguage,
     translate,
+    message,
     refresh: refreshLanguage,
     translateTree
   };

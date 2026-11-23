@@ -1,17 +1,19 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
+    <script src="/appearance.js?v=b2ba19b928750eb3"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <meta http-equiv="Cache-Control" content="no-store">
     <title>NFON API Cockpit</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/styles.css?v=premium-light-20260617-1">
+    <link rel="stylesheet" href="/styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="/appearance.css?v=b2ba19b928750eb3">
   </head>
   <body>
-    <header class="app-header">
+    <header class="app-header nfon-cockpit-header">
       <div class="header-title-row">
         <a class="home-icon-button" href="/" aria-label="Back to overview" title="Back to overview">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -22,22 +24,24 @@
         </a>
         <div>
           <h1>NFON API Cockpit</h1>
-          <p id="header-subline">Lokales Showcase-Gateway · localhost:3010</p>
+          <p id="header-subline">Local showcase gateway</p>
         </div>
       </div>
       <div class="header-actions">
+        <div data-appearance-settings></div>
         <span class="connection is-online" id="connection-state" aria-label="Gateway Status"></span>
       </div>
     </header>
 
     <main class="app-shell">
       <section class="welcome-board" aria-labelledby="page-title">
-        <h2 class="sr-only" id="page-title">NFON API Apps</h2>
-        <div class="api-grid" id="api-cards" aria-label="API Showcases"></div>
+        <h2 class="sr-only" id="page-title" data-i18n-key="appearance.apps">API apps</h2>
+        <div class="api-grid" id="api-cards" aria-label="API demos" data-i18n-aria-label="landing.showcases"></div>
       </section>
     </main>
 
-    <script src="/i18n.js?v=v1.0.1-i18n"></script>
-    <script src="/app.js?v=premium-light-20260617-1"></script>
+    <script src="/messages.js?v=b2ba19b928750eb3"></script>
+    <script src="/i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="/app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

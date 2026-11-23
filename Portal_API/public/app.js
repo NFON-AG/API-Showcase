@@ -1,3 +1,43 @@
+// Storage can be unavailable in private or restricted browsers. Drafts remain usable in memory.
+const portalStorage = {
+  getItem(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  setItem(key, value) { try { localStorage.setItem(key, value); } catch {} },
+  removeItem(key) { try { localStorage.removeItem(key); } catch {} },
+};
+let overviewRequestGeneration = 0;
+let serviceRequestGeneration = 0;
+let extensionBatchRequestGeneration = 0;
+let phonebookRequestGeneration = 0;
+const flowUndoHistory = [];
+let flowTextUndo = null;
+// Message keys cover complete strings; the English fallback keeps the app standalone.
+function portalMessage(key, fallback, params = {}) {
+  return window.NFON_I18N?.message?.(key, params) || fallback.replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
+}
+
+function resourceActionText(action, kind) {
+  const collection = kind === "queue" ? "queues" : kind === "skill" ? "skills" : kind;
+  const key = `portal.resource.${action}.${collection}`;
+  return portalMessage(key, action + " " + collection);
+}
+
+function portalSystemText(value) {
+  return window.NFON_I18N?.translate?.(String(value ?? ""), portalLocale()) || String(value ?? "");
+}
+
+function portalMessagesMarkup(messages, separator = " · ") {
+  return messages.map(item => {
+    const structured = item && typeof item === "object";
+    const message = structured ? item.messageKey ? portalMessage(item.messageKey, item.message || "", item.messageParams || {}) : portalSystemText(item.message) : portalSystemText(item);
+    return `<span>${structured && item.label ? `<span data-i18n-ignore>${escapeHtml(item.label)}</span>: ` : ""}${escapeHtml(message)}</span>`;
+  }).join(escapeHtml(separator));
+}
+
+function portalLocale() {
+  return window.NFON_I18N?.getLanguage?.() || "en";
+}
+
+const STATIC_DEMO_MODE = Boolean(window.NFON_WEB_ONLY_DEMO);
 const VIEW_IDS = new Set(["overview", "phonebook", "extensions", "services", "callflow", "changes"]);
 
 function initialView() {
@@ -6,6 +46,7 @@ function initialView() {
 }
 
 const state = {
+  staticPaused: Boolean(window.NFON_DEMO_PAUSED),
   overview: null,
   flow: null,
   selectedExtensionId: "",
@@ -32,13 +73,15 @@ const state = {
   daynightGatewayCleanupLoading: false,
   daynightGatewayResetLoading: false,
   daynightModeSwitchLoading: false,
+  daynightSetupLoading: false,
   daynightAnnouncementLoading: false,
   daynightUseAnnouncement: false,
   daynightAnnouncementSource: "existing",
   daynightAnnouncementName: "",
   daynightAnnouncementAfterValue: "",
   daynightAnnouncementDisplayName: "",
-  daynightActive: localStorage.getItem("nfon-portal-daynight-active") === "1",
+  daynightAnnouncementDisplayNameEdited: false,
+  daynightActive: portalStorage.getItem("nfon-portal-daynight-active") === "1",
   daynightModeModal: null,
   flowZoom: 1,
   flowFeedback: null,
@@ -82,12 +125,7 @@ const state = {
   extensionBatchLoading: false,
   extensionBatchOptionalOpen: false,
   liveWritesSaving: false,
-  customers: [],
-  customersLoading: false,
-  customersError: "",
   customerSwitching: false,
-  manualCustomerAccount: "",
-  customerSwitchFeedback: "",
   authLoginMode: "env",
   browserLoginDraft: {
     baseUrl: "https://portal-api.nfon.net:8090",
@@ -107,11 +145,13 @@ const uiDialog = {
   title: "",
   message: "",
   confirmLabel: "OK",
-  cancelLabel: "Abbrechen",
+  cancelLabel: portalMessage("portal.cancel", "Cancel"),
   showCancel: false,
   pending: false,
   resolve: null,
 };
+let uiDialogReturnFocus = null;
+let daynightDialogReturnFocus = null;
 let dragState = null;
 let panState = null;
 let selectionRectState = null;
@@ -128,19 +168,20 @@ let activeDockHoverNodeId = "";
 let activeDockHoverNode = null;
 let activeDockHoverX = "";
 let activeDockHoverY = "";
-const FLOW_LAYOUT_STORAGE_KEY = "nfon-portal-flow-layouts-v1";
-const FLOW_PROFILE_STORAGE_KEY = "nfon-portal-callflow-profiles-v1";
-const FLOW_DRAFT_STORAGE_KEY = "nfon-portal-flow-drafts-v1";
-const FLOW_APPLIED_STORAGE_KEY = "nfon-portal-flow-applied-v1";
+const STATIC_STORAGE_VERSION = STATIC_DEMO_MODE ? "v2" : "v1";
+const FLOW_LAYOUT_STORAGE_KEY = `nfon-portal-flow-layouts-${STATIC_STORAGE_VERSION}`;
+const FLOW_PROFILE_STORAGE_KEY = `nfon-portal-callflow-profiles-${STATIC_STORAGE_VERSION}`;
+const FLOW_DRAFT_STORAGE_KEY = `nfon-portal-flow-drafts-${STATIC_STORAGE_VERSION}`;
+const FLOW_APPLIED_STORAGE_KEY = `nfon-portal-flow-applied-${STATIC_STORAGE_VERSION}`;
 const DAYNIGHT_ACTIVE_STORAGE_KEY = "nfon-portal-daynight-active";
-const SERVICE_DRAFT_STORAGE_KEY = "nfon-portal-service-drafts-v1";
+const SERVICE_DRAFT_STORAGE_KEY = `nfon-portal-service-drafts-${STATIC_STORAGE_VERSION}`;
 const SERVICE_COLOR_PALETTE = [
-  { id: "blue", label: "Blau", accent: "#1674d1", soft: "#e9f4ff" },
-  { id: "green", label: "Gruen", accent: "#00d981", soft: "#e7f8ef" },
-  { id: "amber", label: "Gold", accent: "#d39a25", soft: "#fff6df" },
-  { id: "teal", label: "Tuerkis", accent: "#009f8f", soft: "#e4f8f5" },
-  { id: "coral", label: "Koralle", accent: "#f36b5b", soft: "#fff0ee" },
-  { id: "purple", label: "Violett", accent: "#7146f2", soft: "#eee9ff" },
+  { id: "blue", get label() { return portalMessage("portal.blue", "Blue"); }, accent: "#1674d1", soft: "#e9f4ff" },
+  { id: "green", get label() { return portalMessage("portal.green", "Green"); }, accent: "#00d981", soft: "#e7f8ef" },
+  { id: "amber", get label() { return portalMessage("portal.gold", "Gold"); }, accent: "#d39a25", soft: "#fff6df" },
+  { id: "teal", get label() { return portalMessage("portal.turquoise", "Turquoise"); }, accent: "#009f8f", soft: "#e4f8f5" },
+  { id: "coral", get label() { return portalMessage("portal.coral", "Coral"); }, accent: "#f36b5b", soft: "#fff0ee" },
+  { id: "purple", get label() { return portalMessage("portal.purple", "Purple"); }, accent: "#7146f2", soft: "#eee9ff" },
 ];
 const FLOW_WORLD_WIDTH = 1320;
 const FLOW_WORLD_HEIGHT = 1600;
@@ -153,63 +194,63 @@ const FLOW_MIN_ZOOM = 0.25;
 const FLOW_MAX_ZOOM = 3;
 const OPTIONAL_ENDPOINT_KEYS = new Set(["version", "basicData", "contract", "featureStatus"]);
 const RESOURCE_DEFS = {
-  queues: { label: "Warteschlangen", itemLabel: "Warteschlange", type: "QUEUE", collection: "queues" },
-  skills: { label: "Skillgruppen", itemLabel: "Skillgruppe", type: "SKILL", collection: "skills" },
-  ivrs: { label: "Sprachdialoge", itemLabel: "Sprachdialog", type: "IVR", collection: "ivrs" },
-  timeControls: { label: "Zeitsteuerungen", itemLabel: "Zeitsteuerung", type: "TIMECONTROL", collection: "timeControls" },
+  queues: { get label() { return portalMessage("portal.queues", "Queues"); }, get itemLabel() { return portalMessage("portal.queue", "Queue"); }, type: "QUEUE", collection: "queues" },
+  skills: { get label() { return portalMessage("portal.skillGroups", "Skill groups"); }, get itemLabel() { return portalMessage("portal.skillGroup", "Skill group"); }, type: "SKILL", collection: "skills" },
+  ivrs: { get label() { return portalMessage("portal.voiceDialogs", "Voice dialogs"); }, get itemLabel() { return portalMessage("portal.voiceDialog", "Voice dialog"); }, type: "IVR", collection: "ivrs" },
+  timeControls: { get label() { return portalMessage("portal.timeControls", "Time controls"); }, get itemLabel() { return portalMessage("portal.timeControl", "Time control"); }, type: "TIMECONTROL", collection: "timeControls" },
 };
 const RESOURCE_STEP_KINDS = new Set(["QUEUE", "GROUP", "SKILL", "IVR", "TIMECONTROL"]);
 const WEEKDAY_OPTIONS = [
-  ["MONDAY", "Montag"],
-  ["TUESDAY", "Dienstag"],
-  ["WEDNESDAY", "Mittwoch"],
-  ["THURSDAY", "Donnerstag"],
-  ["FRIDAY", "Freitag"],
-  ["SATURDAY", "Samstag"],
-  ["SUNDAY", "Sonntag"],
+  ["MONDAY", portalMessage("portal.server.monday", "Monday")],
+  ["TUESDAY", portalMessage("portal.server.tuesday", "Tuesday")],
+  ["WEDNESDAY", portalMessage("portal.server.wednesday", "Wednesday")],
+  ["THURSDAY", portalMessage("portal.server.thursday", "Thursday")],
+  ["FRIDAY", portalMessage("portal.server.friday", "Friday")],
+  ["SATURDAY", portalMessage("portal.server.saturday", "Saturday")],
+  ["SUNDAY", portalMessage("portal.server.sunday", "Sunday")],
 ];
 const EXTENSION_BATCH_OPTIONAL_FIELDS = [
-  { key: "accessCentralPhoneBook", label: "Zentrales Telefonbuch", group: "Nebenstelle", type: "boolean", defaultValue: true, aliases: ["zentralesTelefonbuch", "centralPhonebook"] },
-  { key: "phoneBookHide", label: "Im Telefonbuch ausblenden", group: "Nebenstelle", type: "boolean", defaultValue: false, aliases: ["telefonbuchAusblenden"] },
-  { key: "language", label: "Sprache", group: "Nebenstelle", type: "text", defaultValue: "de", placeholder: "de", aliases: ["sprache"] },
-  { key: "costCenter", label: "Kostenstelle", group: "Nebenstelle", type: "text", defaultValue: "", placeholder: "Kostenstelle", aliases: ["kostenstelle"] },
-  { key: "callWaitingIndication", label: "Anklopfen", group: "Telefonie", type: "boolean", defaultValue: true },
-  { key: "intercomEnabled", label: "Intercom", group: "Telefonie", type: "boolean", defaultValue: false },
-  { key: "clirEnabled", label: "Rufnummernanzeige", group: "Telefonie", type: "text", defaultValue: "SHOW_BASE_NUMBER", placeholder: "SHOW_BASE_NUMBER" },
-  { key: "recordingMode", label: "Aufzeichnungsmodus", group: "Telefonie", type: "text", defaultValue: "NEVER", placeholder: "NEVER" },
-  { key: "ctiInfo", label: "CTI Info", group: "Telefonie", type: "text", defaultValue: "NONE", placeholder: "NONE" },
-  { key: "clickToDialState", label: "Click-to-Dial", group: "Telefonie", type: "text", defaultValue: "DEFAULT", placeholder: "DEFAULT" },
-  { key: "autodialTimeout", label: "Autodial Timeout", group: "Telefonie", type: "number", defaultValue: 0, placeholder: "0" },
-  { key: "numberguessingLength", label: "Nummernlaenge", group: "Telefonie", type: "number", defaultValue: 0, placeholder: "0" },
-  { key: "ncontrolEnabled", label: "Ncontrol", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "ccbs", label: "Rueckruf bei besetzt", group: "Dienste", type: "boolean", defaultValue: true },
-  { key: "replicateAgent", label: "Agent replizieren", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "timeoutAfterSipTransfer", label: "Timeout nach SIP Transfer", group: "Dienste", type: "number", defaultValue: 0, placeholder: "0" },
-  { key: "abandonOtherSoftphones", label: "Andere Softphones abmelden", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "mediaGatewayEmergencyDialplanPriority", label: "Notruf-Dialplan", group: "Dienste", type: "text", defaultValue: "OFF", placeholder: "OFF" },
-  { key: "dialPrefix", label: "Wahlpraefix", group: "Dienste", type: "text", defaultValue: "", placeholder: "Praefix" },
-  { key: "nMeeting", label: "Nmeeting", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "useTps", label: "TPS nutzen", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "nhospitalityRoom", label: "Hospitality Room", group: "Dienste", type: "boolean", defaultValue: false },
-  { key: "authorizeExternalByPin", label: "Extern per PIN autorisieren", group: "Rollen", type: "boolean", defaultValue: false },
-  { key: "isCoach", label: "Coach", group: "Rollen", type: "boolean", defaultValue: false },
-  { key: "isCoachee", label: "Coachee", group: "Rollen", type: "boolean", defaultValue: false },
-  { key: "deskphoneCallTranscriptionNotificationEnabled", label: "Deskphone Transkript-Hinweis", group: "Rollen", type: "boolean", defaultValue: true },
-  { key: "voicemailEmail", label: "Voicemail E-Mail", group: "Mailbox", type: "email", defaultValue: "", placeholder: "mail@example.de", aliases: ["email", "voicemail", "voicemail-email"] },
-  { key: "announceCID", label: "Rufnummer ansagen", group: "Mailbox", type: "boolean", defaultValue: true },
-  { key: "announceDateTime", label: "Datum/Zeit ansagen", group: "Mailbox", type: "boolean", defaultValue: true },
-  { key: "sendEmail", label: "Mailbox per E-Mail senden", group: "Mailbox", type: "boolean", defaultValue: false },
-  { key: "deleteAfterSending", label: "Mailbox nach Versand loeschen", group: "Mailbox", type: "boolean", defaultValue: false },
+  { key: "accessCentralPhoneBook", get label() { return portalMessage("portal.centralPhonebook", "Central phonebook"); }, get group() { return portalMessage("portal.extension", "Extension"); }, type: "boolean", defaultValue: true, aliases: ["zentralesTelefonbuch", "centralPhonebook"] },
+  { key: "phoneBookHide", get label() { return portalMessage("portal.hideInPhonebook", "Hide in phonebook"); }, get group() { return portalMessage("portal.extension", "Extension"); }, type: "boolean", defaultValue: false, aliases: ["telefonbuchAusblenden"] },
+  { key: "language", get label() { return portalMessage("portal.language", "Language"); }, get group() { return portalMessage("portal.extension", "Extension"); }, type: "text", defaultValue: "de", placeholder: "de", aliases: ["sprache"] },
+  { key: "costCenter", get label() { return portalMessage("portal.costCentre", "Cost centre"); }, get group() { return portalMessage("portal.extension", "Extension"); }, type: "text", defaultValue: "", get placeholder() { return portalMessage("portal.costCentre", "Cost centre"); }, aliases: ["kostenstelle"] },
+  { key: "callWaitingIndication", get label() { return portalMessage("portal.callWaiting", "Call waiting"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "boolean", defaultValue: true },
+  { key: "intercomEnabled", get label() { return portalMessage("portal.intercomField", "Intercom"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "boolean", defaultValue: false },
+  { key: "clirEnabled", get label() { return portalMessage("portal.callerId", "Caller ID"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "text", defaultValue: "SHOW_BASE_NUMBER", placeholder: "SHOW_BASE_NUMBER" },
+  { key: "recordingMode", get label() { return portalMessage("portal.recordingMode", "Recording mode"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "text", defaultValue: "NEVER", placeholder: "NEVER" },
+  { key: "ctiInfo", get label() { return portalMessage("portal.ctiInfoField", "CTI information"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "text", defaultValue: "NONE", placeholder: "NONE" },
+  { key: "clickToDialState", get label() { return portalMessage("portal.clickToDialField", "Click to dial"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "text", defaultValue: "DEFAULT", placeholder: "DEFAULT" },
+  { key: "autodialTimeout", get label() { return portalMessage("portal.autodialTimeoutField", "Autodial timeout"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "number", defaultValue: 0, placeholder: "0" },
+  { key: "numberguessingLength", get label() { return portalMessage("portal.numberLength", "Number length"); }, get group() { return portalMessage("portal.telephony", "Telephony"); }, type: "number", defaultValue: 0, placeholder: "0" },
+  { key: "ncontrolEnabled", label: "Ncontrol", get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "ccbs", get label() { return portalMessage("portal.callbackWhenBusy", "Callback when busy"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: true },
+  { key: "replicateAgent", get label() { return portalMessage("portal.replicateAgent", "Replicate agent"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "timeoutAfterSipTransfer", get label() { return portalMessage("portal.timeoutAfterSipTransfer", "Timeout after SIP transfer"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "number", defaultValue: 0, placeholder: "0" },
+  { key: "abandonOtherSoftphones", get label() { return portalMessage("portal.signOutOtherSoftphones", "Sign out other softphones"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "mediaGatewayEmergencyDialplanPriority", get label() { return portalMessage("portal.emergencyDialPlan", "Emergency dial plan"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "text", defaultValue: "OFF", placeholder: "OFF" },
+  { key: "dialPrefix", get label() { return portalMessage("portal.dialPrefix", "Dial prefix"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "text", defaultValue: "", get placeholder() { return portalMessage("portal.prefix", "Prefix"); } },
+  { key: "nMeeting", label: "Nmeeting", get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "useTps", get label() { return portalMessage("portal.useTps", "Use TPS"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "nhospitalityRoom", get label() { return portalMessage("portal.hospitalityRoomField", "Hotel room"); }, get group() { return portalMessage("portal.services", "Services"); }, type: "boolean", defaultValue: false },
+  { key: "authorizeExternalByPin", get label() { return portalMessage("portal.authoriseExternalCallsByPin", "Authorise external calls by PIN"); }, get group() { return portalMessage("portal.roles", "Roles"); }, type: "boolean", defaultValue: false },
+  { key: "isCoach", get label() { return portalMessage("portal.coachField", "Coach"); }, get group() { return portalMessage("portal.roles", "Roles"); }, type: "boolean", defaultValue: false },
+  { key: "isCoachee", get label() { return portalMessage("portal.coacheeField", "Coachee"); }, get group() { return portalMessage("portal.roles", "Roles"); }, type: "boolean", defaultValue: false },
+  { key: "deskphoneCallTranscriptionNotificationEnabled", get label() { return portalMessage("portal.deskphoneTranscriptNotification", "Deskphone transcript notification"); }, get group() { return portalMessage("portal.roles", "Roles"); }, type: "boolean", defaultValue: true },
+  { key: "voicemailEmail", get label() { return portalMessage("portal.voicemailEmail", "Voicemail email"); }, groupKey: "voicemail", get group() { return portalMessage("portal.voicemail", "Voicemail"); }, type: "email", defaultValue: "", placeholder: "mail@example.de", aliases: ["email", "voicemail", "voicemail-email"] },
+  { key: "announceCID", get label() { return portalMessage("portal.announceCallerNumber", "Announce caller number"); }, groupKey: "voicemail", get group() { return portalMessage("portal.voicemail", "Voicemail"); }, type: "boolean", defaultValue: true },
+  { key: "announceDateTime", get label() { return portalMessage("portal.announceDateAndTime", "Announce date and time"); }, groupKey: "voicemail", get group() { return portalMessage("portal.voicemail", "Voicemail"); }, type: "boolean", defaultValue: true },
+  { key: "sendEmail", get label() { return portalMessage("portal.sendVoicemailByEmail", "Send voicemail by email"); }, groupKey: "voicemail", get group() { return portalMessage("portal.voicemail", "Voicemail"); }, type: "boolean", defaultValue: false },
+  { key: "deleteAfterSending", get label() { return portalMessage("portal.deleteVoicemailAfterSending", "Delete voicemail after sending"); }, groupKey: "voicemail", get group() { return portalMessage("portal.voicemail", "Voicemail"); }, type: "boolean", defaultValue: false },
 ];
 const EXTENSION_BATCH_FIELD_MAP = new Map(EXTENSION_BATCH_OPTIONAL_FIELDS.map((field) => [field.key, field]));
 const EXTENSION_FIELD_LABELS = new Map([
-  ["extensionNumber", "Nummer"],
-  ["displayName", "Name"],
-  ["targetType", "Typ"],
-  ["href", "API Link"],
-  ["voicemailHref", "Mailbox API Link"],
-  ["voicemailNumber", "Mailbox Nummer"],
-  ["device", "Geraet"],
+  ["extensionNumber", portalMessage("portal.number", "Number")],
+  ["displayName", portalMessage("portal.nameField", "Name")],
+  ["targetType", portalMessage("portal.type", "Type")],
+  ["href", portalMessage("portal.apiLinkField", "API link")],
+  ["voicemailHref", portalMessage("portal.voicemailApiLinkField", "Voicemail API link")],
+  ["voicemailNumber", portalMessage("portal.mailboxNumber", "Mailbox number")],
+  ["device", portalMessage("portal.device", "Device")],
   ...EXTENSION_BATCH_OPTIONAL_FIELDS.map((field) => [field.key, field.label]),
 ]);
 
@@ -222,19 +263,202 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+// Track only app-created defaults. Editing a field permanently makes it user data.
+function portalDefaultAttributes(key, fallback, params = {}) {
+  const value = portalMessage(key, fallback, params);
+  return `data-portal-default-key="${escapeHtml(key)}" data-portal-default-fallback="${escapeHtml(fallback)}" data-portal-default-params="${escapeHtml(JSON.stringify(params))}" data-portal-default-value="${escapeHtml(value)}" value="${escapeHtml(value)}"`;
+}
+
+function portalPlaceholderAttributes(key, fallback, params = {}) {
+  return `placeholder="${escapeHtml(portalMessage(key, fallback, params))}" data-i18n-placeholder="${escapeHtml(key)}" data-i18n-placeholder-params="${escapeHtml(JSON.stringify(params))}"`;
+}
+
+function resourceNamePlaceholderAttributes(kind) {
+  const labels = {
+    queues: ["portal.queueNameField", "Queue name"],
+    skills: ["portal.skillGroupNameField", "Skill group name"],
+    ivrs: ["portal.voiceDialogNameField", "Voice menu name"],
+    timeControls: ["portal.timeControlNameField", "Time control name"],
+  };
+  return portalPlaceholderAttributes(...(labels[kind] || ["portal.nameField", "Name"]));
+}
+
+function daynightAnnouncementDisplayName(announcement = selectedAnnouncementName()) {
+  if (state.daynightAnnouncementDisplayNameEdited || state.daynightAnnouncementDisplayName) return state.daynightAnnouncementDisplayName;
+  return portalMessage("portal.nightAnnouncementValue", "Night announcement {p0}", { p0: announcement || portalMessage("portal.announcement", "Announcement") });
+}
+
+// Creation metadata distinguishes system defaults from user-authored flow data.
+function flowNodeDefaultMetadata(kind) {
+  const title = {
+    TIMECONTROL: ["portal.businessHours", "Business hours"],
+    IVR: ["portal.voiceDialog", "Voice dialog"],
+    ANNOUNCEMENT: ["portal.announcement", "Announcement"],
+    HANGUP: ["portal.hangUp", "Hang up"],
+    QUEUE: ["portal.queue", "Queue"],
+    GROUP: ["portal.skillGroup", "Skill group"],
+    SKILL: ["portal.skillGroup", "Skill group"],
+    VOICEMAIL: ["portal.voicemail", "Voicemail"],
+    PHONEEXTENSION: ["portal.extension", "Extension"],
+    PLACEHOLDER: ["portal.newStep", "New step"],
+  }[kind];
+  const subtitle = {
+    PLACEHOLDER: ["portal.selectType", "Select type"],
+    TIMECONTROL: ["portal.server.setTimeWindow", "Set time window"],
+    IVR: ["portal.configureKeys", "Configure keys"],
+    ANNOUNCEMENT: ["portal.selectAnnouncement", "Select announcement"],
+    HANGUP: ["portal.endCall", "End call"],
+  }[kind];
+  const defaults = {};
+  for (const [field, entry] of [["title", title], ["subtitle", subtitle], ["config.hours", kind === "TIMECONTROL" ? ["portal.monFri08001700", "Mon-Fri 08:00-17:00"] : null]]) {
+    if (entry) defaults[field] = { key: entry[0], fallback: entry[1], value: portalMessage(...entry) };
+  }
+  return defaults;
+}
+
+function setFlowNodeDefault(node, field, descriptor) {
+  if (!descriptor) return;
+  node._i18nDefaults ||= {};
+  const metadata = { ...descriptor, value: portalMessage(descriptor.key, descriptor.fallback) };
+  node._i18nDefaults[field] = metadata;
+  if (field === "config.hours") { node.config ||= {}; node.config.hours = metadata.value; }
+  else node[field] = metadata.value;
+}
+
+function clearFlowNodeDefault(node, field) {
+  if (node._i18nDefaults) delete node._i18nDefaults[field];
+}
+
+function refreshFlowNodeDefaults(node, updateInputs = false) {
+  if ((node.routeNumber || node.targetNumber) && normalizeTargetType(node.type) !== "HANGUP") return;
+  for (const [field, metadata] of Object.entries(node._i18nDefaults || {})) {
+    const value = field === "config.hours" ? node.config?.hours : node[field];
+    const input = updateInputs && node.id === state.selectedNodeId
+      ? $(field === "config.hours" ? '[data-node-config-field="hours"]' : `[data-node-field="${field}"]`)
+      : null;
+    if ((field === "title" && node.titleUserEdited) || value !== metadata.value || (input && input.value !== metadata.value)) {
+      clearFlowNodeDefault(node, field);
+      continue;
+    }
+    setFlowNodeDefault(node, field, metadata);
+    if (input) input.value = node._i18nDefaults[field].value;
+  }
+}
+
+function refreshPortalFlowDefaults() {
+  for (const node of state.flow?.nodes || []) {
+    if (node.id === "inbound" && node.locked) node.title = portalMessage("portal.incomingCall", "Incoming call");
+    refreshFlowNodeDefaults(node, true);
+    syncBranchSourceConfig(node);
+  }
+}
+
+function refreshPortalDefaults() {
+  refreshPortalFlowDefaults();
+  renderFlowFeedback();
+  refreshFlowDraftPreview();
+  refreshPortalAccountLabel();
+  renderStatus();
+  renderSettingsSummary();
+  document.querySelectorAll("[data-edit-service]").forEach(button => {
+    button.textContent = portalMessage("portal.edit", "Edit");
+    button.setAttribute("aria-description", portalMessage("portal.edit", "Edit"));
+  });
+  $("#phonebook-format-help-toggle")?.setAttribute("aria-label", portalMessage("portal.showFormatHelp", "Show format help"));
+  document.querySelectorAll("[data-node-edit]").forEach(button => {
+    const node = state.flow?.nodes?.find(node => node.id === button.dataset.nodeEdit);
+    if (!node) return;
+    button.title = portalMessage("portal.edit", "Edit");
+    button.setAttribute("aria-label", portalMessage("portal.editValue", "Edit {p1}", { p1: node.title }));
+  });
+  document.querySelectorAll("[data-node-id]").forEach(element => {
+    const node = state.flow?.nodes?.find(item => item.id === element.dataset.nodeId);
+    if (!node) return;
+    const title = element.querySelector(".node-title");
+    if (title) title.textContent = node.title;
+    const subtitle = element.querySelector(".node-subtitle");
+    if (subtitle) subtitle.textContent = flowNodeSubtitle(node);
+    const numberMeta = element.querySelector(".node-number-meta");
+    if (numberMeta) numberMeta.textContent = flowNodeNumberMeta(node);
+    const detail = element.querySelector(".node-detail");
+    if (detail && !["QUEUE", "GROUP", "SKILL"].includes(normalizeTargetType(node.type))) detail.textContent = flowNodeDetail(node);
+    const dock = element.querySelector("[data-node-dock]");
+    if (dock) {
+      dock.title = portalMessage("portal.dragConnection", "Drag connection");
+      dock.setAttribute("aria-label", portalMessage("portal.dragConnectionFromValue", "Drag connection from {p1}", { p1: node.title }));
+    }
+    const actions = element.querySelector(".node-action-buttons");
+    actions?.setAttribute("aria-label", portalMessage("portal.valueActions", "{p0} actions", { p0: node.title }));
+    const remove = element.querySelector("[data-node-delete]");
+    if (remove) {
+      remove.title = portalMessage("portal.delete", "Delete");
+      remove.setAttribute("aria-label", portalMessage("portal.deleteValue", "Delete {p0}", { p0: node.title }));
+    }
+  });
+  document.querySelectorAll("[data-insert-from][data-insert-to]").forEach(button => {
+    const from = state.flow?.nodes?.find(node => node.id === button.dataset.insertFrom) || visibleFlowNodeById(button.dataset.insertFrom);
+    const to = state.flow?.nodes?.find(node => node.id === button.dataset.insertTo) || visibleFlowNodeById(button.dataset.insertTo);
+    if (!from || !to) return;
+    const params = { p7: from.title, p8: to.title };
+    button.title = portalMessage("portal.insertStepHere", "Insert step here");
+    button.setAttribute("data-i18n-params", JSON.stringify(params));
+    button.setAttribute("aria-label", portalMessage("portal.insertStepBetweenValueAndValue", "Insert step between {p7} and {p8}", params));
+  });
+  // Update only the displayed label; selected values and form state remain untouched.
+  document.querySelectorAll("option[data-portal-connection-option]").forEach((option) => {
+    const node = (state.flow?.nodes || []).find(item => item.id === option.value);
+    if (node) option.textContent = connectionTargetLabel(node);
+  });
+  document.querySelectorAll("option[data-portal-target-option]").forEach((option) => {
+    try {
+      const target = JSON.parse(option.value);
+      option.textContent = targetOptionLabel(target.targetNumber || target.number || "", target.type, target.title);
+    } catch { /* Non-JSON options retain their authored label. */ }
+  });
+  document.querySelectorAll("[data-portal-default-key]").forEach((input) => {
+    if (input.value !== input.dataset.portalDefaultValue) {
+      input.removeAttribute("data-portal-default-key");
+      return;
+    }
+    let params = {};
+    try { params = JSON.parse(input.dataset.portalDefaultParams || "{}"); } catch { return; }
+    if (input.id === "daynight-announcement-display-name") params.p0 = selectedAnnouncementName() || portalMessage("portal.announcement", "Announcement");
+    input.value = portalMessage(input.dataset.portalDefaultKey, input.dataset.portalDefaultFallback, params);
+    input.dataset.portalDefaultValue = input.value;
+  });
+  const preview = $("#daynight-gateway-preview");
+  const searches = Array.from(preview?.querySelectorAll('input[type="search"]') || [], input => input.value);
+  localizeResponseMessages(state.daynightGatewayPreview);
+  renderDaynightGatewayPreview();
+  renderFlowProfileActions();
+  preview?.querySelectorAll('input[type="search"]').forEach((input, index) => { input.value = searches[index] || ""; if (input.value) filterSearchableSelect(input, { preserveSelection: true }); });
+  if (state.daynightModeModal && typeof state.daynightModeModal === "object" && state.daynightModeModal.restoredRoutings != null) {
+    state.daynightModeModal.message = portalMessage("portal.valueNumbersRestored", "Numbers restored: {p0}", { p0: state.daynightModeModal.restoredRoutings });
+    renderDaynightModeModal();
+  }
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
 function downloadJsonFile(filename, payload) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
+  link.href = url;
   link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(link.href);
+  try {
+    document.body.appendChild(link);
+    link.click();
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  } finally {
+    link.remove();
+  }
+  // Embedded browsers may consume the file after the click handler returns.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 function safeFileTimestamp(date = new Date()) {
@@ -244,6 +468,8 @@ function safeFileTimestamp(date = new Date()) {
 function renderUiDialog() {
   const modal = $("#app-dialog-modal");
   if (!modal) return;
+  const wasOpen = modal.getAttribute("aria-hidden") === "false";
+  if (uiDialog.open && !wasOpen) uiDialogReturnFocus = document.activeElement;
   modal.className = `app-dialog-modal ${uiDialog.open ? "is-open" : ""} is-${uiDialog.pending ? "pending" : uiDialog.type || "info"}`;
   modal.setAttribute("aria-hidden", uiDialog.open ? "false" : "true");
   $("#app-dialog-title").textContent = uiDialog.title || "";
@@ -256,10 +482,37 @@ function renderUiDialog() {
     confirmButton.hidden = uiDialog.pending;
   }
   if (cancelButton) {
-    cancelButton.textContent = uiDialog.cancelLabel || "Abbrechen";
+    cancelButton.textContent = uiDialog.cancelLabel || portalMessage("portal.cancel", "Cancel");
     cancelButton.disabled = uiDialog.pending;
     cancelButton.hidden = uiDialog.pending || !uiDialog.showCancel;
   }
+  const dialog = modal.querySelector('[role="dialog"]');
+  if (dialog) dialog.tabIndex = -1;
+  if (uiDialog.open) {
+    const active = document.activeElement;
+    if (!modal.contains(active) || active === dialog || active?.hidden || active?.disabled) {
+      const button = uiDialog.showCancel && !uiDialog.pending ? cancelButton : confirmButton;
+      (button && !button.hidden && !button.disabled ? button : dialog)?.focus();
+    }
+  } else if (wasOpen) {
+    const previous = uiDialogReturnFocus;
+    uiDialogReturnFocus = null;
+    const target = previous?.isConnected === false ? document.getElementById(previous.id) : previous;
+    target?.focus?.();
+  }
+}
+
+function trapModalTab(event, modal, focusTarget = modal?.querySelector('[role="dialog"]')) {
+  if (!modal) return;
+  const buttons = [...modal.querySelectorAll("button, input, select, textarea, a[href], [tabindex]")].filter(button => !button.hidden && !button.disabled && button.tabIndex !== -1 && !button.classList.contains("daynight-mode-backdrop") && !button.className?.includes("backdrop") && !button.closest?.("[hidden]"));
+  const index = buttons.indexOf(document.activeElement);
+  event.preventDefault();
+  if (!buttons.length) {
+    focusTarget?.focus();
+    return;
+  }
+  const nextIndex = index < 0 ? (event.shiftKey ? buttons.length - 1 : 0) : (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[nextIndex].focus();
 }
 
 function closeUiDialog(value = false) {
@@ -271,7 +524,10 @@ function closeUiDialog(value = false) {
   if (resolve) resolve(value);
 }
 
+let uiNoticeTimer;
+
 function showUiDialog(options = {}) {
+  $("#action-notice")?.setAttribute("hidden", "");
   if (uiDialog.resolve) closeUiDialog(false);
   Object.assign(uiDialog, {
     open: true,
@@ -279,7 +535,7 @@ function showUiDialog(options = {}) {
     title: options.title || "",
     message: options.message || "",
     confirmLabel: options.confirmLabel || "OK",
-    cancelLabel: options.cancelLabel || "Abbrechen",
+    cancelLabel: options.cancelLabel || portalMessage("portal.cancel", "Cancel"),
     showCancel: Boolean(options.showCancel),
     pending: Boolean(options.pending),
     resolve: null,
@@ -291,7 +547,7 @@ function showUiDialog(options = {}) {
   });
 }
 
-function confirmUi({ title, message, confirmLabel = "OK", cancelLabel = "Abbrechen", type = "confirm" }) {
+function confirmUi({ title, message, confirmLabel = "OK", cancelLabel = portalMessage("portal.cancel", "Cancel"), type = "confirm" }) {
   return showUiDialog({ title, message, confirmLabel, cancelLabel, type, showCancel: true });
 }
 
@@ -300,12 +556,13 @@ function showUiNotice({ title, message, type = "error", confirmLabel = "OK" }) {
 }
 
 function showUiProgress({ title, message }) {
+  $("#action-notice")?.setAttribute("hidden", "");
   uiDialog.open = true;
   uiDialog.type = "pending";
-  uiDialog.title = title || "Bitte warten";
-  uiDialog.message = message || "Die Aktion wird ausgeführt.";
+  uiDialog.title = title || portalMessage("portal.server.pleaseWait", "Please wait");
+  uiDialog.message = message || portalMessage("portal.theActionIsRunning", "The action is running.");
   uiDialog.confirmLabel = "OK";
-  uiDialog.cancelLabel = "Abbrechen";
+  uiDialog.cancelLabel = portalMessage("portal.cancel", "Cancel");
   uiDialog.showCancel = false;
   uiDialog.pending = true;
   uiDialog.resolve = null;
@@ -316,8 +573,8 @@ function showUiProgress({ title, message }) {
       uiDialog.pending = false;
       renderUiDialog();
     },
-    success({ title: successTitle = "Erledigt", message: successMessage = "Die Aktion wurde abgeschlossen." } = {}) {
-      uiDialog.open = true;
+    success({ title: successTitle = portalMessage("portal.server.done", "Done"), message: successMessage = portalMessage("portal.theActionHasCompleted", "The action has completed.") } = {}) {
+      uiDialog.open = false;
       uiDialog.pending = false;
       uiDialog.type = "success";
       uiDialog.title = successTitle;
@@ -325,8 +582,15 @@ function showUiProgress({ title, message }) {
       uiDialog.confirmLabel = "OK";
       uiDialog.showCancel = false;
       renderUiDialog();
+      const notice = $("#action-notice");
+      if (notice) {
+        notice.innerHTML = `<strong>${escapeHtml(successTitle)}</strong><span>${escapeHtml(successMessage)}</span>`;
+        notice.hidden = false;
+        clearTimeout(uiNoticeTimer);
+        uiNoticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
+      }
     },
-    error({ title: errorTitle = "Aktion fehlgeschlagen", message: errorMessage = "Bitte erneut prüfen." } = {}) {
+    error({ title: errorTitle = portalMessage("portal.server.actionFailed", "Action failed"), message: errorMessage = portalMessage("portal.checkAgain", "Check again.") } = {}) {
       uiDialog.open = true;
       uiDialog.pending = false;
       uiDialog.type = "error";
@@ -349,7 +613,7 @@ function requestCallflowRender() {
 
 function readStoredLayouts() {
   try {
-    return JSON.parse(localStorage.getItem(FLOW_LAYOUT_STORAGE_KEY) || "{}");
+    return JSON.parse(portalStorage.getItem(FLOW_LAYOUT_STORAGE_KEY) || "{}");
   } catch {
     return {};
   }
@@ -373,7 +637,7 @@ function applyStoredFlowLayout(flow, did) {
       clampFlowNodePosition(node);
       return node;
     }
-    const position = safeFlowPosition(saved.x, saved.y);
+    const position = boundedFlowPosition(saved.x, saved.y);
     return {
       ...node,
       x: position.x,
@@ -392,43 +656,43 @@ function saveCurrentFlowLayout() {
     updatedAt: new Date().toISOString(),
     nodes: state.flow.nodes.map((node) => ({ id: node.id, x: Number(node.x), y: Number(node.y) })),
   };
-  localStorage.setItem(FLOW_LAYOUT_STORAGE_KEY, JSON.stringify(layouts));
+  portalStorage.setItem(FLOW_LAYOUT_STORAGE_KEY, JSON.stringify(layouts));
 }
 
 function readStoredProfiles() {
   try {
-    return JSON.parse(localStorage.getItem(FLOW_PROFILE_STORAGE_KEY) || "{}");
+    return JSON.parse(portalStorage.getItem(FLOW_PROFILE_STORAGE_KEY) || "{}");
   } catch {
     return {};
   }
 }
 
 function saveStoredProfiles(profiles) {
-  localStorage.setItem(FLOW_PROFILE_STORAGE_KEY, JSON.stringify(profiles));
+  portalStorage.setItem(FLOW_PROFILE_STORAGE_KEY, JSON.stringify(profiles));
 }
 
 function readStoredFlowDrafts() {
   try {
-    return JSON.parse(localStorage.getItem(FLOW_DRAFT_STORAGE_KEY) || "{}");
+    return JSON.parse(portalStorage.getItem(FLOW_DRAFT_STORAGE_KEY) || "{}");
   } catch {
     return {};
   }
 }
 
 function saveStoredFlowDrafts(drafts) {
-  localStorage.setItem(FLOW_DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+  portalStorage.setItem(FLOW_DRAFT_STORAGE_KEY, JSON.stringify(drafts));
 }
 
 function readStoredAppliedFlows() {
   try {
-    return JSON.parse(localStorage.getItem(FLOW_APPLIED_STORAGE_KEY) || "{}");
+    return JSON.parse(portalStorage.getItem(FLOW_APPLIED_STORAGE_KEY) || "{}");
   } catch {
     return {};
   }
 }
 
 function saveStoredAppliedFlows(flows) {
-  localStorage.setItem(FLOW_APPLIED_STORAGE_KEY, JSON.stringify(flows));
+  portalStorage.setItem(FLOW_APPLIED_STORAGE_KEY, JSON.stringify(flows));
 }
 
 function flowDraftKey(did = selectedDid()) {
@@ -438,13 +702,14 @@ function flowDraftKey(did = selectedDid()) {
 }
 
 function normalizeCallflowStructure(flow) {
+  if (flowRoutingConflicts(flow).length) return flow;
   if (!flow?.nodes?.length) return flow;
   const inbound = flow.nodes.find((node) => node.id === "inbound");
   const trunk = flow.nodes.find((node) => node.id === "trunk" || normalizeTargetType(node.type) === "TRUNK");
   if (!inbound || !trunk) return flow;
 
   const trunkLabel = trunk.subtitle || trunk.title || "";
-  if (trunkLabel && !inbound.detail) inbound.detail = `über Leitung ${trunkLabel}`;
+  if (trunkLabel && !inbound.detail) inbound.detail = portalMessage("portal.viaTrunkValue", "via trunk {p0}", { p0: trunkLabel });
 
   flow.nodes.forEach(hydrateExistingResourceNode);
 
@@ -482,7 +747,7 @@ function hydrateExistingResourceNode(node) {
   if (!liveIvr) return;
   const liveConfig = liveIvrConfig(liveIvr);
   node.title = liveIvr.name || node.title;
-  node.subtitle = liveIvr.extensionNumber ? `Sprachdialog ${liveIvr.extensionNumber}` : node.subtitle;
+  node.subtitle = liveIvr.extensionNumber ? portalMessage("portal.voiceDialogValue", "Voice dialog {p0}", { p0: liveIvr.extensionNumber }) : node.subtitle;
   node.targetNumber = liveIvr.extensionNumber || node.targetNumber || "";
   node.routeNumber = liveIvr.serviceNumber || node.routeNumber || "";
   node.config = {
@@ -503,7 +768,12 @@ function didMatchesAppliedSnapshot(did, snapshot) {
   const snapshotNumber = String(target.targetNumber || target.number || "");
   const liveRoute = String(did.destinationServiceNumber || "");
   const liveNumber = String(did.destinationExtension || "");
-  if (snapshotRoute && liveRoute && snapshotRoute !== liveRoute) return false;
+  // A saved canvas is only an overlay for an exact live destination identity.
+  // Older snapshots without target metadata cannot prove that routing is unchanged.
+  const expectedRoute = snapshotRoute || snapshotNumber;
+  const actualRoute = liveRoute || liveNumber;
+  if (!expectedType || !liveType || !expectedRoute || !actualRoute) return false;
+  if (expectedRoute !== actualRoute) return false;
   if (snapshotNumber && liveNumber && snapshotNumber !== liveNumber) return false;
   return true;
 }
@@ -548,20 +818,38 @@ function applyStoredFlowDraft(flow, did) {
   normalizeCallflowStructure(flow);
   const stored = readStoredFlowDrafts()[flowDraftKey(did)];
   if (!stored?.flow?.nodes?.length) return flow;
-  if (!flowOriginalMatchesDid(stored.flow.original, did)) return flow;
-  if (flow?.liveVerifiedAt && stored.updatedAt && new Date(stored.updatedAt) <= new Date(flow.liveVerifiedAt)) {
-    return flow;
-  }
+  const providerConflict = !flowOriginalMatchesDid(stored.flow.original, did)
+    || Boolean(stored.flow.providerRevision && stored.flow.providerRevision !== flow.providerRevision);
   if (flow?.appliedSnapshotAt && stored.updatedAt && new Date(stored.updatedAt) <= new Date(flow.appliedSnapshotAt)) {
     return flow;
   }
   normalizeCallflowStructure(stored.flow);
+  // Opening the editor starts from current routing. Keep older work available
+  // without putting the provider's current flow behind a manual reset step.
+  if (providerConflict) return { ...flow, previousDraft: { updatedAt: stored.updatedAt, flow: stored.flow } };
   return {
     ...flow,
     nodes: stored.flow.nodes,
     edges: stored.flow.edges || flow.edges,
     draftUpdatedAt: stored.updatedAt,
+    providerRevision: stored.flow.providerRevision || flow.providerRevision,
+    ...(stored.previousDraft ? { previousDraft: stored.previousDraft } : {}),
   };
+}
+
+function restorePreviousFlowDraft() {
+  const previous = state.flow?.previousDraft;
+  if (!previous?.flow?.nodes?.length) return;
+  rememberFlowUndo();
+  state.flow.nodes = clone(previous.flow.nodes);
+  state.flow.edges = clone(previous.flow.edges || []);
+  delete state.flow.previousDraft;
+  delete state.flow.providerConflict;
+  state.selectedNodeId = "";
+  state.selectedNodeIds = [];
+  state.inspectorOpen = false;
+  state.selectedBranchField = "";
+  saveCurrentFlowDraft(false);
 }
 
 function saveCurrentFlowDraft(showFeedback = true) {
@@ -572,21 +860,28 @@ function saveCurrentFlowDraft(showFeedback = true) {
   drafts[flowDraftKey()] = {
     updatedAt,
     did: selectedDid()?.name || "",
+    previousDraft: state.flow.previousDraft,
     flow: {
       source: state.flow.source,
       didId: state.flow.didId,
       original: state.flow.original,
+      providerRevision: state.flow.providerRevision,
       nodes: clone(state.flow.nodes),
       edges: clone(state.flow.edges || []),
     },
   };
   saveStoredFlowDrafts(drafts);
   state.flow.draftUpdatedAt = updatedAt;
+  // All draft editors persist here; their previous validation describes an older draft.
+  if (state.actionPlan?.context === "callflow") state.actionPlan = null;
+  state.flowFeedback = null;
+  renderFlowFeedback();
+  renderFlowPlan();
   if (showFeedback) {
     state.flowFeedback = {
       ok: true,
-      title: "Entwurf gespeichert",
-      message: `Layout und Schritte wurden lokal gespeichert (${formatTime(updatedAt)}).`,
+      title: portalMessage("portal.draftSaved", "Draft saved"),
+      message: portalMessage("portal.layoutAndStepsWereSavedLocallyValue", "Layout and steps were saved locally ({p0}).", { p0: formatTime(updatedAt) }),
     };
     renderFlowFeedback();
   }
@@ -601,6 +896,7 @@ function clearCurrentFlowDraft() {
 function reloadCurrentFlowWithoutDraft() {
   const did = selectedDid();
   const baseFlow = applyStoredFlowLayout(buildFlowForDid(did, getOverview()), did);
+  flowUndoHistory.length = 0;
   state.flow = applyStoredAppliedFlow(baseFlow, did);
   state.selectedNodeId = "";
   state.selectedNodeIds = [];
@@ -609,8 +905,10 @@ function reloadCurrentFlowWithoutDraft() {
   state.actionPlan = null;
   state.flowFeedback = {
     ok: true,
-    title: "Lokaler Entwurf gelöscht",
-    message: "Der Live-Zustand ist wieder die Grundlage.",
+    titleKey: "portal.localDraftDeleted",
+    title: portalMessage("portal.localDraftDeleted", "Local draft deleted"),
+    messageKey: "portal.theLiveStateIsTheStartingPointAgain",
+    message: portalMessage("portal.theLiveStateIsTheStartingPointAgain", "The live state is the starting point again."),
   };
 }
 
@@ -618,7 +916,7 @@ function saveAppliedFlowSnapshot(flow, result, did = selectedDid()) {
   if (!flow?.nodes?.length || !did) return;
   const flows = readStoredAppliedFlows();
   const target = result?.target || {};
-  const firstStep = (flow.nodes || []).find((node) => !node.locked && !node.branchTarget);
+  const firstStep = flowStartNode(flow);
   flows[flowDraftKey(did)] = {
     appliedAt: result?.appliedAt || new Date().toISOString(),
     did: did.name || did.id || "",
@@ -653,6 +951,10 @@ function flowMenuSafeAreaWorld() {
   const canvasRect = canvas.getBoundingClientRect();
   const launcherRect = launcher.getBoundingClientRect();
   if (!canvasRect.width || !launcherRect.width) return fallback;
+  if (launcherRect.bottom <= canvasRect.top || launcherRect.top >= canvasRect.bottom
+    || launcherRect.right <= canvasRect.left || launcherRect.left >= canvasRect.right) {
+    return { left: 0, right: 0, top: 0, bottom: 0 };
+  }
   const padding = 28;
   return {
     left: Math.max(0, (launcherRect.left - canvasRect.left + canvas.scrollLeft - padding) / zoom),
@@ -662,11 +964,14 @@ function flowMenuSafeAreaWorld() {
   };
 }
 
-function safeFlowPosition(x, y) {
+function boundedFlowPosition(x, y) {
   const minX = (FLOW_CANVAS_EDGE_PADDING / FLOW_WORLD_WIDTH) * 100;
   const minY = (FLOW_SAFE_TOP / FLOW_POSITION_HEIGHT) * 100;
-  let safeX = Math.max(Number(x) || minX, minX);
-  let safeY = Math.max(Number(y) || minY, minY);
+  return { x: Math.max(Number(x) || minX, minX), y: Math.max(Number(y) || minY, minY) };
+}
+
+function safeFlowPosition(x, y) {
+  let { x: safeX, y: safeY } = boundedFlowPosition(x, y);
   const nodeLeft = (safeX / 100) * FLOW_WORLD_WIDTH;
   const nodeTop = (safeY / 100) * FLOW_POSITION_HEIGHT;
   const menuSafe = flowMenuSafeAreaWorld();
@@ -675,7 +980,12 @@ function safeFlowPosition(x, y) {
     && nodeTop < menuSafe.bottom
     && nodeTop + FLOW_NODE_HEIGHT > menuSafe.top;
   if (overlapsMenu) {
-    safeX = Math.max(safeX, ((menuSafe.right + FLOW_CANVAS_EDGE_PADDING) / FLOW_WORLD_WIDTH) * 100);
+    // A wrapped toolbar spans the canvas: move below it instead of beyond its right edge.
+    if (menuSafe.right - nodeLeft > menuSafe.bottom - nodeTop) {
+      safeY = Math.max(safeY, ((menuSafe.bottom + FLOW_CANVAS_EDGE_PADDING) / FLOW_POSITION_HEIGHT) * 100);
+    } else {
+      safeX = Math.max(safeX, ((menuSafe.right + FLOW_CANVAS_EDGE_PADDING) / FLOW_WORLD_WIDTH) * 100);
+    }
   }
   return {
     x: safeX,
@@ -683,9 +993,31 @@ function safeFlowPosition(x, y) {
   };
 }
 
+function vacantFlowPosition(x, y, nodes = [], candidate = {}) {
+  const gap = 24;
+  // New cards have no DOM yet. Reserve space for wrapped titles, detail text and controls.
+  const candidateHeight = Math.max(240, 120 + Math.ceil(String(candidate.title || "").length / 22) * 20
+    + Math.ceil(String(candidate.subtitle || "").length / 30) * 18);
+  const occupied = nodes.filter(node => node.id !== candidate.id).map(node => {
+    const box = nodeWorldBox(node);
+    return { ...box, height: Math.max(box.height, 240) };
+  });
+  for (let ring = 0; ring <= occupied.length + 1; ring += 1) {
+    for (let row = 0; row <= ring; row += 1) {
+      const position = safeFlowPosition(x + (ring - row) * (FLOW_NODE_WIDTH + gap) / FLOW_WORLD_WIDTH * 100,
+        y + row * (candidateHeight + gap) / FLOW_POSITION_HEIGHT * 100);
+      const left = position.x / 100 * FLOW_WORLD_WIDTH;
+      const top = position.y / 100 * FLOW_POSITION_HEIGHT;
+      if (!occupied.some(box => left < box.x + box.width + gap && left + FLOW_NODE_WIDTH + gap > box.x
+        && top < box.y + box.height + gap && top + candidateHeight + gap > box.y)) return position;
+    }
+  }
+  return safeFlowPosition(x, (Math.max(0, ...occupied.map(box => box.y + box.height)) + gap) / FLOW_POSITION_HEIGHT * 100);
+}
+
 function clampFlowNodePosition(node) {
   if (!node) return;
-  const position = safeFlowPosition(node.x, node.y);
+  const position = boundedFlowPosition(node.x, node.y);
   node.x = position.x;
   node.y = position.y;
 }
@@ -697,8 +1029,8 @@ function sanitizeFlowPositions(flow) {
 }
 
 function formatTime(value) {
-  if (!value) return "noch nicht geprüft";
-  return new Intl.DateTimeFormat("de-DE", {
+  if (!value) return portalMessage("portal.notCheckedYet", "Not checked yet");
+  return new Intl.DateTimeFormat(portalLocale(), {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -724,8 +1056,9 @@ function visibleAccount(overview = getOverview()) {
 
 function overviewShowsManagedDaynightRouting(overview = getOverview()) {
   const dids = overview?.inventory?.dids || [];
+  if (typeof overview?.daynight?.active === "boolean") return overview.daynight.active;
   if (!dids.length) return false;
-  return dids.every((did) => {
+  return dids.some((did) => {
     const type = normalizeTargetType(did.destinationType);
     const name = String(did.destinationName || did.value || "");
     return type === "TIMECONTROL" && name.startsWith("TN ");
@@ -736,28 +1069,69 @@ function syncDaynightActiveFromOverview(overview = getOverview()) {
   const activeInPortal = overviewShowsManagedDaynightRouting(overview);
   if (state.daynightActive !== activeInPortal) {
     state.daynightActive = activeInPortal;
-    localStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, activeInPortal ? "1" : "0");
+    portalStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, activeInPortal ? "1" : "0");
   }
 }
 
 function portalLiveWritesEnabled() {
-  return Boolean(getOverview()?.settings?.liveWritesEnabled);
+  const settings = getOverview()?.settings;
+  return Boolean(settings?.liveWritesEnabled && !settings.liveWritesLocked);
 }
 
 function liveWritesEnabled() {
   return portalLiveWritesEnabled() && !state.daynightActive;
 }
 
-function liveWritesDisabledText() {
-  if (state.daynightActive) {
-    return "Nachtmodus ist aktiv. Änderungen sind gesperrt, bis der Tagmodus wiederhergestellt wurde.";
+function localWritesEnabled() { return liveWritesEnabled() || STATIC_DEMO_MODE; }
+
+function localApplyPermitted() {
+  return localWritesEnabled() || (!state.daynightActive && daynightSetupPermitted() && Boolean(state.overview?.settings?.writeContext));
+}
+
+function liveApplyPermitted() { return !STATIC_DEMO_MODE && localApplyPermitted(); }
+
+function portalApplyPermitted() {
+  return !STATIC_DEMO_MODE && (portalLiveWritesEnabled() || (daynightSetupPermitted() && Boolean(state.overview?.settings?.writeContext)));
+}
+
+async function enableActionWrites(writeContext, current = () => isCurrentWriteContext(writeContext), { allowNightMode = false } = {}) {
+  const permitted = allowNightMode ? portalApplyPermitted : localApplyPermitted;
+  const enabled = allowNightMode ? portalLiveWritesEnabled : localWritesEnabled;
+  if (!current()) return false;
+  if (!permitted()) throw new Error(liveWritesDisabledText());
+  if (enabled()) return true;
+  const result = await fetchJson("/api/settings/live-writes", {
+    method: "POST", writeContext, body: JSON.stringify({ enabled: true }),
+  });
+  if (!current()) return false;
+  if (!permitted() || result.ok === false || result.settings?.writeContext !== writeContext) {
+    throw new Error(result.message || liveWritesDisabledText());
   }
-  return "Live-Schreiben ist im Setup deaktiviert. Dry-runs und Vorschauen bleiben aktiv.";
+  state.overview.settings = result.settings;
+  if (!enabled()) throw new Error(liveWritesDisabledText());
+  return true;
+}
+
+function liveWritesDisabledTitle() {
+  return STATIC_DEMO_MODE ? portalMessage("portal.demo.blockedTitle", "Unavailable in demo mode") : portalMessage("portal.liveWritesDisabled", "Live writes disabled");
+}
+
+if (STATIC_DEMO_MODE) window.NFON_SHOW_DEMO_BLOCKED = () => showUiNotice({ title: liveWritesDisabledTitle(), message: liveWritesDisabledText(), type: "warning" });
+
+function liveWritesDisabledText() {
+  if (STATIC_DEMO_MODE) return portalMessage("portal.demo.blockedMessage", "This action is unavailable in demo mode.");
+  if (getOverview()?.settings?.liveWritesLocked) {
+    return portalMessage("portal.liveWritesLockedByServer", "Read-only mode is enforced by the server.");
+  }
+  if (state.daynightActive) {
+    return portalMessage("portal.nightModeIsActiveChangesAreLockedUntilDay", "Night mode is active. Changes are locked until day mode is restored.");
+  }
+  return portalMessage("portal.liveWritesAreDisabledInSetupDryRunsAnd", "Live writes are disabled in setup. Dry runs and previews stay active.");
 }
 
 function setDaynightActive(active, modalMode = "") {
   state.daynightActive = Boolean(active);
-  localStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, state.daynightActive ? "1" : "0");
+  portalStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, state.daynightActive ? "1" : "0");
   if (modalMode) {
     state.daynightModeModal = modalMode;
   }
@@ -774,36 +1148,46 @@ function closeDaynightModeModal() {
 function renderDaynightModeModal() {
   const modal = $("#daynight-mode-modal");
   if (!modal) return;
+  const wasOpen = !modal.hidden;
   const modalState = state.daynightModeModal;
   const mode = typeof modalState === "string" ? modalState : modalState?.mode;
+  if (mode && !wasOpen) daynightDialogReturnFocus = document.activeElement;
   modal.hidden = !mode;
   modal.classList.toggle("is-open", Boolean(mode));
-  if (!mode) return;
+  if (!mode) {
+    if (wasOpen) {
+      const previous = daynightDialogReturnFocus;
+      daynightDialogReturnFocus = null;
+      const target = previous?.isConnected === false ? document.getElementById(previous.id) : previous;
+      target?.focus?.();
+    }
+    return;
+  }
   const presets = {
     night: {
       symbol: "N",
-      title: "Nachtmodus aktiv",
-      message: "Die Rufnummern laufen jetzt über die vorbereiteten Zeitsteuerungen. Live-Änderungen in der App sind gesperrt.",
+      title: portalMessage("portal.nightModeActive_aaf0e", "Night mode active"),
+      message: portalMessage("portal.theNumbersNowRouteThroughThePreparedTimeControls", "The numbers now route through the prepared time controls. Live changes in the app are locked."),
     },
     day: {
       symbol: "T",
-      title: "Tagmodus aktiv",
-      message: "Die Tagesziele wurden wiederhergestellt. Live-Änderungen sind wieder möglich.",
+      title: portalMessage("portal.dayModeActive", "Day mode active"),
+      message: portalMessage("portal.theDayTargetsHaveBeenRestoredLiveChangesAre", "The day targets have been restored. Live changes are available again."),
     },
     loading: {
       symbol: "...",
-      title: "Bitte warten",
-      message: "Die Portal API verarbeitet die Umschaltung. Das kann einen Moment dauern.",
+      title: portalMessage("portal.server.pleaseWait", "Please wait"),
+      message: portalMessage("portal.thePortalApiIsProcessingTheSwitchThisMay", "The Portal API is processing the switch. This may take a moment."),
     },
     setup: {
       symbol: "!",
-      title: "Setup unvollständig",
-      message: "Bitte erst in Setup den Standard sichern und den Zeitsteuerungs-Plan vollständig vorbereiten.",
+      title: portalMessage("portal.setupIncomplete", "Setup incomplete"),
+      message: portalMessage("portal.firstSaveTheDefaultInSetupAndPrepareThe", "First save the default in Setup and prepare the complete time-control plan."),
     },
     error: {
       symbol: "!",
-      title: "Umschaltung fehlgeschlagen",
-      message: "Die Portal API konnte die Umschaltung nicht vollständig ausführen. Bitte Setup prüfen.",
+      title: portalMessage("portal.switchFailed", "Switch failed"),
+      message: portalMessage("portal.thePortalApiCouldNotCompleteTheSwitchCheck", "The Portal API could not complete the switch. Check Setup."),
     },
   };
   const data = { ...(presets[mode] || presets.error), ...(typeof modalState === "object" ? modalState : {}) };
@@ -826,18 +1210,24 @@ function renderDaynightModeModal() {
     `).join("");
     dialog.appendChild(actions);
   }
+  dialog.tabIndex = -1;
+  const active = document.activeElement;
+  if (!dialog.contains(active) || active === dialog || active?.hidden || active?.disabled) {
+    const button = [...dialog.querySelectorAll("button")].find(item => !item.hidden && !item.disabled);
+    (button || dialog).focus();
+  }
 }
 
-function setDaynightOperationFeedback(result, fallbackTitle = "Aktion ausgeführt") {
+function setDaynightOperationFeedback(result, fallbackTitle = portalMessage("portal.actionCompleted", "Action completed")) {
   const details = [];
   if (Number.isFinite(result?.restoredRoutings)) {
-    details.push(`${result.restoredRoutings} Rufnummer${result.restoredRoutings === 1 ? "" : "n"} zurückgestellt`);
+    details.push(portalMessage("portal.valueNumbersRestored", "{p0} numbers restored", { p0: result.restoredRoutings, p1: result.restoredRoutings === 1 ? "" : "n" }));
   }
   if (Number.isFinite(result?.deletedTimeControls)) {
-    details.push(`${result.deletedTimeControls} Zeitsteuerung${result.deletedTimeControls === 1 ? "" : "en"} gelöscht`);
+    details.push(portalMessage("portal.valueTimeControlsDeleted", "{p0} time controls deleted", { p0: result.deletedTimeControls, p1: result.deletedTimeControls === 1 ? "" : "en" }));
   }
   if (Array.isArray(result?.deleted)) {
-    details.push(`${result.deleted.length} alte Zeitsteuerung${result.deleted.length === 1 ? "" : "en"} gelöscht`);
+    details.push(portalMessage("portal.valueOldTimeControlsDeleted", "{p0} old time controls deleted", { p0: result.deleted.length, p1: result.deleted.length === 1 ? "" : "en" }));
   }
   if (Array.isArray(result?.results)) {
     const created = result.results.filter((item) => item.action === "create-daynight-gateway").length;
@@ -846,11 +1236,11 @@ function setDaynightOperationFeedback(result, fallbackTitle = "Aktion ausgeführ
     const failed = result.results.filter((item) => item.ok === false).length;
     const failedItems = result.results.filter((item) => item.ok === false);
     if (created || updated || skipped) {
-      details.push(`${created} angelegt, ${updated} aktualisiert, ${skipped} unverändert`);
+      details.push(portalMessage("portal.valueCreatedValueUpdatedValueUnchanged", "{p0} created, {p1} updated, {p2} unchanged", { p0: created, p1: updated, p2: skipped }));
     }
     if (failed) {
-      details.push(`${failed} fehlgeschlagen`);
-      details.push(...failedItems.slice(0, 3).map((item) => `${item.did || item.gateway || "Eintrag"}: ${item.error || item.message || "API-Fehler"}`));
+      details.push(portalMessage("portal.valueFailed", "{p0} failed", { p0: failed }));
+      details.push(...failedItems.slice(0, 3).map((item) => `${item.did || item.gateway || portalMessage("portal.entry", "entry")}: ${item.error || item.message || portalMessage("portal.apiError", "API error")}`));
     }
   }
   const appliedAt = result?.appliedAt || new Date().toISOString();
@@ -882,7 +1272,7 @@ async function refreshDaynightAfterLiveError(error, fallbackTitle) {
       ...(state.daynightGatewayPreview || {}),
       ok: false,
       title: fallbackTitle,
-      message: `${error.message || "Live-Aktion fehlgeschlagen"} Danach konnte der aktuelle Anlagenzustand nicht neu geladen werden: ${refreshError.message}`,
+      message: portalMessage("portal.valueTheCurrentPbxStateCouldNotBeReloaded", "{p0} The current PBX state could not be reloaded afterwards: {p1}", { p0: error.message || "Live-Aktion fehlgeschlagen", p1: refreshError.message }),
       blockers: [error.message || fallbackTitle, refreshError.message],
     };
   }
@@ -893,7 +1283,46 @@ function endpointList() {
 }
 
 function endpointIssues() {
-  return endpointList().filter(([key, endpoint]) => !OPTIONAL_ENDPOINT_KEYS.has(key) && !endpoint.ok);
+  return endpointList().filter(([key, endpoint]) => !OPTIONAL_ENDPOINT_KEYS.has(key) && !endpoint.optional && !endpoint.ok);
+}
+
+function portalEndpointErrorText(endpoint) {
+  if (endpoint.ok) return "";
+  const params = { code: endpoint.errorCode || "PORTAL_NETWORK_ERROR" };
+  switch (endpoint.errorKind) {
+    case "dns": return portalMessage("portal.transportDns", "Portal API hostname could not be resolved ({code}).", params);
+    case "timeout": return portalMessage("portal.transportTimeout", "Portal API connection timed out ({code}).", params);
+    case "tls": return portalMessage("portal.transportTls", "Portal API secure connection failed ({code}).", params);
+    case "connection": return portalMessage("portal.transportConnection", "Portal API connection could not be established ({code}).", params);
+    case "network": return portalMessage("portal.transportNetwork", "Portal API network request failed ({code}).", params);
+    default: return portalSystemText(endpoint.error || portalMessage("portal.noDetailsAvailable", "No details available."));
+  }
+}
+
+function portalConnectionStatus(overview = getOverview()) {
+  if (overview?.connection?.authenticationRequired) return { mode: "auth-required", tone: "neutral", label: portalMessage("shared.authRequired", "Sign-in required"), detail: "" };
+  if (state.loading) return { tone: "warning", label: portalMessage("portal.checking_d8a17", "Checking"), detail: "" };
+  if (state.error) return { tone: "error", label: portalMessage("portal.error", "Error"), detail: portalSystemText(state.error) };
+  if (state.demoMode || window.NFON_WEB_ONLY_DEMO || overview?.demo) {
+    return { mode: "demo", tone: "warning", label: "Demo", detail: portalMessage("portal.demoDataActive", "Demo data active") };
+  }
+
+  const required = Object.entries(overview?.endpoints || {}).filter(([key, endpoint]) => !OPTIONAL_ENDPOINT_KEYS.has(key) && !endpoint.optional);
+  const connection = overview?.connection;
+  const total = connection?.requiredTotal ?? required.length;
+  const loaded = connection?.requiredLoaded ?? required.filter(([, endpoint]) => endpoint.ok).length;
+  const status = !overview?.settings?.configured ? "unconfigured"
+    : connection?.state || (!total ? "unchecked" : !loaded ? "unavailable" : loaded < total ? "partial" : "connected");
+  const detail = total
+    ? portalMessage("portal.connectionAreasLoaded", "{loaded} of {total} required API areas loaded.", { loaded, total })
+    : portalMessage("portal.connectionNotChecked", "Connection not checked yet");
+  if (required.some(([, endpoint]) => endpoint.status === 401)) return {tone:"warning",label:portalMessage("portal.loginRequired", "Sign in required"),detail:""};
+  if (status === "unconfigured") return { tone: "warning", label: portalMessage("portal.loginRequired", "Login required"), detail: "" };
+  if (status === "unchecked") return { tone: "warning", label: portalMessage("portal.notCheckedYet", "Not checked yet"), detail: portalMessage("portal.connectionNotChecked", "Connection not checked yet") };
+  if (status === "unavailable") return { tone: "error", label: portalMessage("portal.connectionFailed", "Connection failed"), detail };
+  if (status === "partial") return { tone: "warning", label: portalMessage("portal.apiPartiallyLoaded", "API partially loaded"), detail };
+  if (status === "connected") return { tone: "online", label: portalMessage("portal.ready", "Ready"), detail };
+  return { tone: "warning", label: portalMessage("portal.notCheckedYet", "Not checked yet"), detail: portalMessage("portal.connectionNotChecked", "Connection not checked yet") };
 }
 
 function resourceNumber(item) {
@@ -923,17 +1352,17 @@ function resourceConnections(kind, item) {
   const links = [];
   for (const did of overview?.inventory?.dids || []) {
     if (resourceMatchesTarget(kind, item, did)) {
-      links.push({ label: `Rufnummer ${did.name || did.id}`, detail: did.value || did.destinationName || "direktes Ziel" });
+      links.push({ label: portalMessage("portal.numberValue", "Number {p0}", { p0: did.name || did.id }), detail: did.value || did.destinationName || portalMessage("portal.server.directTarget", "Direct target") });
     }
   }
   for (const ivr of overview?.inventory?.ivrs || []) {
     for (const route of ivr.keyRoutes || []) {
       if (resourceMatchesTarget(kind, item, route.target)) {
-        links.push({ label: `Sprachdialog ${ivr.name}`, detail: `Taste ${route.number}` });
+        links.push({ label: portalMessage("portal.voiceDialogValue", "Voice dialog {p0}", { p0: ivr.name }), detail: portalMessage("portal.keyValue", "Key {p0}", { p0: route.number }) });
       }
     }
     if (resourceMatchesTarget(kind, item, ivr.timeoutTarget)) {
-      links.push({ label: `Sprachdialog ${ivr.name}`, detail: "Timeout" });
+      links.push({ label: portalMessage("portal.voiceDialogValue", "Voice dialog {p0}", { p0: ivr.name }), detail: "Timeout" });
     }
   }
   return links;
@@ -974,7 +1403,21 @@ function nextExtensionNumber(extension) {
   return "299";
 }
 
+function localizeResponseMessages(value) {
+  if (Array.isArray(value)) return value.map(localizeResponseMessages);
+  if (!value || typeof value !== "object") return value;
+  const opaque = new Set(["inventory", "items", "data", "raw", "body", "contacts", "callflow"]);
+  for (const field of ["message", "error", "title", "note", "behaviorNote", "reason", "memberError"]) {
+    if (value[field + "Key"]) value[field] = portalMessage(value[field + "Key"], value[field] || "", value[field + "Params"] || {});
+  }
+  for (const [key, item] of Object.entries(value)) if (!opaque.has(key) && !/Key$|Params$/.test(key) && item && typeof item === "object") localizeResponseMessages(item);
+  return value;
+}
+
 async function fetchJson(url, options = {}) {
+  // Capture the context of the displayed/prepared data before any asynchronous work.
+  // Fetching a CSRF token must never upgrade an old draft into a different account.
+  const writeContext = options.writeContext ?? state.overview?.settings?.writeContext;
   if (isUnsafeRequest(options)) await ensureCsrfToken();
   const response = await fetch(url, {
     ...options,
@@ -982,10 +1425,11 @@ async function fetchJson(url, options = {}) {
       "Accept": "application/json",
       "Content-Type": "application/json",
       ...(isUnsafeRequest(options) ? { "X-CSRF-Token": state.csrfToken } : {}),
+      ...(isUnsafeRequest(options) && writeContext ? { "X-Portal-Context": writeContext } : {}),
       ...(options.headers || {}),
     },
   });
-  const body = await response.json();
+  const body = localizeResponseMessages(await response.json());
   rememberCsrfToken(body);
   if (!response.ok) {
     const error = new Error(body.error || body.message || `HTTP ${response.status}`);
@@ -1021,25 +1465,21 @@ async function ensureCsrfToken() {
   rememberCsrfToken(body);
 }
 
-async function loadCustomers() {
-  if (state.customersLoading) return;
-  state.customersLoading = true;
-  state.customersError = "";
-  renderSettingsSummary();
-  try {
-    const result = await fetchJson("/api/customers");
-    state.customers = result.customers || [];
-    state.customersError = result.ok ? "" : result.error || "";
-  } catch (error) {
-    state.customersError = error.message;
-    state.customers = [];
-  } finally {
-    state.customersLoading = false;
-    renderSettingsSummary();
-  }
+
+function isCurrentWriteContext(writeContext) {
+  return writeContext === state.overview?.settings?.writeContext;
+}
+
+function invalidateExtensionBatch() {
+  extensionBatchRequestGeneration += 1;
+  state.extensionBatchPlan = null;
+  state.extensionBatchLoading = false;
 }
 
 function resetAccountScopedState() {
+  overviewRequestGeneration += 1;
+  serviceRequestGeneration += 1;
+  flowUndoHistory.length = 0;
   state.overview = null;
   state.flow = null;
   state.selectedExtensionId = "";
@@ -1048,12 +1488,23 @@ function resetAccountScopedState() {
   state.selectedNodeIds = [];
   state.selectedBranchField = "";
   state.actionPlan = null;
+  phonebookRequestGeneration += 1;
+  state.phonebookSyncLoading = false;
+  state.phonebookManualRows = [];
+  state.phonebookManualDraft = { firstName: "", name: "", phone: "" };
+  state.phonebookManualDirty = false;
+  state.phonebookUploadFeedback = null;
+  state.daynightGatewayLoading = false;
+  state.daynightAnnouncementLoading = false;
+  invalidateExtensionBatch();
+  state.extensionBatchRows = [emptyExtensionBatchRow()];
   state.daynightGatewayPreview = null;
   state.daynightOperationFeedback = null;
   state.profileTargetValue = "";
   state.daynightAnnouncementName = "";
   state.daynightAnnouncementAfterValue = "";
   state.daynightAnnouncementDisplayName = "";
+  state.daynightAnnouncementDisplayNameEdited = false;
   state.daynightUseAnnouncement = false;
   state.daynightAnnouncementSource = "existing";
   state.serviceGroups = null;
@@ -1063,45 +1514,19 @@ function resetAccountScopedState() {
   state.serviceFeedback = null;
 }
 
-async function switchCustomer(account) {
-  const currentAccount = getOverview()?.account || "";
-  if (!account || account === currentAccount || state.customerSwitching) return;
-  state.customerSwitching = true;
-  state.error = "";
-  state.customerSwitchFeedback = `Prüfe Anlage ${account}...`;
-  renderSettingsSummary();
-  try {
-    const result = await fetchJson("/api/settings/customer", {
-      method: "POST",
-      body: JSON.stringify({ account }),
-    });
-    state.customers = result.customers || state.customers;
-    if (!state.customers.some((customer) => customer.account === result.account)) {
-      state.customers = [
-        ...state.customers,
-        { account: result.account, name: result.customer?.name || result.account, label: result.customer?.label || result.account },
-      ];
-    }
-    state.customerSwitchFeedback = result.message || `Anlage ${result.account} ist aktiv.`;
-    state.manualCustomerAccount = "";
-    resetAccountScopedState();
-    await loadOverview();
-  } catch (error) {
-    state.customerSwitchFeedback = error.message;
-    render();
-  } finally {
-    state.customerSwitching = false;
-    renderSettingsSummary();
-  }
-}
 
 async function loadOverview() {
+  const generation = ++overviewRequestGeneration;
   state.loading = true;
   state.error = "";
   renderStatus();
+  renderSettingsSummary();
+  $("#view-callflow")?.toggleAttribute("inert", true);
+  renderFlowFeedback();
 
   try {
     const overview = await fetchJson("/api/overview");
+    if (generation !== overviewRequestGeneration) return;
     overview.demoFallback = buildDemoOverview(overview);
     state.overview = overview;
     state.authLoginMode = overview.settings?.authMode || state.authLoginMode;
@@ -1116,15 +1541,19 @@ async function loadOverview() {
     state.selectedExtensionId ||= firstExtension?.id || "";
     state.selectedDidId ||= firstDid?.id || "";
     const baseFlow = applyStoredFlowLayout(buildFlowForDid(selectedDid(), getOverview()), selectedDid());
+    flowUndoHistory.length = 0;
     state.flow = applyStoredFlowDraft(applyStoredAppliedFlow(baseFlow, selectedDid()), selectedDid());
     state.selectedNodeId = "";
     state.selectedNodeIds = [];
     state.inspectorOpen = false;
     state.selectedBranchField = "";
   } catch (error) {
+    if (generation !== overviewRequestGeneration) return;
     state.error = error.message;
   } finally {
+    if (generation !== overviewRequestGeneration) return;
     state.loading = false;
+    $("#view-callflow")?.toggleAttribute("inert", false);
     render();
     if (!state.serviceGroups && !state.serviceLoading) {
       loadServiceGroups({ quiet: true });
@@ -1133,7 +1562,11 @@ async function loadOverview() {
 }
 
 async function setLiveWritesEnabled(enabled) {
-  if (state.liveWritesSaving) return;
+  if (state.liveWritesSaving || getOverview()?.settings?.liveWritesLocked) return;
+  if (STATIC_DEMO_MODE) {
+    showUiNotice({title:liveWritesDisabledTitle(),message:liveWritesDisabledText(),type:'warning'});
+    return;
+  }
 
   state.liveWritesSaving = true;
   renderSettingsSummary();
@@ -1146,7 +1579,7 @@ async function setLiveWritesEnabled(enabled) {
     if (state.overview) state.overview.settings = result.settings;
     render();
   } catch (error) {
-    showUiNotice({ title: "Einstellung nicht gespeichert", message: error.message });
+    showUiNotice({ title: portalMessage("portal.settingNotSaved", "Setting not saved"), message: error.message });
   } finally {
     state.liveWritesSaving = false;
     render();
@@ -1213,8 +1646,8 @@ function serviceNumberMeta(entry) {
   const extension = String(entry?.extensionNumber || entry?.value || "").trim();
   const service = String(entry?.serviceNumber || entry?.id || "").trim();
   const parts = [];
-  if (extension) parts.push(`Nebenstelle ${extension}`);
-  if (service && service !== extension) parts.push(`Service ${service}`);
+  if (extension) parts.push(portalMessage("portal.extensionValue", "Extension {p0}", { p0: extension }));
+  if (service && service !== extension) parts.push(portalMessage("portal.serviceValue", "Service {number}", { number: service }));
   return parts.join(" · ");
 }
 
@@ -1227,7 +1660,7 @@ function serviceMemberSummaries(kind, service) {
   const entry = service ? existingServiceDraftEntry(kind, service) : null;
   return (entry?.members || service?.members || []).map((member) => {
     const number = member.extensionNumber || member.id || "";
-    const name = member.name || "Nebenstelle";
+    const name = member.name || portalMessage("portal.extension", "Extension");
     return {
       number,
       name,
@@ -1254,7 +1687,7 @@ function serviceMetaFor(kind, service) {
 
 function findServiceForTarget(type, routeNumber = "", targetNumber = "", title = "") {
   const kind = ["GROUP", "SKILL"].includes(normalizeTargetType(type)) ? "skill" : "queue";
-  const candidates = state.serviceGroups?.[serviceCollectionFromKind(kind)] || [];
+  const candidates = state.serviceGroups?.[serviceCollectionFromKind(kind)] || getOverview()?.inventory?.[serviceCollectionFromKind(kind)] || [];
   const route = String(routeNumber || "").trim();
   const target = String(targetNumber || "").trim();
   const name = String(title || "").trim().toLowerCase();
@@ -1314,14 +1747,14 @@ function nodeServiceMeta(node) {
 
 function readStoredServiceDraft() {
   try {
-    return JSON.parse(localStorage.getItem(serviceDraftStorageKey()) || "null");
+    return JSON.parse(portalStorage.getItem(serviceDraftStorageKey()) || "null");
   } catch {
     return null;
   }
 }
 
 function writeStoredServiceDraft(draft) {
-  localStorage.setItem(serviceDraftStorageKey(), JSON.stringify(draft));
+  portalStorage.setItem(serviceDraftStorageKey(), JSON.stringify(draft));
 }
 
 function cloneServiceDraft(draft = state.serviceDraft) {
@@ -1339,14 +1772,14 @@ function undoServiceDraftChange() {
   const previous = history.pop();
   state.serviceDraftHistory = history;
   if (!previous) {
-    state.serviceFeedback = { type: "info", title: "Nichts rückgängig", message: "Es gibt keine lokale Änderung zum Zurücknehmen." };
+    state.serviceFeedback = { type: "info", title: portalMessage("portal.nothingToUndo", "Nothing to undo"), message: portalMessage("portal.thereIsNoLocalChangeToUndo", "There is no local change to undo.") };
     renderServices();
     return;
   }
   state.serviceDraft = previous;
   writeStoredServiceDraft(state.serviceDraft);
   refreshFlowServiceNodeMeta();
-  state.serviceFeedback = { type: "info", title: "Rückgängig", message: "Die letzte lokale Änderung wurde zurückgenommen." };
+  state.serviceFeedback = { type: "info", title: portalMessage("portal.undo", "Undo"), message: portalMessage("portal.theLastLocalChangeWasUndone", "The last local change was undone.") };
   renderServices();
   if (state.view === "callflow") renderCallflow();
 }
@@ -1354,7 +1787,7 @@ function undoServiceDraftChange() {
 function memberFromExtension(extension, kind) {
   return {
     extensionNumber: extension.number || extension.id,
-    name: extension.name || `Nebenstelle ${extension.number || extension.id}`,
+    name: extension.name || portalMessage("portal.extensionValue", "Extension {p0}", { p0: extension.number || extension.id }),
     type: extension.type || "PHONE",
     penalty: 0,
     skillLevel: 1,
@@ -1368,6 +1801,7 @@ function buildServiceDraft(groups = state.serviceGroups) {
     queues: {},
     skills: {},
     updatedAt: new Date().toISOString(),
+    account: groups?.account || getOverview()?.account || "",
   };
   ["queues", "skills"].forEach((collection) => {
     const kind = collection === "skills" ? "skill" : "queue";
@@ -1378,6 +1812,8 @@ function buildServiceDraft(groups = state.serviceGroups) {
         kind,
         serviceNumber: key,
         name: service.name,
+        baseRevision: service.memberRevision || "",
+        baseMembers: clone(service.members || []),
         color: service.color || defaultServiceColor(kind, service, index),
         members: (service.members || []).map((member) => ({
           extensionNumber: member.extensionNumber || member.id,
@@ -1393,9 +1829,86 @@ function buildServiceDraft(groups = state.serviceGroups) {
   return draft;
 }
 
+function reconcileServiceDraft(groups, stored) {
+  const fresh = buildServiceDraft(groups);
+  state.serviceDraftConflicts = stored?.conflicts || [];
+  if (!stored || stored.account !== fresh.account) return fresh;
+  for (const collection of ["queues", "skills"]) for (const [id, entry] of Object.entries(fresh[collection])) {
+    const previous = stored[collection]?.[id];
+    // A draft may survive reload only against the exact membership snapshot it was based on.
+    if (entry.baseRevision && previous?.baseRevision === entry.baseRevision) fresh[collection][id] = previous;
+    else if (previous && (membershipDelta(previous).add.length || membershipDelta(previous).remove.length || membershipDelta(previous).update.length)) state.serviceDraftConflicts.push({collection,id,previous});
+  }
+  for (const collection of ["queues", "skills"]) for (const [id, previous] of Object.entries(stored[collection] || {})) if (!fresh[collection][id] && (membershipDelta(previous).add.length || membershipDelta(previous).remove.length || membershipDelta(previous).update.length)) state.serviceDraftConflicts.push({collection,id,previous});
+  state.serviceDraftConflicts = state.serviceDraftConflicts.filter((entry,index,all) => all.findIndex(item=>item.collection===entry.collection && item.id===entry.id)===index);
+  fresh.conflicts = state.serviceDraftConflicts;
+  return fresh;
+}
+
+function membershipDelta(entry) {
+  const base = new Map((entry.baseMembers || []).map(member => [String(member.extensionNumber || member.id), member]));
+  const desired = new Map((entry.members || []).map(member => [String(member.extensionNumber || member.id), member]));
+  const settings = member => JSON.stringify([Number(member.penalty || 0), Number(member.skillLevel || 1), member.enabled !== false]);
+  return {
+    baseRevision: entry.baseRevision,
+    add: [...desired].filter(([id]) => !base.has(id)).map(([,member]) => member),
+    remove: [...base.keys()].filter(id => !desired.has(id)),
+    update: [...desired].filter(([id,member]) => base.has(id) && settings(member) !== settings(base.get(id))).map(([,member]) => member),
+  };
+}
+
+function flowMembershipChanges(flow) {
+  const reachable = reachableFlowNodeIds(flow);
+  const services = [], seen = new Set();
+  for (const node of flow?.nodes || []) {
+    if (!reachable.has(node.id) || node.config?.portalMode === "new") continue;
+    const ref = serviceForFlowNode(node);
+    if (!ref) continue;
+    const key = serviceKey(ref.kind, ref.service);
+    const entry = existingServiceDraftEntry(ref.kind, ref.service);
+    if (!entry || seen.has(key)) continue;
+    seen.add(key);
+    const delta = membershipDelta(entry);
+    if (delta.add.length || delta.remove.length || delta.update.length) {
+      services.push({ kind: ref.kind, serviceNumber: entry.serviceNumber, ...delta });
+    }
+  }
+  return { account: state.serviceGroups?.account, services };
+}
+
+function recordFlowMembershipReadback(groups, services, submittedDraft = null) {
+  const fresh = buildServiceDraft(groups);
+  const draft = cloneServiceDraft() || fresh;
+  if (draft.account !== fresh.account) return;
+  for (const {kind, serviceNumber} of services) {
+    const collection = serviceCollectionFromKind(kind);
+    const previous = draft[collection]?.[serviceNumber];
+    const entry = fresh[collection]?.[serviceNumber];
+    if (!previous || !entry?.baseRevision) continue;
+    // Rebase only this Apply's touched services against its readback. Completed
+    // operations disappear from the delta; unfinished/new edits remain drafts.
+    // After a successful Services Apply, only edits made after its submitted
+    // intent remain pending. Partial Callflow readback keeps its original base.
+    const baseMembers = submittedDraft?.[collection]?.[serviceNumber]?.members || previous.baseMembers;
+    const delta = membershipDelta({ ...previous, baseMembers });
+    const members = new Map(entry.members.map(member => [String(member.extensionNumber), member]));
+    delta.remove.forEach(id => members.delete(String(id)));
+    delta.add.forEach(member => { if (!members.has(String(member.extensionNumber))) members.set(String(member.extensionNumber), member); });
+    delta.update.forEach(member => { if (members.has(String(member.extensionNumber))) members.set(String(member.extensionNumber), member); });
+    draft[collection][serviceNumber] = { ...entry, color: previous.color, members: [...members.values()] };
+    for (const snapshot of state.serviceDraftHistory || []) {
+      if (snapshot[collection]?.[serviceNumber]) snapshot[collection][serviceNumber] = clone(entry);
+    }
+  }
+  state.serviceGroups = groups;
+  state.serviceDraft = draft;
+  writeStoredServiceDraft(draft);
+  refreshFlowServiceNodeMeta();
+}
+
 function ensureServiceDraft() {
   if (!state.serviceDraft) {
-    state.serviceDraft = readStoredServiceDraft() || buildServiceDraft();
+    state.serviceDraft = reconcileServiceDraft(state.serviceGroups, readStoredServiceDraft());
   }
   return state.serviceDraft;
 }
@@ -1453,16 +1966,18 @@ function serviceHasChanges(kind, service) {
 }
 
 async function loadServiceGroups(options = {}) {
+  const generation = ++serviceRequestGeneration;
   const quiet = Boolean(options.quiet);
   state.serviceLoading = true;
   if (!quiet) {
-    state.serviceFeedback = { type: "info", title: "Lädt", message: "Warteschlangen und Skillgruppen werden aus der Portal API gelesen." };
+    state.serviceFeedback = { type: "info", title: portalMessage("portal.loading", "Loading"), message: portalMessage("portal.readingQueuesAndSkillGroupsFromThePortalApi", "Reading queues and skill groups from the Portal API.") };
     renderServices();
   }
   try {
     const groups = await fetchJson("/api/service-groups");
+    if (generation !== serviceRequestGeneration) return;
     state.serviceGroups = groups;
-    state.serviceDraft = readStoredServiceDraft() || buildServiceDraft(groups);
+    state.serviceDraft = reconcileServiceDraft(groups, readStoredServiceDraft());
     state.serviceDraftHistory = [];
     refreshFlowServiceNodeMeta();
     const kind = serviceTypeFromMode();
@@ -1474,10 +1989,12 @@ async function loadServiceGroups(options = {}) {
       state.serviceFeedback = null;
     }
   } catch (error) {
+    if (generation !== serviceRequestGeneration) return;
     if (!quiet || state.view === "services") {
-      state.serviceFeedback = { type: "error", title: "Laden fehlgeschlagen", message: error.message };
+      state.serviceFeedback = { type: "error", title: portalMessage("portal.loadingFailed", "Loading failed"), message: error.message };
     }
   } finally {
+    if (generation !== serviceRequestGeneration) return;
     state.serviceLoading = false;
     if (quiet) {
       if (state.view === "callflow") renderCallflow();
@@ -1498,7 +2015,7 @@ function addServiceMembers(kind, serviceId, extensionIds = []) {
   const overview = getOverview();
   const services = state.serviceGroups?.[serviceCollectionFromKind(kind)] || [];
   const service = services.find((item) => String(item.serviceNumber || item.id || item.value) === String(serviceId));
-  if (!service) return;
+  if (!service || service.memberError || !service.memberRevision) return;
   const entry = serviceDraftEntry(kind, service);
   const ids = new Set(extensionIds.map((item) => String(item)));
   const extensions = (overview?.inventory?.extensions || []).filter((item) => ids.has(String(item.id)) || ids.has(String(item.number)));
@@ -1524,10 +2041,10 @@ function addServiceMembers(kind, serviceId, extensionIds = []) {
   state.selectedServiceExtensionIds = [];
   state.serviceFeedback = {
     type: added ? "info" : "success",
-    title: added ? "Entwurf geändert" : "Keine Änderung",
+    title: added ? portalMessage("portal.draftChanged", "Draft changed") : portalMessage("portal.noChange", "No change"),
     message: added
-      ? `${added} Nebenstelle${added === 1 ? "" : "n"} ${added === 1 ? "ist" : "sind"} für ${service.name} vorgemerkt.`
-      : "Die gewählten Nebenstellen waren bereits enthalten.",
+      ? portalMessage("portal.valueExtensionsQueuedForValue", "{p0} extensions queued for {p3}.", { p0: added, p1: added === 1 ? "" : "n", p2: added === 1 ? "ist" : "sind", p3: service.name })
+      : portalMessage("portal.theSelectedExtensionsWereAlreadyIncluded", "The selected extensions were already included."),
   };
   writeStoredServiceDraft(state.serviceDraft);
   renderServices();
@@ -1536,13 +2053,13 @@ function addServiceMembers(kind, serviceId, extensionIds = []) {
 function removeServiceMember(kind, serviceId, extensionNumber) {
   const services = state.serviceGroups?.[serviceCollectionFromKind(kind)] || [];
   const service = services.find((item) => String(item.serviceNumber || item.id || item.value) === String(serviceId));
-  if (!service) return;
+  if (!service || service.memberError || !service.memberRevision) return;
   const entry = serviceDraftEntry(kind, service);
   const nextMembers = (entry.members || []).filter((member) => String(member.extensionNumber) !== String(extensionNumber));
   if (nextMembers.length === (entry.members || []).length) return;
   rememberServiceDraftChange();
   entry.members = nextMembers;
-  state.serviceFeedback = { type: "info", title: "Entwurf geändert", message: "Mitgliedschaft wird beim Übernehmen entfernt." };
+  state.serviceFeedback = { type: "info", title: portalMessage("portal.draftChanged", "Draft changed"), message: portalMessage("portal.membershipWillBeRemovedWhenTheChangesAreApplied", "Membership will be removed when the changes are applied.") };
   writeStoredServiceDraft(state.serviceDraft);
   renderServices();
 }
@@ -1550,7 +2067,7 @@ function removeServiceMember(kind, serviceId, extensionNumber) {
 function updateServiceMember(kind, serviceId, extensionNumber, patch) {
   const services = state.serviceGroups?.[serviceCollectionFromKind(kind)] || [];
   const service = services.find((item) => String(item.serviceNumber || item.id || item.value) === String(serviceId));
-  if (!service) return;
+  if (!service || service.memberError || !service.memberRevision) return;
   const entry = serviceDraftEntry(kind, service);
   const member = (entry.members || []).find((item) => String(item.extensionNumber) === String(extensionNumber));
   if (!member) return;
@@ -1558,7 +2075,7 @@ function updateServiceMember(kind, serviceId, extensionNumber, patch) {
   if (!hasChange) return;
   rememberServiceDraftChange();
   Object.assign(member, patch);
-  state.serviceFeedback = { type: "info", title: "Entwurf geändert", message: "Mitgliedschaftseinstellung vorgemerkt." };
+  state.serviceFeedback = { type: "info", title: portalMessage("portal.draftChanged", "Draft changed"), message: portalMessage("portal.server.membershipSettingQueued", "Membership setting queued.") };
   writeStoredServiceDraft(state.serviceDraft);
   renderServices();
 }
@@ -1571,7 +2088,7 @@ function updateServiceColor(kind, targetServiceId, colorId) {
   if (entry.color === colorId) return;
   rememberServiceDraftChange();
   entry.color = colorId;
-  state.serviceFeedback = { type: "info", title: "Farbe gespeichert", message: "Die Farbe wird im Gruppenbereich und im Callflow gespiegelt." };
+  state.serviceFeedback = { type: "info", title: portalMessage("portal.colourSaved", "Colour saved"), message: portalMessage("portal.theColourIsUsedInTheGroupViewAnd", "The colour is used in the group view and callflow.") };
   writeStoredServiceDraft(state.serviceDraft);
   renderServices();
   if (state.view === "callflow") renderCallflow();
@@ -1579,63 +2096,92 @@ function updateServiceColor(kind, targetServiceId, colorId) {
 
 function validateServiceDraft(showSuccess = true) {
   const groups = state.serviceGroups;
-  if (!groups) return { ok: false, message: "Noch keine Service-Daten geladen." };
+  if (!groups) return { ok: false, message: portalMessage("portal.noServiceDataLoadedYet", "No service data loaded yet.") };
   const allServices = [
     ...(groups.queues || []).map((service) => ({ kind: "queue", service })),
     ...(groups.skills || []).map((service) => ({ kind: "skill", service })),
   ];
-  const changed = allServices.filter(({ kind, service }) => serviceHasChanges(kind, service));
+  const changed = allServices.filter(({ kind, service }) => !service.memberError && service.memberRevision && serviceHasChanges(kind, service));
   if (!changed.length) {
-    state.serviceFeedback = { type: "info", title: "Keine Änderung", message: "Der Entwurf entspricht dem Live-Stand." };
+    state.serviceFeedback = { type: "info", title: portalMessage("portal.noChange", "No change"), message: portalMessage("portal.theDraftMatchesTheLiveState", "The draft matches the live state.") };
     renderServices();
-    return { ok: false, message: "Keine Änderung." };
+    return { ok: false, message: portalMessage("portal.noChange_850e8", "No change.") };
   }
   const emptyService = changed.find(({ kind, service }) => !(serviceDraftEntry(kind, service).members || []).length);
   if (emptyService) {
-    state.serviceFeedback = { type: "error", title: "Prüfung fehlgeschlagen", message: `${emptyService.service.name} hätte danach keine Mitglieder.` };
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.checkFailed", "Check failed"), message: portalMessage("portal.valueWouldHaveNoMembersAfterwards", "{p0} would have no members afterwards.", { p0: emptyService.service.name }) };
     renderServices();
-    return { ok: false, message: "Leere Zielgruppe." };
+    return { ok: false, message: portalMessage("portal.server.emptyTargetGroup", "Empty target group.") };
   }
   if (showSuccess) {
-    state.serviceFeedback = { type: "success", title: "Entwurf bereit", message: `${changed.length} Service${changed.length === 1 ? "" : "s"} mit geänderten Mitgliedschaften.` };
+    state.serviceFeedback = { type: "success", title: portalMessage("portal.draftReady", "Draft ready"), message: portalMessage("portal.valueServicesWithChangedMemberships", "{p0} services with changed memberships.", { p0: changed.length, p1: changed.length === 1 ? "" : "s" }) };
     renderServices();
   }
   return { ok: true, changed };
 }
 
 async function applyServiceDraft() {
-  if (!liveWritesEnabled()) {
-    state.serviceFeedback = { type: "error", title: "Live-Schreiben deaktiviert", message: liveWritesDisabledText() };
+  if (state.serviceApplying) return;
+  if (!localApplyPermitted()) {
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"), message: liveWritesDisabledText() };
     renderServices();
     return;
   }
   const validation = validateServiceDraft(false);
   if (!validation.ok) return;
-  state.serviceFeedback = { type: "info", title: "Übernahme läuft", message: "Portal API aktualisiert Mitgliedschaften." };
-  renderServices();
-  const payload = {
+  const names = validation.changed.map(({ service }) => service.name).join("\n");
+  const writeContext = state.overview?.settings?.writeContext;
+  const preparedDraft = state.serviceDraft;
+  const draftSnapshot = JSON.stringify(preparedDraft);
+  const current = () => isCurrentWriteContext(writeContext) && state.serviceDraft === preparedDraft;
+  const payload = clone({
+    account: state.serviceGroups.account,
     services: validation.changed.map(({ kind, service }) => {
       const entry = serviceDraftEntry(kind, service);
-      return {
-        kind,
-        serviceNumber: entry.serviceNumber,
-        members: entry.members,
-      };
+      return { kind, serviceNumber: entry.serviceNumber, ...membershipDelta(entry) };
     }),
-  };
+  });
+  state.serviceApplying = true;
+  renderServices();
   try {
-    const result = await fetchJson("/api/service-groups/apply", { method: "POST", body: JSON.stringify(payload) });
+    const confirmed = await confirmUi({
+      title: portalMessage("portal.applyChanges", "Apply changes"),
+      message: portalMessage("portal.applyMembershipChanges", "Apply membership changes to these groups?\n{names}", { names }),
+      confirmLabel: portalMessage("portal.apply", "Apply"),
+    });
+    if (!confirmed || !current() || !localApplyPermitted() || JSON.stringify(state.serviceDraft) !== draftSnapshot) return;
+    state.serviceFeedback = { type: "info", title: portalMessage("portal.applyingChanges", "Applying changes"), message: portalMessage("portal.server.thePortalApiIsUpdatingMemberships", "The Portal API is updating memberships.") };
+    renderServices();
+    if (!localWritesEnabled()) {
+      const result = await fetchJson("/api/settings/live-writes", {
+        method: "POST", writeContext, body: JSON.stringify({ enabled: true }),
+      });
+      if (!current() || !localApplyPermitted() || JSON.stringify(state.serviceDraft) !== draftSnapshot) return;
+      if (result.ok === false || result.settings?.writeContext !== writeContext) throw new Error(result.message || liveWritesDisabledText());
+      state.overview.settings = result.settings;
+      if (!localWritesEnabled()) throw new Error(liveWritesDisabledText());
+    }
+    const result = await fetchJson("/api/service-groups/apply", { method: "POST", writeContext, body: JSON.stringify(payload) });
+    if (!current()) return;
     if (result.overview) state.overview = result.overview;
-    state.serviceGroups = result.serviceGroups;
-    state.serviceDraft = buildServiceDraft(result.serviceGroups);
-    state.serviceDraftHistory = [];
-    writeStoredServiceDraft(state.serviceDraft);
-    state.serviceFeedback = { type: "success", title: result.title || "Übernommen", message: result.message || "Änderungen übernommen." };
+    if (JSON.stringify(state.serviceDraft) === draftSnapshot) {
+      state.serviceGroups = result.serviceGroups;
+      state.serviceDraft = buildServiceDraft(result.serviceGroups);
+      state.serviceDraftHistory = [];
+      writeStoredServiceDraft(state.serviceDraft);
+    } else {
+      recordFlowMembershipReadback(result.serviceGroups, payload.services, JSON.parse(draftSnapshot));
+    }
+    state.serviceFeedback = { type: "success", title: result.title || portalMessage("portal.applied", "Applied"), message: result.message || portalMessage("portal.changesApplied", "Changes applied.") };
     render();
   } catch (error) {
-    state.serviceFeedback = { type: "error", title: "Übernahme fehlgeschlagen", message: error.message };
+    if (!current()) return;
+    const partial = error.body;
+    if (partial?.completed) await loadServiceGroups({quiet:true});
+    if (!isCurrentWriteContext(writeContext)) return;
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.applyingChangesFailed", "Applying changes failed"), message: error.message, operations: partial?.completed ? partial : null };
     renderServices();
-  }
+  } finally { state.serviceApplying = false; renderServices(); }
 }
 
 function buildDemoOverview(base = {}) {
@@ -1646,6 +2192,7 @@ function buildDemoOverview(base = {}) {
   ];
   const overview = {
     ...base,
+    settings: { ...base.settings, liveWritesEnabled: false, liveWritesLocked: true },
     ok: true,
     demo: true,
     account: base.account || "Demo",
@@ -1676,9 +2223,9 @@ function buildDemoOverview(base = {}) {
       groups: [{ id: "10", name: "Reception Group" }],
       queues: [{ id: "10000", name: "Demo Frontdesk", value: "10000" }],
       skills: [{ id: "11", name: "Demo Skill", value: "11" }],
-      ivrs: [{ id: "20", name: "Welcome Sprachdialog" }],
+      ivrs: [{ id: "20", name: portalMessage("portal.server.welcomeVoiceDialog", "Welcome voice dialog") }],
       timeControls: [{ id: "30", name: "Business Hours" }],
-      announcements: [{ id: "40", name: "Nachtansage", value: "GENERAL_ANNOUNCEMENT" }],
+      announcements: [{ id: "40", name: portalMessage("portal.server.nightAnnouncement", "Night announcement"), value: "GENERAL_ANNOUNCEMENT" }],
     },
     endpoints: {},
     syncedAt: new Date().toISOString(),
@@ -1693,23 +2240,23 @@ function buildDemoFlow(overview) {
 
 function targetTypeLabel(type) {
   const labels = {
-    PHONEEXTENSION: "Nebenstelle",
-    PHONE: "Nebenstelle",
-    QUEUE: "Warteschlange",
-    GROUP: "Skillgruppe",
-    SKILL: "Skillgruppe",
-    VOICEMAIL: "Anrufbeantworter",
+    PHONEEXTENSION: portalMessage("portal.extension", "Extension"),
+    PHONE: portalMessage("portal.extension", "Extension"),
+    QUEUE: portalMessage("portal.queue", "Queue"),
+    GROUP: portalMessage("portal.skillGroup", "Skill group"),
+    SKILL: portalMessage("portal.skillGroup", "Skill group"),
+    VOICEMAIL: portalMessage("portal.voicemail", "Voicemail"),
     FRONTDESK: "Frontdesk",
-    IVR: "Sprachdialog",
-    TIMECONTROL: "Zeitsteuerung",
-    ANNOUNCEMENT: "Ansage",
-    HANGUP: "Auflegen",
-    NEW_NIGHT_TARGET: "Neues Nachtziel",
-    PLACEHOLDER: "Offener Schritt",
-    UNASSIGNED: "Kein Ziel",
-    TRUNK: "Leitung",
+    IVR: portalMessage("portal.voiceDialog", "Voice dialog"),
+    TIMECONTROL: portalMessage("portal.timeControl", "Time control"),
+    ANNOUNCEMENT: portalMessage("portal.announcement", "Announcement"),
+    HANGUP: portalMessage("portal.hangUp", "Hang up"),
+    NEW_NIGHT_TARGET: portalMessage("portal.newNightTarget", "New night target"),
+    PLACEHOLDER: portalMessage("portal.unconfiguredStep", "Unconfigured step"),
+    UNASSIGNED: portalMessage("portal.noTarget", "No target"),
+    TRUNK: portalMessage("portal.line", "Line"),
   };
-  return labels[String(type || "").toUpperCase()] || "Ziel";
+  return labels[String(type || "").toUpperCase()] || portalMessage("portal.destination", "Destination");
 }
 
 function displayTargetName(type, name) {
@@ -1717,12 +2264,15 @@ function displayTargetName(type, name) {
 }
 
 function targetNumberFromText(value) {
-  const match = String(value || "").match(/\b\d{1,8}\b/);
+  const text = String(value || "");
+  // A schedule describes a time window, never a destination extension.
+  if (/\b\d{1,2}:\d{2}\b/.test(text)) return "";
+  const match = text.match(/\b\d{1,8}\b/);
   return match ? match[0] : "";
 }
 
 function targetOptionLabel(number, type, name) {
-  return `${number || "-"} - (${targetTypeLabel(type)} | ${displayTargetName(type, name) || "ohne Name"})`;
+  return `${number || "-"} - (${targetTypeLabel(type)} | ${displayTargetName(type, name) || portalMessage("portal.unnamed", "Unnamed")})`;
 }
 
 function targetOptionSortValue(target) {
@@ -1744,7 +2294,7 @@ function targetOptionSortValue(target) {
 function compareTargetOptions(left, right) {
   const a = targetOptionSortValue(left);
   const b = targetOptionSortValue(right);
-  return a.number - b.number || a.type - b.type || a.title.localeCompare(b.title, "de");
+  return a.number - b.number || a.type - b.type || a.title.localeCompare(b.title, portalLocale());
 }
 
 function cubicPoint(p0, p1, p2, p3, t) {
@@ -1812,21 +2362,64 @@ function flowTargetFromApiTarget(target, seenIvrs = new Set()) {
     tone: target.tone || targetTone(type),
     ...serviceMetaForTarget(type, routeNumber, targetNumber, target.title || target.name),
   };
+  const subtitleKey = { QUEUE: "portal.queueValue", SKILL: "portal.skillGroupValue" }[type];
+  if (subtitleKey && targetNumber) {
+    const generatedLabels = Object.values(window.NFON_MESSAGES?.[subtitleKey] || {})
+      .filter(value => typeof value === "string").map(value => value.replace(/\{p0\}/g, targetNumber));
+    if (generatedLabels.includes(normalized.subtitle)) normalized._i18nDefaults = {
+      subtitle: { key: subtitleKey, params: { p0: targetNumber }, value: normalized.subtitle },
+    };
+  }
   ["serviceKind", "serviceColor", "serviceAccent", "serviceSoft", "memberCount", "memberNames", "memberTargets"].forEach((key) => {
     if (target[key] !== undefined && target[key] !== "") normalized[key] = target[key];
   });
-  if (type === "Sprachdialog") {
+  if (type === "HANGUP") {
+    setFlowNodeDefault(normalized, "title", { key: "portal.hangUp", fallback: "Hang up" });
+    setFlowNodeDefault(normalized, "subtitle", { key: "portal.endCall", fallback: "End call" });
+  }
+  if (type === "IVR") {
     const liveIvr = inventoryIvrForTarget(target, routeNumber, targetNumber);
-    const liveKey = ivrInventoryKey(liveIvr);
+    const liveKey = liveIvr ? `IVR:${ivrInventoryKey(liveIvr)}` : "";
+    normalized.config = { portalMode: "existing", ivrKeys: [], ivrKeysVerified: true };
     if (liveIvr && liveKey && !seenIvrs.has(liveKey)) {
       normalized.title = liveIvr.name || normalized.title;
-      normalized.subtitle = liveIvr.extensionNumber ? `Sprachdialog ${liveIvr.extensionNumber}` : normalized.subtitle;
+      normalized.subtitle = liveIvr.extensionNumber ? portalMessage("portal.voiceDialogValue", "Voice dialog {p0}", { p0: liveIvr.extensionNumber }) : normalized.subtitle;
       normalized.targetNumber = liveIvr.extensionNumber || normalized.targetNumber;
       normalized.routeNumber = liveIvr.serviceNumber || normalized.routeNumber;
       normalized.config = liveIvrConfig(liveIvr, seenIvrs);
     }
   }
+  if (type === "TIMECONTROL") {
+    const control = (getOverview()?.inventory?.timeControls || []).find(item =>
+      [item.serviceNumber, item.id, item.value, item.extensionNumber].some(value => value != null && [String(routeNumber), String(targetNumber)].includes(String(value))));
+    normalized.config = { portalMode: "existing" };
+    const key = control ? `TIMECONTROL:${control.serviceNumber || control.id || control.value}` : "";
+    if (control && !control.detailError && !seenIvrs.has(key)) {
+      const seen = new Set([...seenIvrs, key]);
+      normalized.config = { ...normalized.config, branchSource: "verified-live",
+        hours: control.hours || "",
+        timezoneHref: control.timezoneHref || "", evaluationStrategy: control.evaluationStrategy || "",
+        openTarget: flowTargetFromApiTarget(control.dayTarget || flowApiTargetFromHref(control.dayTargetHref), seen),
+        closedTarget: flowTargetFromApiTarget(control.nightTarget || flowApiTargetFromHref(control.nightTargetHref), seen) };
+    }
+  }
   return normalized;
+}
+
+// Retained local/demo snapshots may only have provider links, without hydrated target objects.
+function flowApiTargetFromHref(href) {
+  const value = String(href || "");
+  if (!value) return null;
+  if (/\/HANGUP$/i.test(value)) return { type: "HANGUP", routeNumber: "HANGUP" };
+  const collections = { "phone-extensions": ["PHONEEXTENSION", "extensions"], "ivr-services": ["IVR", "ivrs"],
+    "time-control-services": ["TIMECONTROL", "timeControls"], "queue-services": ["QUEUE", "queues"] };
+  const match = value.match(/\/([^/]+)\/([^/]+)\/?$/);
+  const entry = match && collections[match[1]];
+  if (!entry) return null;
+  const item = (getOverview()?.inventory?.[entry[1]] || []).find(item =>
+    item.href === value || [item.serviceNumber, item.id, item.value, item.extensionNumber, item.number].some(number => String(number) === match[2]));
+  return { type: entry[0], routeNumber: item?.serviceNumber || match[2],
+    targetNumber: item?.extensionNumber || item?.number || item?.value || match[2], title: item?.name || "" };
 }
 
 function liveIvrForDid(did, overview) {
@@ -1842,7 +2435,7 @@ function liveIvrForDid(did, overview) {
 function liveIvrConfig(ivr, seenIvrs = new Set()) {
   const nextSeenIvrs = new Set(seenIvrs);
   const currentKey = ivrInventoryKey(ivr);
-  if (currentKey) nextSeenIvrs.add(currentKey);
+  if (currentKey) nextSeenIvrs.add(`IVR:${currentKey}`);
   const keys = (ivr?.keyRoutes || [])
     .map((route) => String(route.number || ""))
     .filter(Boolean);
@@ -1864,57 +2457,54 @@ function liveIvrConfig(ivr, seenIvrs = new Set()) {
   return config;
 }
 
+function flowProviderSignature(value) {
+  if (Array.isArray(value)) return value.map(flowProviderSignature);
+  if (!value || typeof value !== "object") return value;
+  const presentation = new Set(["title", "subtitle", "name", "tone", "x", "y", "id", "_i18nDefaults", "serviceColor", "serviceAccent", "serviceSoft", "memberNames", "memberCount", "memberTargets"]);
+  return Object.fromEntries(Object.keys(value).sort().filter(key => !presentation.has(key))
+    .map(key => [key, flowProviderSignature(value[key])]));
+}
+
 function buildFlowForDid(did, overview) {
-  const selected = did || overview?.inventory?.dids?.[0] || {};
+  const selected = did || overview?.inventory?.dids?.[0];
+  if (!selected) return { nodes: [], edges: [], source: overview?.demo ? "demo" : "portal-live" };
   const trunk = selected.trunkNumber || overview?.inventory?.trunks?.[0]?.name || "SIP Trunk";
-  const destinationTitle = selected.destinationName || selected.value || selected.destinationExtension || "Ziel wählen";
+  const destinationTitle = selected.destinationName || selected.value || selected.destinationExtension || portalMessage("portal.selectTarget", "Select target");
   const destinationSubtitle = selected.destinationExtension
     ? `${targetTypeLabel(selected.destinationType)} ${selected.destinationExtension}`
     : targetTypeLabel(selected.destinationType);
-  const liveIvr = liveIvrForDid(selected, overview);
-  const isLiveIvr = normalizeTargetType(selected.destinationType) === "IVR" && Boolean(liveIvr);
-  const liveIvrTitle = liveIvr?.name || destinationTitle;
-  const targetNode = isLiveIvr
-    ? {
-      id: "target",
-      type: "IVR",
-      title: liveIvrTitle,
-      subtitle: destinationSubtitle,
-      targetNumber: selected.destinationExtension || liveIvr.extensionNumber || "",
-      routeNumber: selected.destinationServiceNumber || liveIvr.serviceNumber || selected.destinationExtension || "",
-      x: 46,
-      y: 54,
-      tone: targetTone("IVR"),
-      config: liveIvrConfig(liveIvr),
-    }
-    : {
-      id: "target",
-      type: selected.destinationType || "PHONEEXTENSION",
-      title: destinationTitle,
-      subtitle: destinationSubtitle,
+  const targetNode = {
+    id: "target", x: 46, y: 54,
+    ...flowTargetFromApiTarget({ type: selected.destinationType || "PHONEEXTENSION",
+      title: destinationTitle, subtitle: destinationSubtitle,
       targetNumber: selected.destinationExtension || "",
-      routeNumber: selected.destinationServiceNumber || selected.destinationExtension || "",
-      x: 46,
-      y: 54,
-      tone: targetTone(selected.destinationType),
-      isTarget: true,
-    };
+      routeNumber: selected.destinationServiceNumber || selected.destinationExtension || "" }),
+  };
+  targetNode.isTarget = !["IVR", "TIMECONTROL"].includes(normalizeTargetType(targetNode.type));
+  // Revision contains routing content only: refresh timestamps and translated labels
+  // must not invalidate a local draft. Provider branch/config changes must.
+  const providerRevision = JSON.stringify(flowProviderSignature({
+    destinationType: selected.destinationType, destinationExtension: selected.destinationExtension,
+    destinationServiceNumber: selected.destinationServiceNumber, target: targetNode,
+  }));
   return {
     source: overview?.demo ? "demo" : "portal-live",
     didId: selected.id || selected.name || "did",
-    liveVerifiedAt: isLiveIvr ? overview?.syncedAt : "",
+    liveVerifiedAt: targetNode.config?.branchSource === "verified-live" ? overview?.syncedAt : "",
+    writeContext: overview?.settings?.writeContext,
+    providerRevision,
     original: {
-      did: selected.name || selected.id || "Rufnummer",
+      did: selected.name || selected.id || portalMessage("portal.number_b7905", "Number"),
       destinationName: selected.destinationName || selected.value || "",
       destinationExtension: selected.destinationExtension || "",
       destinationType: selected.destinationType || "",
     },
     nodes: [
-      { id: "inbound", type: "DID", title: "Eingehender Anruf", subtitle: selected.name || selected.id || "Rufnummer", detail: `über Leitung ${trunk}`, x: 46, y: 24, tone: "indigo", locked: true },
+      { id: "inbound", type: "DID", title: portalMessage("portal.incomingCall", "Incoming call"), subtitle: selected.name || selected.id || portalMessage("portal.number_b7905", "Number"), detail: portalMessage("portal.viaTrunkValue", "via trunk {p0}", { p0: trunk }), x: 46, y: 24, tone: "indigo", locked: true },
       targetNode,
     ],
     edges: [
-      { from: "inbound", to: "target", label: "führt zu" },
+      { from: "inbound", to: "target", label: portalMessage("portal.routesTo", "routes to") },
     ],
   };
 }
@@ -1949,12 +2539,21 @@ function render() {
   renderView();
 }
 
-function renderHeader() {
+function refreshPortalAccountLabel() {
+  const target = $("#account-label");
+  if (!target) return;
   const overview = getOverview();
   const account = visibleAccount(overview);
-  $("#account-label").textContent = overview
-    ? `${account || "Login erforderlich"} · geprüft ${formatTime(overview.syncedAt)}`
-    : "Telefonie-Daten ansehen und Änderungen vorbereiten";
+  const displayAccount = window.NFON_WEB_ONLY_DEMO && account === "Demo-Anlage"
+    ? portalMessage("portal.demo.accountName", "Demo PBX")
+    : account;
+  target.textContent = overview
+    ? portalMessage("portal.valueCheckedValue", "{p0} · checked {p1}", { p0: displayAccount || portalMessage("portal.loginRequired", "Login required"), p1: formatTime(overview.syncedAt) })
+    : portalMessage("portal.viewTelephonyDataAndPrepareChanges", "View telephony data and prepare changes");
+}
+
+function renderHeader() {
+  refreshPortalAccountLabel();
   const demoToggle = $("#demo-toggle");
   if (demoToggle) demoToggle.checked = state.demoMode;
   renderSettingsSummary();
@@ -1964,99 +2563,91 @@ function renderHeader() {
 function renderStatus() {
   const connection = $("#connection-state");
   if (!connection) return;
-
-  connection.className = "connection";
-  connection.removeAttribute("title");
-
-  if (state.loading) {
-    connection.textContent = "Prüft";
-    return;
-  }
-  if (state.error) {
-    connection.classList.add("is-error");
-    connection.textContent = "Fehler";
-    connection.title = state.error;
-    return;
-  }
-
-  const issues = endpointIssues();
-  const overview = getOverview();
-  if (overview?.demo || state.demoMode) {
-    connection.classList.add("is-warning");
-    connection.textContent = "Demo";
-    connection.title = "Demo-Daten aktiv";
-  } else if (issues.length) {
-    connection.classList.add("is-warning");
-    connection.textContent = "API teilweise geladen";
-    connection.title = `${issues.length} technischer API-Bereich${issues.length === 1 ? "" : "e"} konnte${issues.length === 1 ? "" : "n"} nicht geladen werden. Details stehen unter Setup.`;
-  } else {
-    connection.classList.add("is-online");
-    connection.textContent = "Bereit";
-    connection.title = "Portal API erreichbar";
-  }
+  const status = state.staticPaused && STATIC_DEMO_MODE
+    ? { mode: "demo", tone: "neutral", label: portalMessage("demo.landing.paused", "Demo paused"), detail: "" }
+    : portalConnectionStatus();
+  connection.className = status.mode === "demo" ? "connection" : `connection is-${status.tone}`;
+  connection.setAttribute("data-i18n-ignore", "");
+  if (status.mode === "demo") connection.setAttribute("data-status-mode", "demo");
+  else connection.removeAttribute("data-status-mode");
+  connection.textContent = status.label;
+  if (status.detail) connection.title = status.detail;
+  else connection.removeAttribute("title");
 }
 
 function renderMetrics() {
   const overview = getOverview();
   const issues = endpointIssues().length;
+  const count = key => overview?.endpoints?.[key]?.ok === false ? "—" : overview?.counts?.[key] ?? "—";
   const statMetrics = [
-    { label: "Nebenstellen", value: overview?.counts?.extensions ?? "-" },
-    { label: "Rufnummern", value: overview?.counts?.dids ?? "-" },
-    { label: "Geräte", value: overview?.counts?.devices ?? "-" },
-    { label: "Hinweise", value: issues },
+    { label: portalMessage("portal.extensions", "Extensions"), value: count("extensions") },
+    { label: portalMessage("portal.numbers", "Numbers"), value: count("dids") },
+    { label: portalMessage("portal.devices", "Devices"), value: count("devices") },
+    { label: portalMessage("portal.notes", "Notes"), value: issues },
   ];
   const resourceMetrics = [
-    { label: "Warteschlangen", value: overview?.counts?.queues ?? "-", resource: "queues" },
-    { label: "Skillgruppen", value: overview?.counts?.skills ?? "-", resource: "skills" },
-    { label: "Sprachdialoge", value: overview?.counts?.ivrs ?? "-", resource: "ivrs" },
-    { label: "Zeitsteuerungen", value: overview?.counts?.timeControls ?? "-", resource: "timeControls" },
+    { label: portalMessage("portal.queues", "Queues"), value: count("queues"), resource: "queues" },
+    { label: portalMessage("portal.skillGroups", "Skill groups"), value: count("skills"), resource: "skills" },
+    { label: portalMessage("portal.voiceDialogs", "Voice dialogs"), value: count("ivrs"), resource: "ivrs" },
+    { label: portalMessage("portal.timeControls", "Time controls"), value: count("timeControls"), resource: "timeControls" },
   ].concat(
     overview?.endpoints?.frontdesks?.ok
-      ? [{ label: "Frontdesk/Nia", value: overview?.counts?.frontdesks ?? "-", resource: "frontdesks" }]
+      ? [{ label: "Frontdesk/Nia", value: count("frontdesks"), resource: "frontdesks" }]
       : []
   );
   const renderMetric = (metric) => `
-    <button class="metric ${metric.resource ? "is-resource" : ""}" type="button" data-metric="${escapeHtml(metric.label)}" ${metric.resource ? `data-resource-kind="${escapeHtml(metric.resource)}"` : ""}>
+    <${metric.resource ? "button" : "div"} class="metric ${metric.resource ? "is-resource" : ""}" ${metric.resource ? 'type="button"' : ""} data-metric="${escapeHtml(metric.label)}" ${metric.resource ? `data-resource-kind="${escapeHtml(metric.resource)}"` : ""}>
       <span class="metric-label">${escapeHtml(metric.label)}</span>
-      <strong>${escapeHtml(metric.value)}</strong>
-    </button>
+      <strong data-i18n-ignore>${escapeHtml(metric.value)}</strong>
+    </${metric.resource ? "button" : "div"}>
   `;
 
   $("#metrics").innerHTML = `
     <div class="metric-group" aria-label="Statistiken">
-      <span class="metric-group-title">Statistiken</span>
+      <span class="metric-group-title">${escapeHtml(portalMessage("portal.statistics", "Statistics"))}</span>
       <div class="metric-grid">${statMetrics.map(renderMetric).join("")}</div>
     </div>
     <div class="metric-group is-interactive" aria-label="Portal-Ressourcen">
-      <span class="metric-group-title">Portal-Ressourcen</span>
+      <span class="metric-group-title">${escapeHtml(portalMessage("portal.portalResources", "Portal resources"))}</span>
       <div class="metric-grid">${resourceMetrics.map(renderMetric).join("")}</div>
     </div>
   `;
 }
 
+let resourceReturnFocus = null;
+let resourceCreateReturnFocus = null;
+
 function openResourceModal(kind) {
   if (!RESOURCE_DEFS[kind]) return;
+  resourceReturnFocus = document.activeElement;
   state.resourceModalKind = kind;
   renderResourceModal();
+  $("#resource-modal button[data-close-resource-modal]")?.focus();
 }
 
 function closeResourceModal() {
   state.resourceModalKind = "";
   state.resourceDeleting = "";
   renderResourceModal();
+  resourceReturnFocus?.focus?.();
+  resourceReturnFocus = null;
 }
 
 function openResourceCreateModal(kind) {
   if (!RESOURCE_DEFS[kind]) return;
+  resourceCreateReturnFocus = document.activeElement;
   state.resourceCreateKind = kind;
   state.resourceCreating = false;
   renderResourceCreateModal();
+  $("#resource-create-modal input")?.focus();
 }
 
 function closeResourceCreateModal() {
   state.resourceCreateKind = "";
   state.resourceCreating = false;
   renderResourceCreateModal();
+  resourceCreateReturnFocus?.focus?.();
+  resourceCreateReturnFocus = null;
 }
 
 function renderResourceModal() {
@@ -2068,12 +2659,12 @@ function renderResourceModal() {
   modal.setAttribute("aria-hidden", def ? "false" : "true");
   if (!def) return;
 
-  const writesEnabled = liveWritesEnabled();
+  const writesEnabled = liveApplyPermitted();
   const items = resourceItems(kind);
   $("#resource-modal-title").textContent = def.label;
   $("#resource-modal-subtitle").textContent = writesEnabled
-    ? `${items.length} Eintrag${items.length === 1 ? "" : "e"} aus der Portal API`
-    : `${items.length} Eintrag${items.length === 1 ? "" : "e"} aus der Portal API · Live-Schreiben deaktiviert`;
+    ? portalMessage("portal.valueEntriesFromThePortalApi", "{p0} entries from the Portal API", { p0: items.length, p1: items.length === 1 ? "" : "e" })
+    : portalMessage("portal.valueEntriesFromThePortalApiLiveWritesDisabled", "{p0} entries from the Portal API · Live writes disabled", { p0: items.length, p1: items.length === 1 ? "" : "e" });
   const list = items.length ? items.map((item) => {
     const id = resourceNumber(item);
     const extension = resourceExtension(item);
@@ -2083,45 +2674,61 @@ function renderResourceModal() {
       <article class="resource-item">
         <div class="resource-item-main">
           <span class="resource-type">${escapeHtml(def.itemLabel)}</span>
-          <strong>${escapeHtml(item.name || id || def.itemLabel)}</strong>
+          <strong data-i18n-ignore>${escapeHtml(item.name || id || def.itemLabel)}</strong>
           <span>${escapeHtml([
-            id ? `Service ${id}` : "",
-            extension && extension !== id ? `Nebenstelle ${extension}` : "",
-          ].filter(Boolean).join(" · ") || "Keine Nummer erkannt")}</span>
+            id ? portalMessage("portal.serviceValue", "Service {number}", { number: id }) : "",
+            extension && extension !== id ? portalMessage("portal.extensionValue", "Extension {p0}", { p0: extension }) : "",
+          ].filter(Boolean).join(" · ") || portalMessage("portal.noNumberDetected", "No number detected"))}</span>
         </div>
         <div class="resource-links">
-          <span>Verbunden mit</span>
+          <span>${escapeHtml(portalMessage("portal.connectedTo", "Connected to"))}</span>
           ${links.length ? links.map((link) => `
             <div class="resource-link">
-              <strong>${escapeHtml(link.label)}</strong>
-              <small>${escapeHtml(link.detail)}</small>
+              <strong data-i18n-ignore>${escapeHtml(link.label)}</strong>
+              <small data-i18n-ignore>${escapeHtml(link.detail)}</small>
             </div>
-          `).join("") : `<div class="empty-state is-compact">Keine Verknüpfung erkannt.</div>`}
+          `).join("") : `<div class="empty-state is-compact">${escapeHtml(portalMessage("portal.noLinkDetected", "No link detected."))}</div>`}
         </div>
         <button class="secondary-button resource-delete" data-delete-resource-kind="${escapeHtml(kind)}" data-delete-resource-id="${escapeHtml(id)}" type="button" ${id && !deleting && writesEnabled ? "" : "disabled"}>
-          ${!writesEnabled ? "Gesperrt" : deleting ? "Lösche..." : "Löschen"}
+          ${!writesEnabled ? portalMessage("portal.locked", "Locked") : deleting ? portalMessage("portal.deleting", "Deleting...") : portalMessage("portal.delete", "Delete")}
         </button>
       </article>
     `;
-  }).join("") : `<div class="empty-state">Keine ${escapeHtml(def.label)} gefunden.</div>`;
+  }).join("") : `<div class="empty-state">${escapeHtml(portalMessage("portal.noValueFound", "No {p0} found.", { p0: portalSystemText(def.label) }))}</div>`;
   $("#resource-modal-body").innerHTML = `
     <div class="resource-toolbar">
-      <button class="primary-button" data-open-resource-create="${escapeHtml(kind)}" type="button" ${writesEnabled ? "" : "disabled"}>${escapeHtml(def.itemLabel)} anlegen</button>
+      <button class="primary-button" data-open-resource-create="${escapeHtml(kind)}" type="button" ${writesEnabled ? "" : "disabled"}>${escapeHtml(resourceActionText("create", kind))}</button>
       ${writesEnabled ? "" : `<span class="plan-note">${escapeHtml(liveWritesDisabledText())}</span>`}
     </div>
     ${list}
   `;
 }
 
+function portalSelectLabelAttributes(key, fallback, params = {}) {
+  return `aria-label="${escapeHtml(portalMessage(key, fallback, params))}" data-i18n-aria-label="${escapeHtml(key)}" data-i18n-params="${escapeHtml(JSON.stringify(params))}"`;
+}
+
+function targetSelectLabelAttributes(field, label = null) {
+  const labels = {
+    openTarget: ["portal.targetInsideOpeningHours", "Target inside opening hours"],
+    closedTarget: ["portal.targetOutsideOpeningHours", "Target outside opening hours"],
+    timeoutTarget: ["portal.afterTimeout", "After timeout"],
+    afterTarget: ["portal.thenForwardTo", "Then forward to"],
+    keyTarget: ["portal.keyTarget", "Key target"],
+  };
+  const key = ivrKeyFromField(field);
+  return portalSelectLabelAttributes(...(label || (key ? ["portal.keyValue", "Key {p0}", { p0: key }] : labels[field] || ["portal.selectExistingTarget", "Select existing target"])));
+}
+
 function targetSelectMarkup(name, required = false) {
   const options = targetOptions();
   return `
     <span class="select-search-stack">
-      <input class="select-filter-input" type="search" placeholder="Ziel suchen..." aria-label="Ziel suchen">
-      <select name="${escapeHtml(name)}" ${required ? "required" : ""}>
-        <option value="">Ziel wählen</option>
-        <option value="${escapeHtml(JSON.stringify({ type: "HANGUP", title: "Auflegen", routeNumber: "HANGUP", number: "HANGUP" }))}">Auflegen</option>
-        ${options.map((target) => `<option value="${escapeHtml(target.value)}">${escapeHtml(target.label)}</option>`).join("")}
+      <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchTarget_fc750", "Search target...")} ${portalSelectLabelAttributes("portal.searchTarget", "Search target")}>
+      <select name="${escapeHtml(name)}" ${required ? "required" : ""} ${targetSelectLabelAttributes(name, name === "timeoutTarget" ? ["portal.timeoutTarget", "Timeout target"] : null)}>
+        <option value="">${escapeHtml(portalMessage("portal.selectTarget", "Select target"))}</option>
+        <option value="${escapeHtml(JSON.stringify({ type: "HANGUP", title: portalMessage("portal.hangUp", "Hang up"), routeNumber: "HANGUP", number: "HANGUP" }))}">${escapeHtml(portalMessage("portal.hangUp", "Hang up"))}</option>
+        ${options.map((target) => `<option value="${escapeHtml(target.value)}" data-i18n-ignore data-portal-target-option>${escapeHtml(target.label)}</option>`).join("")}
       </select>
     </span>
   `;
@@ -2131,12 +2738,12 @@ function announcementSelectMarkup() {
   const announcements = getOverview()?.inventory?.announcements || [];
   return `
     <span class="select-search-stack">
-      <input class="select-filter-input" type="search" placeholder="Ansage suchen..." aria-label="Ansage suchen">
-      <select name="announcementName" required>
-        <option value="">Ansage wählen</option>
+      <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchAnnouncement_f13ad", "Search announcement...")} ${portalSelectLabelAttributes("portal.searchAnnouncement", "Search announcement")}>
+      <select name="announcementName" required ${portalSelectLabelAttributes("portal.announcement", "Announcement")}>
+        <option value="">${escapeHtml(portalMessage("portal.selectAnnouncement", "Select announcement"))}</option>
         ${announcements.map((announcement) => {
           const value = announcement.name || announcement.value || announcement.id;
-          return `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`;
+          return `<option value="${escapeHtml(value)}" data-i18n-ignore>${escapeHtml(value)}</option>`;
         }).join("")}
       </select>
     </span>
@@ -2152,20 +2759,20 @@ function renderResourceCreateModal() {
   modal.setAttribute("aria-hidden", def ? "false" : "true");
   if (!def) return;
 
-  $("#resource-create-title").textContent = `${def.itemLabel} anlegen`;
-  const writesEnabled = liveWritesEnabled();
-  $("#resource-create-subtitle").textContent = writesEnabled ? "Live-Anlage in der Portal API" : "Live-Anlage ist in dieser Umgebung deaktiviert";
+  $("#resource-create-title").textContent = resourceActionText("create", kind);
+  const writesEnabled = liveApplyPermitted();
+  $("#resource-create-subtitle").textContent = writesEnabled ? portalMessage("portal.createDirectlyInThePortalApi", "Create directly in the Portal API") : portalMessage("portal.liveCreationIsDisabledInThisEnvironment", "Live creation is disabled in this environment");
   $("#resource-create-body").innerHTML = `
     <form class="resource-create-form" id="resource-create-form" data-resource-create-kind="${escapeHtml(kind)}">
       <div class="field-grid">
         <label class="field-control">Name
-          <input name="displayName" required maxlength="50" placeholder="${escapeHtml(def.itemLabel)} Name">
+          <input name="displayName" required maxlength="50" ${resourceNamePlaceholderAttributes(kind)}>
         </label>
         <label class="field-control">Service-Nummer
-          <input name="serviceNumber" inputmode="numeric" placeholder="${kind === "queues" || kind === "skills" ? "optional" : "automatisch, falls leer"}">
+          <input name="serviceNumber" inputmode="numeric" ${kind === "queues" || kind === "skills" ? portalPlaceholderAttributes("portal.optionalField", "Optional") : portalPlaceholderAttributes("portal.server.automaticWhenEmpty", "Automatic when empty")}>
         </label>
         <label class="field-control">Nebenstelle
-          <input name="extensionNumber" inputmode="numeric" placeholder="${kind === "queues" || kind === "skills" ? "optional" : "automatisch, falls leer"}">
+          <input name="extensionNumber" inputmode="numeric" ${kind === "queues" || kind === "skills" ? portalPlaceholderAttributes("portal.optionalField", "Optional") : portalPlaceholderAttributes("portal.server.automaticWhenEmpty", "Automatic when empty")}>
         </label>
       </div>
       ${kind === "ivrs" ? `
@@ -2187,13 +2794,13 @@ function renderResourceCreateModal() {
       ${kind === "timeControls" ? `
         <div class="field-grid">
           <label class="field-control">Von Tag
-            <select name="fromDay">${WEEKDAY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === "MONDAY" ? "selected" : ""}>${label}</option>`).join("")}</select>
+            <select name="fromDay">${WEEKDAY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === "MONDAY" ? "selected" : ""}>${escapeHtml(portalSystemText(label))}</option>`).join("")}</select>
           </label>
           <label class="field-control">Von Uhrzeit
             <input name="fromTime" type="time" value="08:00">
           </label>
           <label class="field-control">Bis Tag
-            <select name="toDay">${WEEKDAY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === "FRIDAY" ? "selected" : ""}>${label}</option>`).join("")}</select>
+            <select name="toDay">${WEEKDAY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === "FRIDAY" ? "selected" : ""}>${escapeHtml(portalSystemText(label))}</option>`).join("")}</select>
           </label>
           <label class="field-control">Bis Uhrzeit
             <input name="toTime" type="time" value="17:00">
@@ -2209,8 +2816,8 @@ function renderResourceCreateModal() {
         </div>
       ` : ""}
       <div class="resource-form-actions">
-        <button class="secondary-button" data-close-resource-create type="button">Abbrechen</button>
-        <button class="primary-button" data-create-resource-submit type="submit" ${state.resourceCreating || !writesEnabled ? "disabled" : ""}>${!writesEnabled ? "Gesperrt" : state.resourceCreating ? "Lege an..." : "Live anlegen"}</button>
+        <button class="secondary-button" data-close-resource-create type="button">${escapeHtml(portalMessage("portal.cancel", "Cancel"))}</button>
+        <button class="primary-button" data-create-resource-submit type="submit" ${state.resourceCreating || !writesEnabled ? "disabled" : ""}>${!writesEnabled ? portalMessage("portal.locked", "Locked") : state.resourceCreating ? portalMessage("portal.creating", "Creating...") : portalMessage("portal.createLive", "Create live")}</button>
       </div>
     </form>
   `;
@@ -2254,103 +2861,110 @@ function resourceCreatePayload(form) {
 
 async function createResource(form) {
   const kind = form.dataset.resourceCreateKind;
-  if (!RESOURCE_DEFS[kind]) return;
-  if (!liveWritesEnabled()) {
-    showUiNotice({ title: "Live-Schreiben deaktiviert", message: liveWritesDisabledText(), type: "warning" });
+  if (!RESOURCE_DEFS[kind] || state.resourceCreating) return;
+  if (!liveApplyPermitted()) {
+    showUiNotice({ title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"), message: liveWritesDisabledText(), type: "warning" });
     return;
   }
   const payload = resourceCreatePayload(form);
-  const progress = showUiProgress({ title: `${RESOURCE_DEFS[kind].itemLabel} wird angelegt`, message: "Portal API legt die Ressource live an." });
+  const writeContext = state.overview?.settings?.writeContext;
+  const current = () => isCurrentWriteContext(writeContext) && state.resourceCreateKind === kind;
+  const progress = showUiProgress({ title: portalMessage("portal.creatingValue", "Creating {p0}", { p0: RESOURCE_DEFS[kind].itemLabel }), message: portalMessage("portal.thePortalApiIsCreatingTheResource", "The Portal API is creating the resource.") });
   state.resourceCreating = true;
   renderResourceCreateModal();
   try {
+    if (!await enableActionWrites(writeContext, current) || !current()) { progress.close(); return; }
     await fetchJson(`/api/resources/${encodeURIComponent(kind)}`, {
-      method: "POST",
-      body: JSON.stringify(payload),
+      method: "POST", writeContext, body: JSON.stringify(payload),
     });
+    if (!current()) { progress.close(); return; }
     await loadOverview();
+    if (!current()) { progress.close(); return; }
     state.resourceModalKind = kind;
     state.resourceCreateKind = "";
-    state.resourceCreating = false;
     render();
     renderResourceModal();
-    renderResourceCreateModal();
-    progress.success({ title: `${RESOURCE_DEFS[kind].itemLabel} angelegt`, message: "Die Ressource wurde live erstellt." });
+    progress.success({ title: portalMessage("portal.valueCreated", "{p0} created", { p0: RESOURCE_DEFS[kind].itemLabel }), message: portalMessage("portal.theResourceWasCreatedLive", "The resource was created live.") });
   } catch (error) {
+    if (!current()) { progress.close(); return; }
+    progress.error({ title: portalMessage("portal.resourceNotCreated", "Resource not created"), message: error.message });
+  } finally {
     state.resourceCreating = false;
     renderResourceCreateModal();
-    progress.error({ title: "Ressource nicht angelegt", message: error.message });
   }
 }
 
 function serviceCreateCardMarkup(kind) {
   const collection = serviceCollectionFromKind(kind);
-  const label = kind === "skill" ? "Skillgruppe" : "Warteschlange";
+  const label = kind === "skill" ? portalMessage("portal.skillGroup", "Skill group") : portalMessage("portal.queue", "Queue");
   const draft = serviceCreateDraftFor(kind);
   const creating = state.serviceCreating === kind;
-  const disabled = creating || !liveWritesEnabled();
+  const disabled = creating || !localApplyPermitted();
   return `
     <form class="service-create-card" data-service-create-kind="${escapeHtml(kind)}">
       <div class="service-create-title">
         <span class="service-kind">${escapeHtml(label)}</span>
-        <strong>${escapeHtml(label)} anlegen</strong>
+        <strong data-i18n-key="portal.resource.create.${collection}">${escapeHtml(resourceActionText("create", kind))}</strong>
       </div>
       <div class="service-create-fields">
         <label>Name
-          <input name="displayName" data-service-create-field="displayName" value="${escapeHtml(draft.displayName || "")}" maxlength="50" placeholder="${escapeHtml(label)} Name" required>
+          <input name="displayName" data-service-create-field="displayName" value="${escapeHtml(draft.displayName || "")}" maxlength="50" ${resourceNamePlaceholderAttributes(kind)} required>
         </label>
         <label>Nebenstelle
-          <input name="extensionNumber" data-service-create-field="extensionNumber" value="${escapeHtml(draft.extensionNumber || "")}" inputmode="numeric" placeholder="optional">
+          <input name="extensionNumber" data-service-create-field="extensionNumber" value="${escapeHtml(draft.extensionNumber || "")}" inputmode="numeric" ${portalPlaceholderAttributes("portal.optionalField", "Optional")}>
         </label>
       </div>
       <button class="primary-button" type="submit" ${disabled ? "disabled" : ""}>
-        ${!liveWritesEnabled() ? "Live-Schreiben gesperrt" : creating ? "Lege an..." : `${escapeHtml(label)} anlegen`}
+        ${!localApplyPermitted() ? portalMessage("portal.liveWritesLocked", "Live writes locked") : creating ? portalMessage("portal.creating", "Creating...") : STATIC_DEMO_MODE ? portalMessage("portal.demo.createLocally", "Create locally") : resourceActionText("create", kind)}
       </button>
-      ${!liveWritesEnabled() ? `<span class="plan-note">${escapeHtml(liveWritesDisabledText())}</span>` : ""}
+      ${STATIC_DEMO_MODE ? `<span class="plan-note">${escapeHtml(portalMessage("portal.demo.localWriteNotice", "Demo PBX: changes are saved locally."))}</span>` : !localApplyPermitted() ? `<span class="plan-note">${escapeHtml(liveWritesDisabledText())}</span>` : ""}
       <input type="hidden" name="resourceKind" value="${escapeHtml(collection)}">
     </form>
   `;
 }
 
 async function createServiceGroup(kind) {
+  if (state.serviceCreating) return;
   const collection = serviceCollectionFromKind(kind);
-  const label = kind === "skill" ? "Skillgruppe" : "Warteschlange";
+  const label = kind === "skill" ? portalMessage("portal.skillGroup", "Skill group") : portalMessage("portal.queue", "Queue");
   const draft = serviceCreateDraftFor(kind);
   const displayName = String(draft.displayName || "").trim();
   if (!displayName) {
-    state.serviceFeedback = { type: "error", title: `${label} nicht angelegt`, message: "Bitte einen Namen eingeben." };
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.valueNotCreated", "{p0} not created", { p0: label }), message: portalMessage("portal.enterAName", "Enter a name.") };
     renderServices();
     return;
   }
-  if (!liveWritesEnabled()) {
-    state.serviceFeedback = { type: "error", title: "Live-Schreiben deaktiviert", message: liveWritesDisabledText() };
+  if (!localApplyPermitted()) {
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"), message: liveWritesDisabledText() };
     renderServices();
     return;
   }
+  const writeContext = state.overview?.settings?.writeContext;
+  const payload = { displayName, serviceNumber: String(draft.serviceNumber || "").trim(), extensionNumber: String(draft.extensionNumber || "").trim() };
+  const current = () => isCurrentWriteContext(writeContext);
   state.serviceCreating = kind;
-  state.serviceFeedback = { type: "info", title: `${label} wird angelegt`, message: "Portal API erstellt den neuen Eintrag." };
+  state.serviceFeedback = { type: "info", title: portalMessage("portal.creatingValue", "Creating {p0}", { p0: label }), message: (STATIC_DEMO_MODE ? portalMessage("portal.demo.creatingEntry", "The demo PBX is creating the entry locally.") : portalMessage("portal.thePortalApiIsCreatingTheNewEntry", "The Portal API is creating the new entry.")) };
   renderServices();
   try {
+    if (!await enableActionWrites(writeContext, current) || !current()) return;
     await fetchJson(`/api/resources/${encodeURIComponent(collection)}`, {
-      method: "POST",
-      body: JSON.stringify({
-        displayName,
-        serviceNumber: String(draft.serviceNumber || "").trim(),
-        extensionNumber: String(draft.extensionNumber || "").trim(),
-      }),
+      method: "POST", writeContext, body: JSON.stringify(payload),
     });
+    if (!current()) return;
     resetServiceCreateDraft(kind);
     state.serviceGroups = null;
     state.serviceDraft = null;
     state.serviceDraftHistory = [];
     state.selectedServiceKey = "";
     state.serviceInspectorOpen = false;
-    state.serviceFeedback = { type: "success", title: `${label} angelegt`, message: "Bestand wurde neu geladen." };
+    state.serviceFeedback = { type: "success", title: portalMessage("portal.valueCreated", "{p0} created", { p0: label }), message: portalMessage("portal.theInventoryWasReloaded", "The inventory was reloaded.") };
     await loadOverview();
+    if (!current()) return;
     await loadServiceGroups({ quiet: true });
-    state.serviceFeedback = { type: "success", title: `${label} angelegt`, message: "Bestand wurde neu geladen." };
+    state.serviceFeedback = { type: "success", title: portalMessage("portal.valueCreated", "{p0} created", { p0: label }), message: portalMessage("portal.theInventoryWasReloaded", "The inventory was reloaded.") };
   } catch (error) {
-    state.serviceFeedback = { type: "error", title: `${label} konnte nicht angelegt werden`, message: error.message };
+    if (!current()) return;
+    state.serviceFeedback = { type: "error", title: portalMessage("portal.valueCouldNotBeCreated", "{p0} could not be created", { p0: label }), message: error.message };
     renderServices();
   } finally {
     state.serviceCreating = "";
@@ -2362,37 +2976,45 @@ async function deleteResource(kind, id) {
   const def = RESOURCE_DEFS[kind];
   const item = resourceItems(kind).find((entry) => resourceNumber(entry) === id);
   if (!def || !item || !id) return;
-  if (!liveWritesEnabled()) {
-    showUiNotice({ title: "Live-Schreiben deaktiviert", message: liveWritesDisabledText(), type: "warning" });
+  if (!liveApplyPermitted()) {
+    showUiNotice({ title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"), message: liveWritesDisabledText(), type: "warning" });
     return;
   }
   const links = resourceConnections(kind, item);
   const warning = links.length
-    ? `\n\nDiese Ressource ist noch ${links.length}x verbunden. Die Portal API kann das Löschen ablehnen.`
+    ? `\n\n${portalMessage("portal.linkedResourceWarning", "Connections to this resource: {count}. Deletion may be refused.", { count: links.length })}`
     : "";
+  const writeContext = state.overview?.settings?.writeContext;
   const confirmed = await confirmUi({
-    title: `${def.itemLabel} löschen`,
-    message: `${def.itemLabel} "${item.name || id}" wirklich live löschen?${warning}`,
-    confirmLabel: "Löschen",
+    title: resourceActionText("delete", kind),
+    message: portalMessage("portal.deleteValueValueLiveValue", "Delete {p0} \"{p1}\" live?{p2}", { p0: def.itemLabel, p1: item.name || id, p2: warning }),
+    confirmLabel: portalMessage("portal.delete", "Delete"),
     type: "warning",
   });
-  if (!confirmed) return;
+  if (!confirmed || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return;
 
-  const progress = showUiProgress({ title: `${def.itemLabel} wird gelöscht`, message: "Portal API verarbeitet die Löschung." });
+  const progress = showUiProgress({ title: portalMessage("portal.deletingValue", "Deleting {p0}", { p0: def.itemLabel }), message: portalMessage("portal.thePortalApiIsProcessingTheDeletion", "The Portal API is processing the deletion.") });
   state.resourceDeleting = `${kind}:${id}`;
   renderResourceModal();
   try {
-    await fetchJson(`/api/resources/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!await enableActionWrites(writeContext) || !isCurrentWriteContext(writeContext)) { progress.close(); return; }
+    await fetchJson(`/api/resources/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { method: "DELETE", writeContext });
+    if (!isCurrentWriteContext(writeContext)) { progress.close(); return; }
     await loadOverview();
+    if (!isCurrentWriteContext(writeContext)) { progress.close(); return; }
     state.resourceModalKind = kind;
     state.resourceDeleting = "";
     render();
     renderResourceModal();
-    progress.success({ title: `${def.itemLabel} gelöscht`, message: "Die Ressource wurde live entfernt." });
+    progress.success({ title: portalMessage("portal.valueDeleted", "{p0} deleted", { p0: def.itemLabel }), message: portalMessage("portal.theResourceWasDeletedLive", "The resource was deleted live.") });
   } catch (error) {
+    if (!isCurrentWriteContext(writeContext)) { progress.close(); return; }
     state.resourceDeleting = "";
     renderResourceModal();
-    progress.error({ title: "Löschen fehlgeschlagen", message: error.message });
+    progress.error({ title: portalMessage("portal.deletionFailed", "Deletion failed"), message: error.message });
+  } finally {
+    state.resourceDeleting = "";
+    renderResourceModal();
   }
 }
 
@@ -2404,16 +3026,19 @@ function renderSummary() {
 function renderRoutingPreview() {
   const dids = getOverview()?.inventory?.dids || [];
   const preview = dids.slice(0, 8);
+  if (getOverview()?.endpoints?.dids?.ok === false) {
+    $("#routing-preview").innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.inventoryUnavailable", "Data could not be loaded."))}</div>`; return;
+  }
   if (!preview.length) {
-    $("#routing-preview").innerHTML = `<div class="empty-state">Keine Rufnummern-Ziele gefunden.</div>`;
+    $("#routing-preview").innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.noNumberTargetsFound", "No number targets found."))}</div>`;
     return;
   }
 
   $("#routing-preview").innerHTML = preview.map((did) => `
     <div class="routing-item">
-      <strong>${escapeHtml(did.name)}</strong>
-      <span>führt zu</span>
-      <b>${escapeHtml(did.value || "kein Ziel erkannt")}</b>
+      <strong data-i18n-ignore>${escapeHtml(did.name)}</strong>
+      <span>${escapeHtml(portalMessage("portal.routesTo", "routes to"))}</span>
+      <b ${did.value ? 'data-i18n-ignore' : 'data-i18n-key="portal.noTargetDetected"'}>${escapeHtml(did.value || portalMessage("portal.noTargetDetected", "No target detected"))}</b>
     </div>
   `).join("");
 }
@@ -2437,19 +3062,19 @@ function extensionRelations(extension) {
     const values = [did.destinationExtension, did.destinationServiceNumber, did.value, did.destinationName]
       .map((value) => String(value || ""));
     if (values.includes(number)) {
-      relations.push({ label: "Rufnummer", detail: `${did.name || did.id || "Rufnummer"} -> ${did.value || did.destinationName || number}` });
+      relations.push({ label: portalMessage("portal.number_b7905", "Number"), detail: `${did.name || did.id || portalMessage("portal.number_b7905", "Number")} -> ${did.value || did.destinationName || number}` });
     }
   }
   for (const queue of overview?.inventory?.queues || []) {
     const members = queue.members || [];
     if (members.some((member) => String(member.extensionNumber || member.number || member.id || "") === number)) {
-      relations.push({ label: "Warteschlange", detail: queue.name || queue.serviceNumber || queue.extensionNumber || "Warteschlange" });
+      relations.push({ label: portalMessage("portal.queue", "Queue"), detail: queue.name || queue.serviceNumber || queue.extensionNumber || portalMessage("portal.queue", "Queue") });
     }
   }
   for (const skill of overview?.inventory?.skills || []) {
     const members = skill.members || [];
     if (members.some((member) => String(member.extensionNumber || member.number || member.id || "") === number)) {
-      relations.push({ label: "Skillgruppe", detail: skill.name || skill.serviceNumber || skill.extensionNumber || "Skillgruppe" });
+      relations.push({ label: portalMessage("portal.skillGroup", "Skill group"), detail: skill.name || skill.serviceNumber || skill.extensionNumber || portalMessage("portal.skillGroup", "Skill group") });
     }
   }
   return relations;
@@ -2464,24 +3089,24 @@ function renderExtensionSummary() {
   target.innerHTML = `
     <div class="sync-stat-grid">
       <div class="sync-stat">
-        <span>Bestand</span>
+        <span>${escapeHtml(portalMessage("portal.inventory", "Inventory"))}</span>
         <strong>${escapeHtml(extensions.length)}</strong>
-        <small>Nebenstellen aus der Portal API</small>
+        <small>${escapeHtml(portalMessage("portal.extensionsFromThePortalApi", "Extensions from the Portal API"))}</small>
       </div>
       <div class="sync-stat">
-        <span>Geräte</span>
+        <span>${escapeHtml(portalMessage("portal.devices", "Devices"))}</span>
         <strong>${escapeHtml(withDevice)}</strong>
-        <small>zugeordnet</small>
+        <small>${escapeHtml(portalMessage("portal.assigned", "assigned"))}</small>
       </div>
       <div class="sync-stat">
-        <span>Auswahl</span>
+        <span>${escapeHtml(portalMessage("portal.selection", "Selection"))}</span>
         <strong>${escapeHtml(selected?.number || "-")}</strong>
-        <small>${escapeHtml(selected?.name || "keine Nebenstelle")}</small>
+        <small ${(selected?.name) ? 'data-i18n-ignore' : 'data-i18n-key="portal.noExtension"'}>${escapeHtml(selected?.name || portalMessage("portal.noExtension", "No extension"))}</small>
       </div>
       <div class="sync-stat">
-        <span>Verknüpft</span>
+        <span>${escapeHtml(portalMessage("portal.linked", "Linked"))}</span>
         <strong>${escapeHtml(extensionRelations(selected).length)}</strong>
-        <small>erkannte Bezüge</small>
+        <small>${escapeHtml(portalMessage("portal.detectedLinks", "detected links"))}</small>
       </div>
     </div>
   `;
@@ -2490,27 +3115,27 @@ function renderExtensionSummary() {
 function renderExtensions() {
   const visible = filteredExtensions();
   if (!visible.length) {
-    $("#extension-list").innerHTML = `<div class="empty-state">Keine Nebenstelle gefunden.</div>`;
+    $("#extension-list").innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.noExtensionFound_8e49e", "No extension found."))}</div>`;
     return;
   }
 
   $("#extension-list").innerHTML = `
     <div class="extension-table">
       <div class="extension-head" aria-hidden="true">
-        <span>Name</span>
-        <span>Nebenstelle</span>
-        <span>Typ</span>
+        <span>${escapeHtml(portalMessage("portal.nameField", "Name"))}</span>
+        <span>${escapeHtml(portalMessage("portal.extension", "Extension"))}</span>
+        <span>${escapeHtml(portalMessage("portal.type", "Type"))}</span>
         <span></span>
       </div>
       ${visible.map((extension) => `
         <button class="extension-row ${extension.id === state.selectedExtensionId ? "is-selected" : ""}" type="button" data-extension-id="${escapeHtml(extension.id)}">
           <span>
-            <span class="extension-name">${escapeHtml(extension.name)}</span>
-            <span class="extension-meta">${escapeHtml(extension.device || "nicht zugeordnet")}</span>
+            <span class="extension-name" data-i18n-ignore>${escapeHtml(extension.name)}</span>
+            <span class="extension-meta" ${(extension.device) ? 'data-i18n-ignore' : 'data-i18n-key="portal.unassigned"'}>${escapeHtml(extension.device || portalMessage("portal.unassigned", "Unassigned"))}</span>
           </span>
-          <span class="extension-number">${escapeHtml(extension.number)}</span>
+          <span class="extension-number" data-i18n-ignore>${escapeHtml(extension.number)}</span>
           <span class="extension-type">${escapeHtml(extension.type || "PHONE")}</span>
-          <span class="extension-action">Auswählen</span>
+          <span class="extension-action">${escapeHtml(portalMessage("portal.select", "Select"))}</span>
         </button>
       `).join("")}
     </div>
@@ -2520,61 +3145,61 @@ function renderExtensions() {
 function renderExtensionDetail() {
   const extension = selectedExtension();
   if (!extension) {
-    $("#extension-detail").innerHTML = `<div class="empty-state">Wähle eine Nebenstelle aus.</div>`;
+    $("#extension-detail").innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.selectAnExtension", "Select an extension."))}</div>`;
     return;
   }
 
-  const deviceStatus = extension.device ? "Gerät zugeordnet" : "kein Gerät zugeordnet";
+  const deviceStatus = extension.device ? portalMessage("portal.deviceAssigned", "Device assigned") : portalMessage("portal.noDeviceAssigned", "No device assigned");
   const relations = extensionRelations(extension);
   const usedFields = extensionUsedFieldEntries(extension);
 
   $("#extension-detail").innerHTML = `
     <div class="selected-title">
-      <span class="extension-number">${escapeHtml(extension.number)}</span>
+      <span class="extension-number" data-i18n-ignore>${escapeHtml(extension.number)}</span>
       <div>
-        <strong>${escapeHtml(extension.name)}</strong>
-        <span>${escapeHtml(extension.type || "Nebenstelle")}</span>
+        <strong data-i18n-ignore>${escapeHtml(extension.name)}</strong>
+        <span>${escapeHtml(extension.type || portalMessage("portal.extension", "Extension"))}</span>
       </div>
     </div>
 
     <div class="field-grid">
-      <div class="field"><span>Name</span><strong>${escapeHtml(extension.name)}</strong></div>
-      <div class="field"><span>Gerät</span><strong>${escapeHtml(extension.device || "nicht zugeordnet")}</strong></div>
+      <div class="field"><span>${escapeHtml(portalMessage("portal.nameField", "Name"))}</span><strong data-i18n-ignore>${escapeHtml(extension.name)}</strong></div>
+      <div class="field"><span>${escapeHtml(portalMessage("portal.device", "Device"))}</span><strong ${(extension.device) ? 'data-i18n-ignore' : 'data-i18n-key="portal.unassigned"'}>${escapeHtml(extension.device || portalMessage("portal.unassigned", "Unassigned"))}</strong></div>
       <div class="field"><span>Status</span><strong>${escapeHtml(deviceStatus)}</strong></div>
     </div>
 
     <div class="extension-field-section">
-      <h3>Feldinformationen</h3>
+      <h3>${escapeHtml(portalMessage("portal.fieldInformation", "Field information"))}</h3>
       <div class="field-grid extension-used-fields">
         ${usedFields.length ? usedFields.map(([key, value]) => `
           <div class="field">
             <span>${escapeHtml(extensionFieldLabel(key))}</span>
-            <strong>${escapeHtml(formatExtensionFieldValue(value))}</strong>
+            <strong ${typeof value === "boolean" ? `data-i18n-key="portal.${value ? "yes" : "no"}"` : "data-i18n-ignore"}>${escapeHtml(formatExtensionFieldValue(value))}</strong>
           </div>
-        `).join("") : `<div class="empty-state is-compact">Keine weiteren Feldwerte aus dem Portalbestand erkannt.</div>`}
+        `).join("") : `<div class="empty-state is-compact">${escapeHtml(portalMessage("portal.noAdditionalFieldValuesWereDetectedInThePortal", "No additional field values were detected in the Portal inventory."))}</div>`}
       </div>
     </div>
 
     <div class="next-steps">
-      <h3>Verknüpfungen</h3>
+      <h3>${escapeHtml(portalMessage("portal.links", "Links"))}</h3>
       ${relations.length ? relations.map((relation) => `
         <div class="readiness-item is-ok">
           <strong>${escapeHtml(relation.label)}</strong>
-          <span>${escapeHtml(relation.detail)}</span>
+          <span data-i18n-ignore>${escapeHtml(relation.detail)}</span>
         </div>
-      `).join("") : `<div class="empty-state is-compact">Keine direkte Rufnummern-, Warteschlangen- oder Skillgruppen-Verknüpfung erkannt.</div>`}
-      <button class="wide-button" data-view-shortcut="callflow" type="button">Callflow öffnen</button>
+      `).join("") : `<div class="empty-state is-compact">${escapeHtml(portalMessage("portal.noDirectLinkToANumberQueueOrSkill", "No direct link to a number, queue or skill group detected."))}</div>`}
+      <button class="wide-button" data-view-shortcut="callflow" type="button">${escapeHtml(portalMessage("portal.openCallflow", "Open callflow"))}</button>
     </div>
   `;
 }
 
 function extensionFieldLabel(key) {
-  return EXTENSION_FIELD_LABELS.get(key) || String(key || "").replace(/([a-z])([A-Z])/g, "$1 $2");
+  return portalSystemText(EXTENSION_FIELD_LABELS.get(key)) || String(key || "").replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 function formatExtensionFieldValue(value) {
-  if (value === true) return "Ja";
-  if (value === false) return "Nein";
+  if (value === true) return portalMessage("portal.yes", "Yes");
+  if (value === false) return portalMessage("portal.no", "No");
   return String(value ?? "");
 }
 
@@ -2587,7 +3212,7 @@ function extensionUsedFieldEntries(extension) {
     const leftIndex = order.indexOf(left);
     const rightIndex = order.indexOf(right);
     if (leftIndex !== -1 || rightIndex !== -1) return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
-    return extensionFieldLabel(left).localeCompare(extensionFieldLabel(right), "de");
+    return extensionFieldLabel(left).localeCompare(extensionFieldLabel(right), portalLocale());
   });
 }
 
@@ -2646,10 +3271,10 @@ function renderExtensionBatchFieldPicker() {
     <section class="batch-field-picker" aria-label="Optionale Spalten auswählen">
       <div class="batch-field-picker-head">
         <div>
-          <strong>Spalten anpassen</strong>
-          <span>Nur ausgewählte Felder werden angezeigt und an die Portal API gesendet.</span>
+          <strong>${escapeHtml(portalMessage("portal.customiseColumns", "Customise columns"))}</strong>
+          <span>${escapeHtml(portalMessage("portal.onlySelectedFieldsAreDisplayedAndSentToThe", "Only selected fields are displayed and sent to the Portal API."))}</span>
         </div>
-        <button class="secondary-button" id="close-extension-batch-fields" type="button">Schließen</button>
+        <button class="secondary-button" id="close-extension-batch-fields" type="button">${escapeHtml(portalMessage("portal.close", "Close"))}</button>
       </div>
       <div class="batch-field-groups">
         ${groups.map((group) => `
@@ -2659,7 +3284,7 @@ function renderExtensionBatchFieldPicker() {
               <label class="batch-field-option">
                 <input data-extension-batch-option="${escapeHtml(field.key)}" type="checkbox" ${state.extensionBatchSelectedFields.includes(field.key) ? "checked" : ""}>
                 <span>${escapeHtml(field.label)}</span>
-                <small>${field.group === "Mailbox" ? "Mailbox-Endpunkt" : "Nebenstelle"}</small>
+                <small>${field.groupKey === "voicemail" ? portalMessage("portal.voicemailEndpointField", "Voicemail endpoint") : portalMessage("portal.extension", "Extension")}</small>
               </label>
             `).join("")}
           </fieldset>
@@ -2674,7 +3299,7 @@ function renderExtensionBatch() {
   if (!target) return;
   const rows = state.extensionBatchRows;
   const plan = state.extensionBatchPlan;
-  const writesEnabled = liveWritesEnabled();
+  const writesEnabled = liveApplyPermitted();
   const optionalFields = selectedExtensionBatchFields();
   const tableColumns = `minmax(96px, .6fr) minmax(180px, 1fr) minmax(120px, .7fr) ${optionalFields.map(() => "minmax(150px, .85fr)").join(" ")} 42px`;
   const csvColumns = ["number", "name", "mailboxPin", ...optionalFields.map((field) => field.key)].join(",");
@@ -2682,18 +3307,18 @@ function renderExtensionBatch() {
     <div class="batch-help">
       <details>
         <summary>CSV Format</summary>
-        <p>Erste Zeile als Kopf: <code>${escapeHtml(csvColumns)}</code>. Pflicht sind <code>number</code>, <code>name</code> und <code>mailboxPin</code>. Optionale Spalten entsprechen den aktivierten API-Feldern.</p>
+        <p>Erste Zeile als Kopf: <code>${escapeHtml(csvColumns)}</code>. Pflicht sind <code>number</code>, <code>name</code> und <code>mailboxPin</code>${escapeHtml(portalMessage("portal.optionalColumnsMatchTheEnabledApiFields", ". Optional columns match the enabled API fields."))}</p>
       </details>
       <label class="batch-upload">CSV Import
         <input id="extension-batch-csv" type="file" accept=".csv,text/csv">
       </label>
-      <button class="secondary-button" id="toggle-extension-batch-fields" type="button" aria-expanded="${state.extensionBatchOptionalOpen ? "true" : "false"}">Spalten anpassen</button>
+      <button class="secondary-button" id="toggle-extension-batch-fields" type="button" aria-expanded="${state.extensionBatchOptionalOpen ? "true" : "false"}">${escapeHtml(portalMessage("portal.customiseColumns", "Customise columns"))}</button>
     </div>
     ${renderExtensionBatchFieldPicker()}
     <div class="extension-batch-table" style="--batch-columns: ${escapeHtml(tableColumns)}">
       <div class="extension-batch-head">
-        <span>Nummer</span>
-        <span>Name</span>
+        <span>${escapeHtml(portalMessage("portal.number", "Number"))}</span>
+        <span>${escapeHtml(portalMessage("portal.nameField", "Name"))}</span>
         <span>Mailbox-PIN</span>
         ${optionalFields.map((field) => `<span>${escapeHtml(field.label)}</span>`).join("")}
         <span></span>
@@ -2701,7 +3326,7 @@ function renderExtensionBatch() {
       ${rows.map((row, index) => `
         <div class="extension-batch-row" data-extension-batch-row="${index}">
           <input data-extension-batch-field="extensionNumber" value="${escapeHtml(row.extensionNumber || "")}" inputmode="numeric" placeholder="201">
-          <input data-extension-batch-field="displayName" value="${escapeHtml(row.displayName || "")}" placeholder="Name">
+          <input data-extension-batch-field="displayName" value="${escapeHtml(row.displayName || "")}" ${portalPlaceholderAttributes("portal.nameField", "Name")}>
           <input data-extension-batch-field="mailboxPin" value="${escapeHtml(row.mailboxPin || "")}" inputmode="numeric" placeholder="123456">
           ${optionalFields.map((field) => renderExtensionBatchInput(row, field)).join("")}
           <button class="icon-button is-light" data-remove-extension-batch-row="${index}" type="button" aria-label="Zeile entfernen">×</button>
@@ -2711,32 +3336,32 @@ function renderExtensionBatch() {
     ${plan ? `
       <div class="batch-result ${plan.ok ? "" : "is-warning"}">
         <div class="batch-result-header">
-          <span class="batch-status-pill ${plan.ok ? "is-ok" : "is-warning"}">${plan.ok ? "Bereit" : "Prüfen"}</span>
+          <span class="batch-status-pill ${plan.ok ? "is-ok" : "is-warning"}">${plan.ok ? portalMessage("portal.ready", "Ready") : portalMessage("portal.check", "Check")}</span>
           <div>
-            <strong>${escapeHtml(plan.title || "Batch geprüft")}</strong>
+            <strong data-i18n-ignore>${escapeHtml(plan.title || portalMessage("portal.batchChecked", "Batch checked"))}</strong>
             <span>${escapeHtml(plan.message || "")}</span>
           </div>
         </div>
         <div class="batch-summary-strip" aria-label="Batch Ergebnis">
-          <div><span>Zeilen</span><strong>${escapeHtml(plan.summary?.total || 0)}</strong></div>
-          <div><span>Bereit</span><strong>${escapeHtml(plan.summary?.valid || 0)}</strong></div>
-          <div><span>Korrektur</span><strong>${escapeHtml(plan.summary?.invalid || 0)}</strong></div>
-          <div><span>Bestand</span><strong>${escapeHtml(plan.summary?.existing || 0)}</strong></div>
+          <div><span>${escapeHtml(portalMessage("portal.rows", "Rows"))}</span><strong>${escapeHtml(plan.summary?.total || 0)}</strong></div>
+          <div><span>${escapeHtml(portalMessage("portal.ready", "Ready"))}</span><strong>${escapeHtml(plan.summary?.valid || 0)}</strong></div>
+          <div><span>${escapeHtml(portalMessage("portal.needsCorrection", "Needs correction"))}</span><strong>${escapeHtml(plan.summary?.invalid || 0)}</strong></div>
+          <div><span>${escapeHtml(portalMessage("portal.inventory", "Inventory"))}</span><strong>${escapeHtml(plan.summary?.existing || 0)}</strong></div>
         </div>
         <div class="batch-plan-list">
           ${(plan.entries || []).map((entry) => `
             <div class="batch-plan-row">
-              <span class="batch-row-state ${entry.ok ? "is-ok" : "is-error"}">${entry.ok ? "OK" : "Fehler"}</span>
+              <span class="batch-row-state ${entry.ok ? "is-ok" : "is-error"}">${entry.ok ? "OK" : portalMessage("portal.error", "Error")}</span>
               <strong>${escapeHtml(entry.extensionNumber || "-")}</strong>
-              <span>${escapeHtml(entry.displayName || "")}</span>
-              <small>${escapeHtml(entry.ok ? "anlegen + Mailbox-PIN setzen" : (entry.errors || []).join(", "))}</small>
+              <span data-i18n-ignore>${escapeHtml(entry.displayName || "")}</span>
+              <small>${entry.ok ? escapeHtml(portalMessage("portal.createAndSetMailboxPin", "Create and set mailbox PIN")) : portalMessagesMarkup(entry.errors || [], ", ")}</small>
             </div>
           `).join("")}
         </div>
         ${plan.ok && !plan.applied ? `
           <div class="sync-apply-row">
-            <button class="primary-button" id="apply-extension-batch" type="button" ${writesEnabled ? "" : "disabled"}>${state.extensionBatchLoading ? "Übernimmt..." : "Batch übernehmen"}</button>
-            <span>${escapeHtml(writesEnabled ? "Legt Nebenstellen live an und setzt die Mailbox-PIN." : "Live-Schreiben ist global in Settings deaktiviert.")}</span>
+            <button class="primary-button" id="apply-extension-batch" type="button" ${writesEnabled ? "" : "disabled"}>${state.extensionBatchLoading ? portalMessage("portal.applying", "Applying...") : portalMessage("portal.applyBatch", "Apply batch")}</button>
+            <span>${escapeHtml(writesEnabled ? portalMessage("portal.createsExtensionsLiveAndSetsTheMailboxPin", "Creates extensions live and sets the mailbox PIN.") : portalMessage("portal.liveWritesAreDisabledGloballyInSettings", "Live writes are disabled globally in Settings."))}</span>
           </div>
         ` : ""}
       </div>
@@ -2750,14 +3375,14 @@ function renderDidList() {
 
   const dids = getOverview()?.inventory?.dids || [];
   if (!dids.length) {
-    list.innerHTML = `<div class="empty-state">Keine Rufnummern gefunden.</div>`;
+    list.innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.noNumbersFound", "No numbers found."))}</div>`;
     return;
   }
 
   list.innerHTML = dids.map((did) => `
     <button class="did-row ${did.id === state.selectedDidId ? "is-selected" : ""}" type="button" data-did-id="${escapeHtml(did.id)}">
-      <strong>${escapeHtml(did.name)}</strong>
-      <span>${escapeHtml(did.value || did.destinationName || "kein Ziel erkannt")}</span>
+      <strong data-i18n-ignore>${escapeHtml(did.name)}</strong>
+      <span ${(did.value || did.destinationName) ? 'data-i18n-ignore' : 'data-i18n-key="portal.noTargetDetected"'}>${escapeHtml(did.value || did.destinationName || portalMessage("portal.noTargetDetected", "No target detected"))}</span>
       <small>${escapeHtml(targetTypeLabel(did.destinationType))}</small>
     </button>
   `).join("");
@@ -2766,8 +3391,9 @@ function renderDidList() {
 function emptyFlowStepTarget() {
   return {
     type: "PLACEHOLDER",
-    title: "Neuer Schritt",
-    subtitle: "Art wählen",
+    _i18nDefaults: flowNodeDefaultMetadata("PLACEHOLDER"),
+    title: portalMessage("portal.newStep", "New step"),
+    subtitle: portalMessage("portal.selectType", "Select type"),
     targetNumber: "",
     routeNumber: "",
     tone: targetTone("PLACEHOLDER"),
@@ -2775,14 +3401,14 @@ function emptyFlowStepTarget() {
   };
 }
 
-function renderFlowResourcePalette() {
+function renderFlowResourcePalette({ preserveSearch = false } = {}) {
   const target = $("#flow-resource-palette");
   if (!target) return;
   const overview = getOverview();
   const groups = [
     {
       key: "extensions",
-      title: "Nebenstellen",
+      title: portalMessage("portal.extensions", "Extensions"),
       type: "PHONEEXTENSION",
       tone: "green",
       items: (overview?.inventory?.extensions || []).filter((extension) => {
@@ -2790,56 +3416,56 @@ function renderFlowResourcePalette() {
         if (!query) return true;
         return `${extension.number || ""} ${extension.name || ""} ${extension.email || ""} ${extension.device || ""}`.toLowerCase().includes(query);
       }),
-      fallback: "Keine Nebenstelle gefunden",
+      fallback: portalMessage("portal.noExtensionFound", "No extension found"),
       searchable: true,
     },
     {
       key: "queues",
-      title: "Warteschlangen",
+      title: portalMessage("portal.queues", "Queues"),
       type: "QUEUE",
       tone: "amber",
       items: overview?.inventory?.queues || [],
-      fallback: "Keine Warteschlangen",
+      fallback: portalMessage("portal.noQueues", "No queues"),
     },
     {
       key: "ivrs",
-      title: "Sprachdialoge",
+      title: portalMessage("portal.voiceDialogs", "Voice dialogs"),
       type: "IVR",
       tone: "coral",
       items: overview?.inventory?.ivrs || [],
-      fallback: "Keine Sprachdialoge",
+      fallback: portalMessage("portal.noVoiceDialogs", "No voice dialogs"),
     },
     {
       key: "skills",
-      title: "Skillgruppen",
+      title: portalMessage("portal.skillGroups", "Skill groups"),
       type: "SKILL",
       tone: "teal",
       items: overview?.inventory?.skills || [],
-      fallback: "Keine Skillgruppen",
+      fallback: portalMessage("portal.noSkillGroups", "No skill groups"),
     },
     {
       key: "timeControls",
-      title: "Zeitsteuerungen",
+      title: portalMessage("portal.timeControls", "Time controls"),
       type: "TIMECONTROL",
       tone: "purple",
       items: overview?.inventory?.timeControls || [],
-      fallback: "Keine Zeitsteuerungen",
+      fallback: portalMessage("portal.noTimeControls", "No time controls"),
       limit: 12,
     },
     {
       key: "menus",
-      title: "Sprachdialoge",
+      title: portalMessage("portal.voiceDialogs", "Voice dialogs"),
       type: "IVR",
       tone: "purple",
       template: true,
-      items: [{ id: "new-ivr-menu", name: "Neuer Sprachdialog", extensionNumber: "", serviceNumber: "" }],
+      items: [{ id: "new-ivr-menu", name: portalMessage("portal.newVoiceDialog", "New voice dialog"), extensionNumber: "", serviceNumber: "" }],
     },
   ];
 
-  target.innerHTML = groups.map((group) => `
+  const markup = groups.map((group) => `
     <section class="flow-menu-content" data-flow-menu-content="${escapeHtml(group.key)}">
       ${group.searchable ? `
-        <input class="flow-palette-search" id="flow-extension-filter" type="search" placeholder="Name oder Nummer suchen" value="${escapeHtml(state.flowExtensionFilter)}">
+        <input class="flow-palette-search" id="flow-extension-filter" type="search" ${portalPlaceholderAttributes("portal.searchNameOrNumber", "Search name or number")} value="${escapeHtml(state.flowExtensionFilter)}">
       ` : ""}
       <div class="flow-palette-list">
         ${group.items.length ? group.items.slice(0, group.limit || 8).map((item) => {
@@ -2855,8 +3481,9 @@ function renderFlowResourcePalette() {
             : group.template
               ? {
               type: group.type,
-              title: "Sprachdialog",
-              subtitle: "Tasten konfigurieren",
+              _i18nDefaults: flowNodeDefaultMetadata("IVR"),
+              title: portalMessage("portal.voiceDialog", "Voice dialog"),
+              subtitle: portalMessage("portal.configureKeys", "Configure keys"),
               targetNumber: "",
               routeNumber: "",
               tone: group.tone || targetTone(group.type),
@@ -2865,8 +3492,8 @@ function renderFlowResourcePalette() {
             : group.type === "PHONEEXTENSION"
               ? {
                 type: "PHONEEXTENSION",
-                title: item.name || `Nebenstelle ${targetNumber}`,
-                subtitle: `Nebenstelle ${targetNumber}`,
+                title: item.name || portalMessage("portal.extensionValue", "Extension {p0}", { p0: targetNumber }),
+                subtitle: portalMessage("portal.extensionValue", "Extension {p0}", { p0: targetNumber }),
                 targetNumber,
                 routeNumber: targetNumber,
                 tone: "green",
@@ -2884,14 +3511,22 @@ function renderFlowResourcePalette() {
             });
           return `
             <button class="flow-palette-item is-${escapeHtml(payload.tone || targetTone(payload.type) || "muted")}" type="button" data-flow-palette-target="${escapeHtml(JSON.stringify(payload))}">
-              <span>${escapeHtml(item.name || group.title)}</span>
-              <small>${escapeHtml(item.detail || [targetNumber && `Nebenstelle ${targetNumber}`, routeNumber && routeNumber !== targetNumber && `Service ${routeNumber}`].filter(Boolean).join(" · ") || (group.template ? "neu anlegen" : targetTypeLabel(group.type)))}</small>
+              <span ${group.template ? 'data-i18n-key="portal.newVoiceDialog"' : item.name ? "data-i18n-ignore" : ""}>${escapeHtml(item.name || group.title)}</span>
+              <small ${item.detail ? "data-i18n-ignore" : ""}>${escapeHtml(item.detail || [targetNumber && portalMessage("portal.extensionValue", "Extension {p0}", { p0: targetNumber }), routeNumber && routeNumber !== targetNumber && portalMessage("portal.serviceValue", "Service {number}", { number: routeNumber })].filter(Boolean).join(" · ") || (group.template ? portalMessage("portal.createNew", "Create new") : targetTypeLabel(group.type)))}</small>
             </button>
           `;
-        }).join("") : `<div class="empty-state is-compact">${escapeHtml(group.fallback || "Keine Einträge")}</div>`}
+        }).join("") : `<div class="empty-state is-compact">${escapeHtml(group.fallback || portalMessage("portal.noEntries", "No entries"))}</div>`}
       </div>
     </section>
   `).join("");
+  const currentResults = preserveSearch && target.querySelector('[data-flow-menu-content="extensions"] .flow-palette-list');
+  if (currentResults) {
+    const next = document.createElement("div");
+    next.innerHTML = markup;
+    currentResults.innerHTML = next.querySelector('[data-flow-menu-content="extensions"] .flow-palette-list').innerHTML;
+  } else {
+    target.innerHTML = markup;
+  }
 }
 
 function flowEdgeKey(edge) {
@@ -2947,6 +3582,15 @@ function selectedNodeIdSet() {
 }
 
 function renderCallflow() {
+  const undoButton = $("#undo-flow-change");
+  if (undoButton) undoButton.disabled = !flowUndoHistory.some(entry => entry.key === flowDraftKey());
+  const availability = flowAvailability();
+  if (availability) {
+    const canvas = $("#callflow-canvas");
+    if (canvas) canvas.innerHTML = `<div class="empty-state" role="status">${escapeHtml(availability.message)}</div>`;
+    return;
+  }
+  $("#callflow-canvas")?.closest(".flow-canvas-shell")?.classList.toggle("is-zoomed-out", (state.flowZoom || 1) < 0.75);
   const flow = state.flow || buildDemoFlow(getOverview() || {});
   sanitizeFlowPositions(flow);
   const graph = buildVisibleFlowGraph(flow);
@@ -2954,32 +3598,17 @@ function renderCallflow() {
   const nodeById = Object.fromEntries(nodes.map((node) => [node.id, node]));
   const focusedEdges = focusedFlowEdgeKeys(graph, state.selectedNodeId);
   const zoom = state.flowZoom || 1;
-  const worldWidth = FLOW_WORLD_WIDTH;
-  const worldHeight = FLOW_WORLD_HEIGHT;
+  const boxes = nodes.map(nodeWorldBox);
+  // The extra margin includes Bezier control points, not just the card rectangles.
+  const worldWidth = Math.max(FLOW_WORLD_WIDTH, ...boxes.map(box => Math.ceil(box.x + box.width + 300)));
+  const worldHeight = Math.max(FLOW_WORLD_HEIGHT, ...boxes.map(box => Math.ceil(box.y + box.height + 300)));
   const edgeViews = graph.edges.map((edge) => {
     const from = nodeById[edge.from];
     const to = nodeById[edge.to];
     if (!from || !to) return { path: "", insert: "" };
     const fromBox = nodeWorldBox(from);
     const toBox = nodeWorldBox(to);
-    const dx = toBox.centerX - fromBox.centerX;
-    const dy = toBox.centerY - fromBox.centerY;
-    const distanceBetweenCenters = Math.max(1, Math.hypot(dx, dy));
-    const fromPoint = nodeEdgePoint(fromBox, toBox);
-    const toPoint = nodeEdgePoint(toBox, fromBox);
-    const controlDistance = clamp(distanceBetweenCenters * 0.35, 74, 230);
-    const horizontalBias = smoothRatio(Math.abs(dx), Math.abs(dy));
-    const verticalBias = 1 - horizontalBias;
-    const sideCurve = (1 - Math.abs(horizontalBias - 0.5) * 2) * 52;
-    const curveSign = dx * dy >= 0 ? 1 : -1;
-    const c1 = {
-      x: fromPoint.x + Math.sign(dx || 1) * controlDistance * horizontalBias + Math.sign(dy || 1) * sideCurve * curveSign,
-      y: fromPoint.y + Math.sign(dy || 1) * controlDistance * verticalBias - Math.sign(dx || 1) * sideCurve * curveSign,
-    };
-    const c2 = {
-      x: toPoint.x - Math.sign(dx || 1) * controlDistance * horizontalBias - Math.sign(dy || 1) * sideCurve * curveSign,
-      y: toPoint.y - Math.sign(dy || 1) * controlDistance * verticalBias + Math.sign(dx || 1) * sideCurve * curveSign,
-    };
+    const { fromPoint, c1, c2, toPoint } = flowConnectionCurve(fromBox, toBox, edge.virtual && edge.memberSidePorts);
     const pathD = `M ${fromPoint.x} ${fromPoint.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${toPoint.x} ${toPoint.y}`;
     const actionT = 0.62;
     const arrow = cubicPointOnPath(fromPoint, c1, c2, toPoint, actionT);
@@ -2995,13 +3624,14 @@ function renderCallflow() {
       <path class="flow-edge ${focusClass}" d="${pathD}"></path>
       <path class="flow-edge-motion ${focusClass}" d="${pathD}" pathLength="100"></path>
     `,
-      insert: !isVirtualEdge && distance > 130 ? `
+      insert: !isVirtualEdge && distance > 40 ? `
       <button class="flow-insert ${isBranchAction ? "is-label" : "is-arrow"} ${focusClass}" type="button"
         data-insert-from="${escapeHtml(edge.from)}"
         data-insert-to="${escapeHtml(edge.to)}"
         style="left:${arrow.x}px;top:${arrow.y}px;--flow-angle:${arrowAngle}deg"
-        title="Schritt an dieser Stelle einfügen"
-        aria-label="Schritt zwischen ${escapeHtml(from.title)} und ${escapeHtml(to.title)} einfügen">
+        data-i18n-title="portal.insertStepHere"
+        title="${escapeHtml(portalMessage("portal.insertStepHere", "Insert step here"))}"
+        ${portalSelectLabelAttributes("portal.insertStepBetweenValueAndValue", "Insert step between {p7} and {p8}", { p7: from.title, p8: to.title })}>
         <span class="flow-insert-default" aria-hidden="true">${isBranchAction ? escapeHtml(edge.label) : "→"}</span>
         <span class="flow-insert-plus" aria-hidden="true">+</span>
       </button>
@@ -3054,15 +3684,15 @@ function renderCallflow() {
               ${isMemberNode ? `data-service-node-id="${escapeHtml(node.serviceNodeId || "")}" data-member-key="${escapeHtml(node.memberKey || "")}"` : ""}
               style="left:${box.x}px;top:${box.y}px;${serviceStyle}">
               ${!node.virtual || isMemberNode ? `
-                <div class="node-action-buttons" aria-label="${escapeHtml(node.title)} Aktionen">
-                  ${node.virtual ? "" : `<button class="node-action-button" type="button" data-node-edit="${escapeHtml(node.id)}" title="Bearbeiten" aria-label="${escapeHtml(node.title)} bearbeiten">✎</button>`}
-                  <button class="node-action-button is-danger" type="button" data-node-delete="${escapeHtml(node.id)}" title="Löschen" aria-label="${escapeHtml(node.title)} löschen">×</button>
+                <div class="node-action-buttons" data-i18n-ignore aria-label="${escapeHtml(portalMessage("portal.valueActions", "{p0} actions", { p0: node.title }))}">
+                  ${node.virtual ? "" : `<button class="node-action-button" type="button" data-node-edit="${escapeHtml(node.id)}" title="${escapeHtml(portalMessage("portal.edit", "Edit"))}" aria-label="${escapeHtml(portalMessage("portal.editValue", "Edit {p1}", { p1: node.title }))}">✎</button>`}
+                  <button class="node-action-button is-danger" type="button" data-node-delete="${escapeHtml(node.id)}" title="${escapeHtml(portalMessage("portal.delete", "Delete"))}" aria-label="${escapeHtml(portalMessage("portal.deleteValue", "Delete {p0}", { p0: node.title }))}">×</button>
                 </div>
               ` : ""}
               ${node.virtual ? "" : renderNodeDock(node)}
               <span class="node-type">${escapeHtml(readableNodeType(node.type))}</span>
-              <span class="node-title">${escapeHtml(node.title)}</span>
-              <span class="node-subtitle">${escapeHtml(flowNodeSubtitle(node))}</span>
+              <span class="node-title" ${node.titleUserEdited || node.routeNumber || node.targetNumber || node.memberNode ? "data-i18n-ignore" : ""}>${escapeHtml(node.title)}</span>
+              <span class="node-subtitle" data-i18n-ignore>${escapeHtml(flowNodeSubtitle(node))}</span>
               ${numberMeta ? `<span class="node-number-meta">${escapeHtml(numberMeta)}</span>` : ""}
               ${renderFlowNodeDetail(node)}
               ${issues.length ? `<span class="node-warning">${escapeHtml(issues[0])}</span>` : ""}
@@ -3074,16 +3704,37 @@ function renderCallflow() {
   `;
   canvas.scrollLeft = previousScrollLeft;
   canvas.scrollTop = previousScrollTop;
+  const wrappedToolbar = ($(".flow-menu-launcher")?.clientWidth || 0) > canvas.clientWidth * 0.75;
+  if (canvas.clientWidth > 0 && (canvas.clientWidth < 600 || wrappedToolbar) && canvas.dataset.initialDid !== state.selectedDidId && nodes.length) {
+    canvas.dataset.initialDid = state.selectedDidId;
+    const boxes = nodes.map(nodeWorldBox);
+    canvas.scrollLeft = Math.max(0, Math.min(...boxes.map(box => box.x)) * zoom - 24);
+    canvas.scrollTop = Math.max(0, Math.min(...boxes.map(box => box.y)) * zoom - 140);
+  }
   const zoomLabel = $("#zoom-label");
   if (zoomLabel) zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function openNodeConnectionSelector(nodeId) {
+  const node = (state.flow?.nodes || []).find(item => item.id === nodeId) || visibleFlowNodeById(nodeId);
+  if (!node) return;
+  state.selectedNodeId = node.id;
+  state.selectedNodeIds = [];
+  state.selectedBranchField = "";
+  state.inspectorOpen = true;
+  renderCallflow();
+  renderFlowHelper();
+  renderView();
+  ($("#flow-connect-target") || $("#close-flow-helper"))?.focus();
 }
 
 function renderNodeDock(node) {
   return `
     <button class="node-dock" type="button"
       data-node-dock="${escapeHtml(node.id)}"
-      title="Leitung ziehen"
-      aria-label="Leitung von ${escapeHtml(node.title)} ziehen">
+      data-i18n-ignore
+      title="${escapeHtml(portalMessage("portal.dragConnection", "Drag connection"))}"
+      aria-label="${escapeHtml(portalMessage("portal.dragConnectionFromValue", "Drag connection from {p1}", { p1: node.title }))}">
       <span class="node-dock-icon" aria-hidden="true"></span>
     </button>
   `;
@@ -3160,11 +3811,55 @@ function serviceMemberLayouts(serviceNode) {
   return serviceNode.config.memberLayouts;
 }
 
-function serviceMemberDefaultPosition(serviceNode, index) {
-  return safeFlowPosition(
-    (Number(serviceNode.x) || 20) + 28 + (index % 2) * 24,
-    (Number(serviceNode.y) || 30) - 4 + Math.floor(index / 2) * 18,
-  );
+function serviceMemberDefaultPositions(serviceNode, members, nodes) {
+  const parent = nodeWorldBox(serviceNode);
+  const saved = serviceNode.config?.memberLayouts || {};
+  const gapY = 32, branchGap = 80;
+  // Use one row height for the entire block, including wrapped names.
+  const cardHeight = Math.max(128, ...members.map((member, index) => {
+    const box = nodeWorldBox({ id: serviceMemberNodeId(serviceNode.id, serviceMemberKey(member, index)), x: 0, y: 0 });
+    return Math.max(box.height, 128 + Math.max(0, Math.ceil(String(member.name || "").length / 23) - 1) * 24);
+  }));
+  const occupied = nodes.map(node => {
+    const box = nodeWorldBox(node);
+    return { ...box, height: Math.max(box.height, node.memberNode ? 128 : 240) };
+  });
+  members.forEach((member, index) => {
+    const position = saved[serviceMemberKey(member, index)];
+    if (position) occupied.push({ x: position.x / 100 * FLOW_WORLD_WIDTH, y: position.y / 100 * FLOW_POSITION_HEIGHT, width: FLOW_NODE_WIDTH, height: cardHeight });
+  });
+  const makeSlots = (columns, offset) => {
+    const slots = members.map((member, index) => {
+      const column = index % columns, count = Math.ceil((members.length - column) / columns);
+      const top = parent.centerY - (count * cardHeight + Math.max(0, count - 1) * gapY) / 2;
+      return { memberKey: serviceMemberKey(member, index), side: columns === 2 && column === 0 ? -1 : 1,
+        x: parent.centerX + (columns === 2 && column === 0 ? -offset : offset) - FLOW_NODE_WIDTH / 2,
+        y: top + Math.floor(index / columns) * (cardHeight + gapY) };
+    });
+    const shiftY = Math.max(0, FLOW_SAFE_TOP - Math.min(...slots.map(slot => slot.y)));
+    return slots.map(slot => ({ ...slot, y: slot.y + shiftY }));
+  };
+  const collisionsFor = slots => occupied.flatMap(box => slots.filter(slot => !saved[slot.memberKey]
+    && slot.x < box.x + box.width + gapY && slot.x + FLOW_NODE_WIDTH + gapY > box.x
+    && slot.y < box.y + box.height + gapY && slot.y + cardHeight + gapY > box.y).map(slot => ({ box, slot })));
+  let columns = members.length > 4 ? 2 : 1;
+  let offset = parent.width / 2 + branchGap + FLOW_NODE_WIDTH / 2;
+  let slots;
+  // Opposite banks keep every branch visible; a second bank behind the first hides its links.
+  // Move both banks symmetrically around obstacles, falling back to one ordered column at the left edge.
+  for (let pass = 0; pass <= occupied.length * 2 + 2; pass++) {
+    if (columns === 2 && parent.centerX - offset - FLOW_NODE_WIDTH / 2 < FLOW_CANVAS_EDGE_PADDING) {
+      columns = 1;
+      offset = parent.width / 2 + branchGap + FLOW_NODE_WIDTH / 2;
+    }
+    slots = makeSlots(columns, offset);
+    const collisions = collisionsFor(slots);
+    if (!collisions.length) break;
+    offset = Math.max(offset, ...collisions.map(({ box, slot }) => slot.side === -1
+      ? parent.centerX - box.x + gapY + FLOW_NODE_WIDTH / 2
+      : box.x + box.width + gapY - parent.centerX + FLOW_NODE_WIDTH / 2));
+  }
+  return slots.map(slot => ({ x: slot.x / FLOW_WORLD_WIDTH * 100, y: slot.y / FLOW_POSITION_HEIGHT * 100 }));
 }
 
 function setServiceMemberLayout(serviceNodeId, memberKey, position) {
@@ -3187,18 +3882,28 @@ function appendServiceMemberGraph(nodes, edges) {
     if (!["QUEUE", "GROUP", "SKILL"].includes(kind)) return;
     if (!state.expandedServiceNodeIds.includes(node.id)) return;
     const meta = nodeServiceMeta(node);
-    const members = Array.isArray(meta.memberTargets) ? meta.memberTargets : [];
+    const members = Array.isArray(meta.memberTargets) && meta.memberTargets.length ? meta.memberTargets
+      : (meta.memberNames || []).map(name => ({ name, number: "" }));
+    const positions = serviceMemberDefaultPositions(node, members, nodes);
+    const parentBox = nodeWorldBox(node);
+    const targetBoxes = members.map((member, index) => nodeWorldBox({
+      id: serviceMemberNodeId(node.id, serviceMemberKey(member, index)),
+      ...(node.config?.memberLayouts?.[serviceMemberKey(member, index)] || positions[index]),
+    }));
+    // Keep radial fan-out for opposite banks; only a single bank needs side ports to clear its other cards.
+    const memberSidePorts = !(targetBoxes.some(box => box.x + box.width <= parentBox.x)
+      && targetBoxes.some(box => box.x >= parentBox.x + parentBox.width));
     members.forEach((member, index) => {
       const memberKey = serviceMemberKey(member, index);
       const id = serviceMemberNodeId(node.id, memberKey);
       if (nodes.some((item) => item.id === id)) return;
       const savedPosition = serviceMemberLayouts(node)[memberKey];
-      const position = savedPosition || serviceMemberDefaultPosition(node, index);
+      const position = savedPosition || positions[index];
       nodes.push({
         id,
         type: "PHONEEXTENSION",
-        title: member.name || "Nebenstelle",
-        subtitle: member.number ? `Nebenstelle ${member.number}` : "Nebenstelle",
+        title: member.name || portalMessage("portal.extension", "Extension"),
+        subtitle: member.number ? portalMessage("portal.extensionValue", "Extension {p0}", { p0: member.number }) : portalMessage("portal.extension", "Extension"),
         targetNumber: member.number || "",
         routeNumber: member.number || "",
         x: position.x,
@@ -3212,27 +3917,30 @@ function appendServiceMemberGraph(nodes, edges) {
       edges.push({
         from: node.id,
         to: id,
-        label: "Mitglied",
+        label: portalMessage("portal.member", "member"),
         virtual: true,
+        memberSidePorts,
       });
     });
   });
 }
 
 function materializeBranchNodes(flow) {
+  if (flowRoutingConflicts(flow).length) return flow;
   flow.nodes ||= [];
   flow.edges ||= [];
   for (let pass = 0; pass < 8; pass += 1) {
     const before = `${flow.nodes.length}:${flow.edges.length}`;
     for (const node of [...flow.nodes]) {
+      refreshFlowNodeDefaults(node);
       const kind = normalizeTargetType(node.type);
       if (node.isTarget) continue;
       ensureNodeConfig(node);
       if (kind === "TIMECONTROL") {
         if (node.config.portalMode === "existing" && !node.config.openTarget && !node.config.closedTarget) continue;
         ensureBranches(flow, node, [
-          branchSpec("openTarget", "innerhalb", "Innerhalb", "Ziel wählen", 24, -16, node.config.openTarget),
-          branchSpec("closedTarget", "außerhalb", "Außerhalb", "Ziel wählen", 24, 18, node.config.closedTarget),
+          branchSpec("openTarget", portalMessage("portal.insideBranch", "inside"), portalMessage("portal.inside", "Inside"), portalMessage("portal.selectTarget", "Select target"), 24, -16, node.config.openTarget),
+          branchSpec("closedTarget", portalMessage("portal.outside", "Outside"), portalMessage("portal.outside_a5443", "Outside"), portalMessage("portal.selectTarget", "Select target"), 24, 18, node.config.closedTarget),
         ]);
       }
       if (kind === "IVR") {
@@ -3240,22 +3948,22 @@ function materializeBranchNodes(flow) {
         const keys = ivrKeyNumbers(node);
         const keySpecs = keys.map((key, index) => {
           const field = ivrTargetField(key);
-          return branchSpec(field, `Taste ${key}`, `Taste ${key}`, "Ziel wählen", 26, -22 + index * 24, node.config[field]);
+          return branchSpec(field, portalMessage("portal.keyValue", "Key {p0}", { p0: key }), portalMessage("portal.keyValue", "Key {p0}", { p0: key }), portalMessage("portal.selectTarget", "Select target"), 26, -22 + index * 24, node.config[field]);
         });
         ensureBranches(flow, node, [
           ...keySpecs,
-          branchSpec("timeoutTarget", "Timeout", "Keine Eingabe", "Ziel wählen", 26, -22 + keys.length * 24, node.config.timeoutTarget),
+          branchSpec("timeoutTarget", "Timeout", portalMessage("portal.noInput", "No input"), portalMessage("portal.selectTarget", "Select target"), 26, -22 + keys.length * 24, node.config.timeoutTarget),
         ]);
       }
       if (kind === "ANNOUNCEMENT") {
         ensureBranches(flow, node, [
-          branchSpec("afterTarget", "danach", "Danach", "Auflegen oder weiterleiten", 24, 8, node.config.afterTarget),
+          branchSpec("afterTarget", portalMessage("portal.afterBranch", "after"), portalMessage("portal.next", "Next"), portalMessage("portal.hangUpOrForward", "Hang up or forward"), 24, 8, node.config.afterTarget),
         ]);
       }
       if (kind === "QUEUE") {
         if (node.config.timeoutSeconds || node.config.timeoutTarget) {
           ensureBranches(flow, node, [
-            branchSpec("timeoutTarget", `nach ${node.config.timeoutSeconds || 120}s`, "Timeout", "Ziel wählen", 24, 20, node.config.timeoutTarget),
+            branchSpec("timeoutTarget", portalMessage("portal.afterValues", "after {p0}s", { p0: node.config.timeoutSeconds || 120 }), "Timeout", portalMessage("portal.selectTarget", "Select target"), 24, 20, node.config.timeoutTarget),
           ]);
         } else {
           removeBranch(flow, node, "timeoutTarget");
@@ -3325,6 +4033,7 @@ function reachableFlowNodeIds(flow) {
 }
 
 function pruneDisconnectedFlowNodes(flow) {
+  if (flowRoutingConflicts(flow).length) return flow;
   if (!flow?.nodes?.length) return;
   const reachable = reachableFlowNodeIds(flow);
   if (!reachable.size) return;
@@ -3347,6 +4056,7 @@ function clearBranchConfig(source, field) {
     source.config.ivrKeysVerified = true;
   }
   delete source.config[field];
+  syncBranchSourceConfig(source);
 }
 
 function finalizeFlowMutation() {
@@ -3383,6 +4093,7 @@ function ensureBranches(flow, source, specs) {
   specs.forEach((spec, index) => {
     const existing = flow.edges.find((edge) => edge.from === source.id && edge.branchField === spec.field);
     if (existing) {
+      existing.label = spec.label;
       const targetNode = flow.nodes.find((node) => node.id === existing.to);
       if (targetNode) {
         if (spec.target) applyTargetToNode(targetNode, spec.target);
@@ -3437,6 +4148,8 @@ function nodeFromTargetSpec(flow, source, spec, reusableId = "") {
     id,
     type,
     title: target.title || spec.fallbackTitle,
+    titleUserEdited: Boolean(target.titleUserEdited),
+    _i18nDefaults: target._i18nDefaults ? clone(target._i18nDefaults) : {},
     subtitle: target.subtitle || target.number || target.targetNumber || spec.fallbackSubtitle,
     targetNumber: target.targetNumber || target.number || "",
     routeNumber: target.routeNumber || "",
@@ -3445,7 +4158,9 @@ function nodeFromTargetSpec(flow, source, spec, reusableId = "") {
     missing: !spec.target,
     config: target.config ? clone(target.config) : {},
   };
+  refreshFlowNodeDefaults(node);
   markBranchTarget(node, source, spec);
+  Object.assign(node, vacantFlowPosition(node.x, node.y, flow.nodes, node));
   flow.nodes.push(node);
   return node;
 }
@@ -3466,18 +4181,20 @@ function branchTargetNode(source, field) {
 
 function isMissingFlowNode(node) {
   if (!node) return true;
-  return Boolean(node.missing) || normalizeTargetType(node.type) === "PLACEHOLDER" || !node.title || node.title === "Ziel wählen";
+  return Boolean(node.missing) || normalizeTargetType(node.type) === "PLACEHOLDER" || !node.title || node.title === portalMessage("portal.selectTarget", "Select target");
 }
 
 function applyTargetToNode(node, target) {
   if (!node || !target) return;
   const type = normalizeTargetType(target.type);
   node.type = type;
-  node.title = target.title || node.title || "Ziel";
+  node._i18nDefaults = target._i18nDefaults ? clone(target._i18nDefaults) : {};
+  node.titleUserEdited = Boolean(target.titleUserEdited);
+  node.title = target.title || node.title || portalMessage("portal.destination", "Destination");
   node.subtitle = target.subtitle || target.number || target.targetNumber || node.subtitle || "";
-  node.targetNumber = target.targetNumber || target.number || targetNumberFromText(node.subtitle);
-  node.routeNumber = target.routeNumber || node.routeNumber || node.targetNumber || "";
-  node.href = target.href || node.href || "";
+  node.targetNumber = target.targetNumber || target.number || (target.config?.portalMode === "new" ? "" : targetNumberFromText(node.subtitle));
+  node.routeNumber = target.routeNumber || target.serviceNumber || node.targetNumber || "";
+  node.href = target.href || "";
   node.tone = target.tone || targetTone(type);
   node.config = target.config ? clone(target.config) : {};
   node.serviceKind = target.serviceKind || "";
@@ -3488,25 +4205,30 @@ function applyTargetToNode(node, target) {
   node.memberNames = Array.isArray(target.memberNames) ? clone(target.memberNames) : [];
   node.memberTargets = Array.isArray(target.memberTargets) ? clone(target.memberTargets) : [];
   node.missing = false;
+  refreshFlowNodeDefaults(node);
 }
 
-function syncBranchSourceConfig(node) {
-  if (!node?.branchTarget || !node.sourceId || !node.branchField) return;
+function syncBranchSourceConfig(node, visited = new Set()) {
+  if (!node?.branchTarget || !node.sourceId || !node.branchField || visited.has(node.id)) return;
+  visited.add(node.id);
   const source = (state.flow?.nodes || []).find((item) => item.id === node.sourceId);
   if (!source) return;
   ensureNodeConfig(source);
   if (isMissingFlowNode(node)) delete source.config[node.branchField];
   else source.config[node.branchField] = targetFromFlowNode(node);
+  syncBranchSourceConfig(source, visited);
 }
 
 function targetFromFlowNode(node) {
   if (!node) return null;
   const target = {
     type: normalizeTargetType(node.type),
-    title: node.title || "Ziel",
+    title: node.title || portalMessage("portal.destination", "Destination"),
+    titleUserEdited: Boolean(node.titleUserEdited),
+    _i18nDefaults: node._i18nDefaults ? clone(node._i18nDefaults) : {},
     subtitle: node.subtitle || "",
-    targetNumber: node.targetNumber || targetNumberFromText(node.subtitle),
-    routeNumber: node.routeNumber || node.targetNumber || targetNumberFromText(node.subtitle),
+    targetNumber: node.targetNumber || (node.config?.portalMode === "new" ? "" : targetNumberFromText(node.subtitle)),
+    routeNumber: node.routeNumber || node.targetNumber || (node.config?.portalMode === "new" ? "" : targetNumberFromText(node.subtitle)),
     tone: node.tone || targetTone(node.type),
   };
   if (node.serviceKind) target.serviceKind = node.serviceKind;
@@ -3521,26 +4243,59 @@ function targetFromFlowNode(node) {
 }
 
 function nodeWorldBox(node) {
-  const position = safeFlowPosition(node.x, node.y);
+  const position = boundedFlowPosition(node.x, node.y);
   const x = position.x / 100 * FLOW_WORLD_WIDTH;
   const y = position.y / 100 * FLOW_POSITION_HEIGHT;
+  const element = [...document.querySelectorAll("#callflow-canvas .flow-node")].find(item => item.dataset.nodeId === node.id);
+  const width = element?.offsetWidth || FLOW_NODE_WIDTH;
+  const height = element?.offsetHeight || FLOW_NODE_HEIGHT;
   return {
     x,
     y,
-    centerX: x + FLOW_NODE_WIDTH / 2,
-    centerY: y + FLOW_NODE_HEIGHT / 2,
-    width: FLOW_NODE_WIDTH,
-    height: FLOW_NODE_HEIGHT,
+    centerX: x + width / 2,
+    centerY: y + height / 2,
+    width,
+    height,
   };
+}
+
+function flowConnectionCurve(fromBox, toBox, memberConnection = false) {
+  // Fan-out stays in the space between a service and its target bank, including tall single columns.
+  if (memberConnection && (toBox.x >= fromBox.x + fromBox.width || toBox.x + toBox.width <= fromBox.x)) {
+    const right = toBox.x >= fromBox.x + fromBox.width;
+    const fromPoint = { x: fromBox.x + (right ? fromBox.width : 0), y: fromBox.centerY };
+    const toPoint = { x: toBox.x + (right ? 0 : toBox.width), y: toBox.centerY };
+    const middleX = (fromPoint.x + toPoint.x) / 2;
+    return { fromPoint, c1: { x: middleX, y: fromPoint.y }, c2: { x: middleX, y: toPoint.y }, toPoint };
+  }
+  const dx = toBox.centerX - fromBox.centerX;
+  const dy = toBox.centerY - fromBox.centerY;
+  const distanceBetweenCenters = Math.max(1, Math.hypot(dx, dy));
+  const fromPoint = nodeEdgePoint(fromBox, toBox);
+  const toPoint = nodeEdgePoint(toBox, fromBox);
+  const controlDistance = clamp(distanceBetweenCenters * 0.35, 74, 230);
+  const horizontalBias = smoothRatio(Math.abs(dx), Math.abs(dy));
+  const verticalBias = 1 - horizontalBias;
+  const sideCurve = (1 - Math.abs(horizontalBias - 0.5) * 2) * 52;
+  const curveSign = dx * dy >= 0 ? 1 : -1;
+  const c1 = {
+    x: fromPoint.x + Math.sign(dx || 1) * controlDistance * horizontalBias + Math.sign(dy || 1) * sideCurve * curveSign,
+    y: fromPoint.y + Math.sign(dy || 1) * controlDistance * verticalBias - Math.sign(dx || 1) * sideCurve * curveSign,
+  };
+  const c2 = {
+    x: toPoint.x - Math.sign(dx || 1) * controlDistance * horizontalBias - Math.sign(dy || 1) * sideCurve * curveSign,
+    y: toPoint.y - Math.sign(dy || 1) * controlDistance * verticalBias + Math.sign(dx || 1) * sideCurve * curveSign,
+  };
+  return { fromPoint, c1, c2, toPoint };
 }
 
 function nodeEdgePoint(sourceBox, targetBox) {
   const dx = targetBox.centerX - sourceBox.centerX;
   const dy = targetBox.centerY - sourceBox.centerY;
-  if (!dx && !dy) return { x: sourceBox.centerX, y: sourceBox.centerY + FLOW_NODE_HEIGHT / 2 };
+  if (!dx && !dy) return { x: sourceBox.centerX, y: sourceBox.centerY + sourceBox.height / 2 };
 
-  const halfWidth = FLOW_NODE_WIDTH / 2;
-  const halfHeight = FLOW_NODE_HEIGHT / 2;
+  const halfWidth = sourceBox.width / 2;
+  const halfHeight = sourceBox.height / 2;
   const scale = Math.min(
     halfWidth / Math.max(Math.abs(dx), 1),
     halfHeight / Math.max(Math.abs(dy), 1),
@@ -3561,51 +4316,66 @@ function cubicPointOnPath(fromPoint, c1, c2, toPoint, t) {
 
 function flowNodeSubtitle(node) {
   const kind = normalizeTargetType(node.type);
-  if (kind === "TIMECONTROL") return node.config?.hours || node.subtitle || "Zeitfenster festlegen";
-  if (kind === "IVR") return node.config?.announcement ? `Ansage: ${node.config.announcement}` : node.subtitle || "Tasten konfigurieren";
-  if (kind === "ANNOUNCEMENT") return node.config?.announcement || node.subtitle || "Ansage wählen";
-  if (kind === "HANGUP") return "Anruf beenden";
+  const generated = node._i18nDefaults?.subtitle;
+  if (["QUEUE", "SKILL"].includes(kind) && generated?.key && node.subtitle === generated.value) {
+    return portalMessage(generated.key, node.subtitle, generated.params || {});
+  }
+  if (kind === "PHONEEXTENSION" && node.targetNumber) {
+    const templates = Object.values(window.NFON_MESSAGES?.["portal.extensionValue"] || {});
+    const systemLabels = templates.filter(value => typeof value === "string").map(value => value.replace(/\{p0\}/g, node.targetNumber));
+    if (systemLabels.includes(node.subtitle)) return portalMessage("portal.extensionValue", "Extension {p0}", { p0: node.targetNumber });
+  }
+  if (kind === "TIMECONTROL") return node.config?.hours || node.subtitle || portalMessage("portal.server.setTimeWindow", "Set time window");
+  if (kind === "IVR") return node.config?.announcement ? portalMessage("portal.announcementValue", "Announcement: {p0}", { p0: node.config.announcement }) : node.subtitle || portalMessage("portal.configureKeys", "Configure keys");
+  if (kind === "ANNOUNCEMENT") return node.config?.announcement || node.subtitle || portalMessage("portal.selectAnnouncement", "Select announcement");
+  if (kind === "HANGUP") return portalMessage("portal.endCall", "End call");
   return node.subtitle || "";
 }
 
 function flowNodeNumberMeta(node) {
   const kind = normalizeTargetType(node?.type);
   if (!node || ["DID", "HANGUP", "PLACEHOLDER", "PHONEEXTENSION", "PHONE"].includes(kind)) return "";
-  const extensionNumber = String(node.targetNumber || targetNumberFromText(node.subtitle) || "").trim();
+  const extensionNumber = String(node.targetNumber || (node.config?.portalMode === "new" ? "" : targetNumberFromText(node.subtitle)) || "").trim();
   const routeNumber = String(node.routeNumber || "").trim();
   const parts = [];
-  if (extensionNumber) parts.push(`Nebenstelle ${extensionNumber}`);
+  if (extensionNumber) parts.push(portalMessage("portal.extensionValue", "Extension {p0}", { p0: extensionNumber }));
   if (routeNumber && routeNumber !== extensionNumber && !["PHONEEXTENSION", "PHONE"].includes(kind)) {
-    parts.push(`Service ${routeNumber}`);
+    parts.push(portalMessage("portal.serviceValue", "Service {number}", { number: routeNumber }));
   }
   return parts.join(" · ");
 }
 
 function flowNodeDetail(node) {
   const kind = normalizeTargetType(node.type);
-  if (kind === "DID") return node.detail || "";
+  if (kind === "DID") {
+    if (node.id === "inbound" && node.locked) {
+      const trunk = selectedDid()?.trunkNumber || getOverview()?.inventory?.trunks?.[0]?.name || "SIP Trunk";
+      return portalMessage("portal.viaTrunkValue", "via trunk {p0}", { p0: trunk });
+    }
+    return node.detail || "";
+  }
   if (kind === "TIMECONTROL") {
-    return "innerhalb / außerhalb";
+    return portalMessage("portal.insideOutside", "Inside / outside");
   }
   if (kind === "IVR") {
     return ivrKeyNumbers(node).map((key) => {
       const keyNode = branchTargetNode(node, ivrTargetField(key));
-      return `${key} ${isMissingFlowNode(keyNode) ? "Ziel fehlt" : keyNode.title}`;
+      return `${key} ${isMissingFlowNode(keyNode) ? portalMessage("portal.targetMissing", "Target missing") : keyNode.title}`;
     }).join(" / ");
   }
   if (kind === "ANNOUNCEMENT") {
     const afterNode = branchTargetNode(node, "afterTarget");
-    return isMissingFlowNode(afterNode) ? "danach auflegen" : afterNode.title;
+    return isMissingFlowNode(afterNode) ? portalMessage("portal.server.hangUpAfterwards", "Hang up afterwards") : afterNode.title;
   }
   if (["QUEUE", "GROUP", "SKILL"].includes(kind)) {
     const meta = nodeServiceMeta(node);
     const details = [];
     if (Number.isFinite(Number(meta.memberCount))) {
       const count = Number(meta.memberCount);
-      details.push(`${count} Mitglied${count === 1 ? "" : "er"}`);
+      details.push(portalMessage("portal.valueMembers", "{p0} members", { p0: count, p1: count === 1 ? "" : "er" }));
     }
     if (Array.isArray(meta.memberNames) && meta.memberNames.length) {
-      details.push(`gekoppelt: ${meta.memberNames.join(" / ")}`);
+      details.push(portalMessage("portal.linkedValue", "Linked: {p0}", { p0: meta.memberNames.join(" / ") }));
     }
     if (kind === "QUEUE" && node.config?.timeoutSeconds) details.push(`Timeout ${node.config.timeoutSeconds}s`);
     return details.join(" · ");
@@ -3617,7 +4387,7 @@ function renderFlowNodeDetail(node) {
   const kind = normalizeTargetType(node?.type);
   if (["QUEUE", "GROUP", "SKILL"].includes(kind)) return renderServiceFlowNodeDetail(node);
   const detail = flowNodeDetail(node);
-  return detail ? `<span class="node-detail">${escapeHtml(detail)}</span>` : "";
+  return detail ? `<span class="node-detail" data-i18n-ignore>${escapeHtml(detail)}</span>` : "";
 }
 
 function renderServiceFlowNodeDetail(node) {
@@ -3627,8 +4397,8 @@ function renderServiceFlowNodeDetail(node) {
   const names = Array.isArray(meta.memberNames) ? meta.memberNames : [];
   const expanded = state.expandedServiceNodeIds.includes(node.id);
   const summary = count
-    ? `${count} Mitglied${count === 1 ? "" : "er"}`
-    : "Keine Mitglieder";
+    ? portalMessage("portal.valueMembers", "{p0} members", { p0: count, p1: count === 1 ? "" : "er" })
+    : portalMessage("portal.noMembers", "No members");
   const preview = members.length
     ? members
     : names.map((name) => ({ name, number: "" }));
@@ -3637,7 +4407,7 @@ function renderServiceFlowNodeDetail(node) {
       <span class="node-detail-summary">${escapeHtml(summary)}</span>
       ${preview.length ? `
         <button class="node-detail-toggle" type="button" data-node-members-toggle="${escapeHtml(node.id)}">
-          ${expanded ? "Ziele ausblenden" : "Ziele zeigen"}
+          ${expanded ? portalMessage("portal.hideTargets", "Hide targets") : portalMessage("portal.showTargets", "Show targets")}
         </button>
       ` : ""}
     </div>
@@ -3646,25 +4416,25 @@ function renderServiceFlowNodeDetail(node) {
 
 function readableNodeType(type) {
   const labels = {
-    DID: "Rufnummer",
-    Trunk: "Leitung",
-    PHONEEXTENSION: "Nebenstelle",
-    PHONE: "Nebenstelle",
-    QUEUE: "Warteschlange",
-    GROUP: "Skillgruppe",
-    SKILL: "Skillgruppe",
+    DID: portalMessage("portal.number_b7905", "Number"),
+    Trunk: portalMessage("portal.line", "Line"),
+    PHONEEXTENSION: portalMessage("portal.extension", "Extension"),
+    PHONE: portalMessage("portal.extension", "Extension"),
+    QUEUE: portalMessage("portal.queue", "Queue"),
+    GROUP: portalMessage("portal.skillGroup", "Skill group"),
+    SKILL: portalMessage("portal.skillGroup", "Skill group"),
     FRONTDESK: "Frontdesk",
-    TIMECONTROL: "Zeitsteuerung",
-    Zeitsteuerung: "Zeit",
-    IVR: "Sprachdialog",
-    ANNOUNCEMENT: "Ansage",
-    HANGUP: "Auflegen",
-    PLACEHOLDER: "Pfad",
+    TIMECONTROL: portalMessage("portal.timeControl", "Time control"),
+    Zeitsteuerung: portalMessage("portal.time", "Time"),
+    IVR: portalMessage("portal.voiceDialog", "Voice dialog"),
+    ANNOUNCEMENT: portalMessage("portal.announcement", "Announcement"),
+    HANGUP: portalMessage("portal.hangUp", "Hang up"),
+    PLACEHOLDER: portalMessage("portal.path", "Path"),
     Gruppe: "Team",
-    Nebenstelle: "Nebenstelle",
+    Nebenstelle: portalMessage("portal.extension", "Extension"),
     Fallback: "Fallback",
   };
-  return labels[type] || type || "Schritt";
+  return labels[type] || type || portalMessage("portal.step", "Step");
 }
 
 function nodeTypeOptions(node) {
@@ -3672,6 +4442,13 @@ function nodeTypeOptions(node) {
   if (kind === "PLACEHOLDER" || node?.missing) return ["PLACEHOLDER", "QUEUE", "IVR", "SKILL", "TIMECONTROL"];
   const options = ["PLACEHOLDER", "PHONEEXTENSION", "QUEUE", "SKILL", "FRONTDESK", "IVR", "TIMECONTROL", "ANNOUNCEMENT", "HANGUP"];
   return options.includes(kind) ? options : [kind, ...options];
+}
+
+function refreshFlowDraftPreview() {
+  const preview = $("#flow-helper [data-flow-draft-preview]");
+  if (preview) preview.textContent = `${selectedDid()?.name || "-"} → ${currentDraftTarget()}`;
+  const validation = $("#flow-helper .validation-box span");
+  if (validation) validation.innerHTML = portalMessagesMarkup(validateFlowDetails().checks);
 }
 
 function renderFlowHelper() {
@@ -3703,16 +4480,16 @@ function renderFlowHelper() {
   const numberMeta = flowNodeNumberMeta(node);
   $("#flow-helper").innerHTML = `
     <div class="helper-header">
-      <h3>${targetEditMode ? "Ziel ändern" : "Schritt im Callflow"}</h3>
+      <h3>${targetEditMode ? portalMessage("portal.targetsToUpdate", "Targets to update") : portalMessage("portal.callflowStep", "Callflow step")}</h3>
       <button class="helper-close-button" id="close-flow-helper" type="button" aria-label="Eigenschaften schließen">×</button>
     </div>
-    <p class="helper-copy">${targetEditMode ? "Wähle aus, wohin diese Rufnummer künftig führen soll. Es bleibt ein Entwurf." : "Konfiguriere diesen Schritt. Pflichtfelder werden unten geprüft."}</p>
+    <p class="helper-copy">${targetEditMode ? portalMessage("portal.selectTheFutureTargetForThisNumberChangesRemain", "Select the future target for this number. Changes remain a draft.") : portalMessage("portal.configureThisStepRequiredFieldsAreCheckedBelow", "Configure this step. Required fields are checked below.")}</p>
     ${numberMeta ? `<div class="helper-number-meta">${escapeHtml(numberMeta)}</div>` : ""}
     <div class="before-after">
-      <span>Aktuell</span>
-      <strong>${escapeHtml(did?.name || "-")} → ${escapeHtml(did?.value || "kein Ziel")}</strong>
-      <span>Entwurf</span>
-      <strong>${escapeHtml(did?.name || "-")} → ${escapeHtml(currentDraftTarget())}</strong>
+      <span>${escapeHtml(portalMessage("portal.current", "Current"))}</span>
+      <strong data-i18n-ignore>${escapeHtml(did?.name || "-")} → ${escapeHtml(did?.value || portalMessage("portal.noTarget_1186c", "No target"))}</strong>
+      <span>${escapeHtml(portalMessage("portal.draft", "Draft"))}</span>
+      <strong data-flow-draft-preview data-i18n-ignore>${escapeHtml(did?.name || "-")} → ${escapeHtml(currentDraftTarget())}</strong>
     </div>
     <form class="action-form" id="node-form">
       <label>Art des Schritts
@@ -3723,19 +4500,19 @@ function renderFlowHelper() {
           `).join("")}
         </select>
       </label>
-      <label>${kind === "IVR" ? "Name im Portal" : "Name"}
+      <label>${kind === "IVR" ? portalMessage("portal.nameInPortal", "Name in Portal") : "Name"}
         <input data-node-field="title" value="${escapeHtml(node.title)}" ${node.locked || targetNameIsDerived ? "disabled" : ""}>
       </label>
-      ${targetNameIsDerived ? `<p class="field-note">Der Name kommt aus dem gewählten Portal-Ziel. Der Callflow ändert hier nur die Route.</p>` : ""}
+      ${targetNameIsDerived ? `<p class="field-note">${escapeHtml(portalMessage("portal.theNameComesFromTheSelectedPortalTargetOnly", "The name comes from the selected Portal target. Only the route changes in this callflow."))}</p>` : ""}
       ${renderNodeConfiguration(node)}
     </form>
     ${renderConnectionBuilder(node)}
     <div class="helper-actions">
-      <button class="secondary-button" id="delete-flow-node" type="button" ${node.locked ? "disabled" : ""}>Schritt entfernen</button>
+      <button class="secondary-button" id="delete-flow-node" type="button" ${node.locked ? "disabled" : ""}>${escapeHtml(portalMessage("portal.removeStep", "Remove step"))}</button>
     </div>
     <div class="validation-box">
       <strong>Status</strong>
-      <span>${escapeHtml(validation.checks.join(" · "))}</span>
+      <span>${portalMessagesMarkup(validation.checks)}</span>
     </div>
   `;
 }
@@ -3747,9 +4524,9 @@ function renderConnectionBuilder(node) {
     <form class="action-form connection-form" id="connection-form">
       <label>Verbindung anlegen
         <select id="flow-connect-target">
-          <option value="">Ziel im Callflow wählen</option>
+          <option value="">${escapeHtml(portalMessage("portal.selectCallflowTarget", "Select callflow target"))}</option>
           ${targets.map((target) => `
-            <option value="${escapeHtml(target.id)}">${escapeHtml(connectionTargetLabel(target))}</option>
+            <option value="${escapeHtml(target.id)}" data-i18n-ignore data-portal-connection-option>${escapeHtml(connectionTargetLabel(target))}</option>
           `).join("")}
         </select>
       </label>
@@ -3766,11 +4543,12 @@ function connectableFlowNodes(node) {
 }
 
 function connectionTargetLabel(node) {
-  return [
-    readableNodeType(node.type),
-    node.title,
-    flowNodeNumberMeta(node) || node.subtitle,
-  ].filter(Boolean).join(" · ");
+  const kind = normalizeTargetType(node.type);
+  const number = node.targetNumber || node.routeNumber;
+  const description = ["PHONEEXTENSION", "PHONE"].includes(kind) && number
+    ? portalMessage("portal.extensionValue", "Extension {p0}", { p0: number })
+    : kind === "HANGUP" ? portalMessage("portal.endCall", "End call") : flowNodeNumberMeta(node) || node.subtitle;
+  return [readableNodeType(node.type), node.title, description].filter(Boolean).join(" · ");
 }
 
 function renderBulkFlowHelper(nodes) {
@@ -3778,23 +4556,23 @@ function renderBulkFlowHelper(nodes) {
   const labels = editableNodes.slice(0, 5).map((node) => node.title).join(" · ");
   return `
     <div class="helper-header">
-      <h3>${nodes.length} Kacheln ausgewählt</h3>
+      <h3>${escapeHtml(portalMessage("portal.valueNodesSelected", "Nodes selected: {p0}", { p0: nodes.length }))}</h3>
       <button class="helper-close-button" id="close-flow-helper" type="button" aria-label="Auswahl schließen">×</button>
     </div>
-    <p class="helper-copy">Mehrfachauswahl per Shift + Ziehen. Gelockte Startknoten bleiben geschützt.</p>
+    <p class="helper-copy">${escapeHtml(portalMessage("portal.useShiftDragForMultipleSelectionLockedStartingNodes", "Use Shift + drag for multiple selection. Locked starting nodes remain protected."))}</p>
     <div class="before-after">
-      <span>Auswahl</span>
-      <strong>${escapeHtml(labels || "Keine änderbaren Kacheln")}${editableNodes.length > 5 ? " …" : ""}</strong>
-      <span>Änderbar</span>
-      <strong>${editableNodes.length} von ${nodes.length}</strong>
+      <span>${escapeHtml(portalMessage("portal.selection", "Selection"))}</span>
+      <strong data-i18n-ignore>${escapeHtml(labels || portalMessage("portal.noEditableNodes", "No editable nodes"))}${editableNodes.length > 5 ? " …" : ""}</strong>
+      <span>${escapeHtml(portalMessage("portal.editable", "Editable"))}</span>
+      <strong>${escapeHtml(portalMessage("portal.valueOfValue", "{p3} of {p4}", { p3: editableNodes.length, p4: nodes.length }))}</strong>
     </div>
     <form class="action-form" id="bulk-node-form">
       <label>Alle änderbaren Kacheln auf Ziel setzen
-        ${renderTargetSelect("bulk-target-select", "", "", true)}
+        ${renderTargetSelect("bulk-target-select", "", "", true, ["portal.setTheTargetForAllEditableNodes", "Set the target for all editable nodes"])}
       </label>
     </form>
     <div class="helper-actions">
-      <button class="secondary-button" id="delete-selected-nodes" type="button" ${editableNodes.length ? "" : "disabled"}>Auswahl löschen</button>
+      <button class="secondary-button" id="delete-selected-nodes" type="button" ${editableNodes.length ? "" : "disabled"}>${escapeHtml(portalMessage("portal.deleteSelection", "Delete selection"))}</button>
     </div>
   `;
 }
@@ -3802,35 +4580,35 @@ function renderBulkFlowHelper(nodes) {
 function renderTimeControlBranchHelper(node, did, validation) {
   const field = state.selectedBranchField;
   const isClosed = field === "closedTarget";
-  const label = isClosed ? "Außerhalb der Zeit" : "Innerhalb der Zeit";
+  const label = isClosed ? portalMessage("portal.outsideOpeningHours", "Outside opening hours") : portalMessage("portal.server.insideOpeningHours", "Inside opening hours");
   return `
     <div class="helper-header">
       <h3>Pfad: ${escapeHtml(label)}</h3>
       <button class="helper-close-button" id="close-flow-helper" type="button" aria-label="Eigenschaften schließen">×</button>
     </div>
-    <p class="helper-copy">Dieser Ausgang der Zeitsteuerung kann wieder auf eine Warteschlange, Ansage, Sprachdialog, Nebenstelle oder später auf weitere Schritte führen.</p>
+    <p class="helper-copy">${escapeHtml(portalMessage("portal.thisTimeControlOutputCanLeadToAQueue", "This time-control output can lead to a queue, announcement, voice dialog, extension or further steps."))}</p>
     <div class="before-after">
-      <span>Zeitsteuerung</span>
-      <strong>${escapeHtml(node.title)} · ${escapeHtml(node.config?.hours || "Zeitfenster fehlt")}</strong>
-      <span>Pfad</span>
-      <strong>${escapeHtml(label)} → ${escapeHtml(node.config?.[field]?.title || "Ziel wählen")}</strong>
+      <span>${escapeHtml(portalMessage("portal.timeControl", "Time control"))}</span>
+      <strong data-i18n-ignore>${escapeHtml(node.title)} · ${escapeHtml(node.config?.hours || portalMessage("portal.timeWindowMissing", "Time window missing"))}</strong>
+      <span>${escapeHtml(portalMessage("portal.path", "Path"))}</span>
+      <strong data-i18n-ignore>${escapeHtml(label)} → ${escapeHtml(node.config?.[field]?.title || portalMessage("portal.selectTarget", "Select target"))}</strong>
     </div>
     <form class="action-form" id="node-form">
       <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, field)) && !(isClosed && node.config?.announcement))}>Ziel für diesen Pfad
-        ${renderTargetSelect("", field, targetConfigValue(node.config?.[field]), true)}
+        ${renderTargetSelect("", field, targetConfigValue(node.config?.[field]), true, ["portal.targetForThisPath", "Target for this path"])}
       </label>
       ${isClosed ? `
         <label>Optionale Ansage vor dem Ziel
-          ${renderAnnouncementSelect(node.config?.announcement || "")}
+          ${renderAnnouncementSelect(node.config?.announcement || "", ["portal.optionalAnnouncementBeforeTheTarget", "Optional announcement before the target"])}
         </label>
       ` : ""}
     </form>
     <div class="helper-actions">
-      <button class="secondary-button" data-branch-back="${escapeHtml(node.id)}" type="button">Zeitsteuerung bearbeiten</button>
+      <button class="secondary-button" data-branch-back="${escapeHtml(node.id)}" type="button">${escapeHtml(portalMessage("portal.editTimeControl", "Edit time control"))}</button>
     </div>
     <div class="validation-box">
       <strong>Status</strong>
-      <span>${escapeHtml(validation.checks.join(" · "))}</span>
+      <span>${portalMessagesMarkup(validation.checks)}</span>
     </div>
   `;
 }
@@ -3861,45 +4639,45 @@ function nodeValidationIssues(node) {
   const kind = normalizeTargetType(node.type);
   const issues = [];
 
-  if (kind === "PLACEHOLDER") issues.push("Schrittart fehlt");
+  if (kind === "PLACEHOLDER") issues.push(portalMessage("portal.stepTypeMissing", "Step type missing"));
 
   if (kind === "TIMECONTROL") {
     if (!node.config.portalMode) {
-      issues.push("Neu oder Auswahl wählen");
+      issues.push(portalMessage("portal.chooseNewOrExisting", "Choose new or existing"));
     } else if (node.config.portalMode === "existing") {
-      if (!(node.routeNumber || node.targetNumber)) issues.push("Vorhandene Zeitsteuerung fehlt");
+      if (!(node.routeNumber || node.targetNumber)) issues.push(portalMessage("portal.existingTimeControlMissing", "Existing time control missing"));
     } else {
-      if (!node.config.hours) issues.push("Zeitfenster fehlt");
-      if (isMissingFlowNode(branchTargetNode(node, "openTarget"))) issues.push("Ziel innerhalb fehlt");
+      if (!node.config.hours) issues.push(portalMessage("portal.timeWindowMissing", "Time window missing"));
+      if (isMissingFlowNode(branchTargetNode(node, "openTarget"))) issues.push(portalMessage("portal.targetInsideOpeningHoursMissing", "Target inside opening hours missing"));
       if (isMissingFlowNode(branchTargetNode(node, "closedTarget")) && !node.config.announcement) {
-        issues.push("Ziel außerhalb fehlt");
+        issues.push(portalMessage("portal.targetOutsideOpeningHoursMissing", "Target outside opening hours missing"));
       }
     }
   }
 
   if (kind === "IVR") {
     if (!node.config.portalMode) {
-      issues.push("Neu oder Auswahl wählen");
+      issues.push(portalMessage("portal.chooseNewOrExisting", "Choose new or existing"));
     } else if (node.config.portalMode === "existing") {
-      if (!(node.routeNumber || node.targetNumber)) issues.push("Vorhandener Sprachdialog fehlt");
+      if (!(node.routeNumber || node.targetNumber)) issues.push(portalMessage("portal.existingVoiceDialogMissing", "Existing voice dialog missing"));
     } else {
-      if (!node.config.announcement) issues.push("Ansage fehlt");
+      if (!node.config.announcement) issues.push(portalMessage("portal.announcementMissing", "Announcement missing"));
       if (!ivrKeyNumbers(node).some((key) => !isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))) {
-        issues.push("Tasten-Ziel fehlt");
+        issues.push(portalMessage("portal.keyTargetMissing", "Key target missing"));
       }
-      if (isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) issues.push("Timeout-Ziel fehlt");
+      if (isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) issues.push(portalMessage("portal.timeoutTargetMissing", "Timeout target missing"));
     }
   }
 
-  if (kind === "ANNOUNCEMENT" && !node.config.announcement) issues.push("Ansage fehlt");
+  if (kind === "ANNOUNCEMENT" && !node.config.announcement) issues.push(portalMessage("portal.announcementMissing", "Announcement missing"));
 
   if (kind === "QUEUE" && node.config.timeoutSeconds && isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) {
-    issues.push("Timeout-Ziel fehlt");
+    issues.push(portalMessage("portal.timeoutTargetMissing", "Timeout target missing"));
   }
   if (["QUEUE", "GROUP", "SKILL"].includes(kind)) {
-    if (!node.config.portalMode) issues.push("Neu oder Auswahl wählen");
+    if (!node.config.portalMode) issues.push(portalMessage("portal.chooseNewOrExisting", "Choose new or existing"));
     if (node.config.portalMode === "existing" && !(node.routeNumber || node.targetNumber)) {
-      issues.push(`Vorhandene ${readableNodeType(kind)} fehlt`);
+      issues.push(portalMessage("portal.existingValueMissing", "Existing {p0} missing", { p0: readableNodeType(kind) }));
     }
   }
 
@@ -3918,7 +4696,7 @@ function renderNodeConfiguration(node) {
   if (isSelectableTargetKind(kind)) {
     const timeoutControls = kind === "QUEUE" ? `
       <label>Timeout nach Sekunden
-        <input data-node-config-field="timeoutSeconds" type="number" min="0" step="5" value="${escapeHtml(node.config?.timeoutSeconds || "")}" placeholder="z. B. 120">
+        <input data-node-config-field="timeoutSeconds" type="number" min="0" step="5" value="${escapeHtml(node.config?.timeoutSeconds || "")}" ${portalPlaceholderAttributes("portal.eG120", "e.g. 120")}>
       </label>
       <label${requiredFieldClass(Boolean(node.config?.timeoutSeconds) && isMissingFlowNode(branchTargetNode(node, "timeoutTarget")))}>Nach Timeout
         ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true)}
@@ -3943,12 +4721,12 @@ function renderNodeConfiguration(node) {
   if (kind === "TIMECONTROL") {
     return `
       <label${requiredFieldClass(!node.config?.hours)}>Zeitfenster
-        <input data-node-config-field="hours" value="${escapeHtml(node.config?.hours || "Mo-Fr 08:00-17:00")}">
+        <input data-node-config-field="hours" value="${escapeHtml(node.config?.hours || portalMessage("portal.monFri08001700", "Mon-Fri 08:00-17:00"))}">
       </label>
       <div class="branch-summary">
-        <strong>Ausgänge</strong>
-        <span>Innerhalb</span>
-        <span>Außerhalb</span>
+        <strong>${escapeHtml(portalMessage("portal.outputs", "Outputs"))}</strong>
+        <span>${escapeHtml(portalMessage("portal.inside", "Inside"))}</span>
+        <span>${escapeHtml(portalMessage("portal.outside_a5443", "Outside"))}</span>
       </div>
     `;
   }
@@ -3956,19 +4734,19 @@ function renderNodeConfiguration(node) {
   if (kind === "IVR") {
     const keys = ivrKeyNumbers(node);
     const keyFields = keys.map((key) => `
-      <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))}>Taste ${escapeHtml(key)}
+      <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))}>${escapeHtml(portalMessage("portal.keyValue", "Key {p0}", { p0: key }))}
         ${renderTargetSelect("", ivrTargetField(key), targetConfigValue(node.config?.[ivrTargetField(key)]), true)}
       </label>
     `).join("");
     const nextKey = nextIvrKey(node);
     return `
       <label${requiredFieldClass(!node.config?.announcement)}>Ansage vor der Auswahl
-        ${renderAnnouncementSelect(node.config?.announcement || "")}
+        ${renderAnnouncementSelect(node.config?.announcement || "", ["portal.announcementBeforeSelection", "Announcement before selection"])}
       </label>
       ${keyFields}
-      <button class="secondary-button" data-add-ivr-key="${escapeHtml(node.id)}" type="button" ${nextKey ? "" : "disabled"}>Taste hinzufügen</button>
+      <button class="secondary-button" data-add-ivr-key="${escapeHtml(node.id)}" type="button" ${nextKey ? "" : "disabled"}>${escapeHtml(portalMessage("portal.addKey", "Add key"))}</button>
       <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, "timeoutTarget")))}>Keine Eingabe / Timeout
-        ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true)}
+        ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true, ["portal.noInputTimeout", "No input / timeout"])}
       </label>
     `;
   }
@@ -3987,7 +4765,7 @@ function renderNodeConfiguration(node) {
   if (kind === "HANGUP") {
     return `
       <label>Aktion
-        <input value="Nach diesem Schritt wird aufgelegt." disabled>
+        <input ${portalDefaultAttributes("portal.theCallEndsAfterThisStep", "The call ends after this step.")} disabled>
       </label>
     `;
   }
@@ -4005,13 +4783,16 @@ function resourceMode(node) {
 
 function renderResourceSourceChoice(node, kind) {
   const mode = resourceMode(node);
-  const label = ["GROUP", "SKILL"].includes(kind) ? "Skillgruppe" : readableNodeType(kind);
+  const resource = ({ QUEUE: "Queue", GROUP: "SkillGroup", SKILL: "SkillGroup", IVR: "VoiceDialog", TIMECONTROL: "TimeControl" })[kind];
+  const label = ({ Queue: "queue", SkillGroup: "skill group", VoiceDialog: "voice dialog", TimeControl: "time control" })[resource];
+  const createKey = `portal.createNew${resource}`;
+  const selectKey = `portal.selectExisting${resource}`;
   return `
     <label${requiredFieldClass(!mode)}>Quelle
       <select data-node-config-field="portalMode">
-        <option value="" ${!mode ? "selected" : ""}>Neu oder Auswahl wählen</option>
-        <option value="new" ${mode === "new" ? "selected" : ""}>Neue ${escapeHtml(label)} anlegen</option>
-        <option value="existing" ${mode === "existing" ? "selected" : ""}>Vorhandene ${escapeHtml(label)} auswählen</option>
+        <option value="" ${!mode ? "selected" : ""}>${escapeHtml(portalMessage("portal.chooseNewOrExisting", "Choose new or existing"))}</option>
+        <option value="new" ${mode === "new" ? "selected" : ""} data-i18n-key="${createKey}">${escapeHtml(portalMessage(createKey, `Create new ${label}`))}</option>
+        <option value="existing" ${mode === "existing" ? "selected" : ""} data-i18n-key="${selectKey}">${escapeHtml(portalMessage(selectKey, `Select existing ${label}`))}</option>
       </select>
     </label>
   `;
@@ -4021,9 +4802,9 @@ function renderResourceTargetSelect(kind, selectedValue = "") {
   const options = targetOptions().filter((target) => normalizeTargetType(target.kind) === kind);
   return `
     <select data-node-resource-target="${escapeHtml(kind)}">
-      <option value="">Vorhandenes Portal-Ziel wählen</option>
+      <option value="">${escapeHtml(portalMessage("portal.selectExistingPortalTarget", "Select existing Portal target"))}</option>
       ${options.map((target) => `
-        <option value="${escapeHtml(target.value)}" ${targetOptionSelected(target.value, selectedValue) ? "selected" : ""}>${escapeHtml(target.label)}</option>
+        <option value="${escapeHtml(target.value)}" ${targetOptionSelected(target.value, selectedValue) ? "selected" : ""} data-i18n-ignore data-portal-target-option>${escapeHtml(target.label)}</option>
       `).join("")}
     </select>
   `;
@@ -4033,7 +4814,7 @@ function renderResourceNodeConfiguration(node, kind) {
   const mode = resourceMode(node);
   const sourceChoice = renderResourceSourceChoice(node, kind);
   if (!mode) {
-    return `${sourceChoice}<p class="field-note">Lege fest, ob dieser Schritt ein neues Portal-Objekt erzeugt oder auf ein bestehendes Ziel verweist.</p>`;
+    return `${sourceChoice}<p class="field-note">${escapeHtml(portalMessage("portal.chooseWhetherThisStepCreatesANewPortalObject", "Choose whether this step creates a new Portal object or uses an existing target."))}</p>`;
   }
   if (mode === "existing") {
     return `
@@ -4046,7 +4827,7 @@ function renderResourceNodeConfiguration(node, kind) {
   if (kind === "QUEUE" || kind === "GROUP" || kind === "SKILL") {
     const timeoutControls = kind === "QUEUE" ? `
       <label>Timeout nach Sekunden
-        <input data-node-config-field="timeoutSeconds" type="number" min="0" step="5" value="${escapeHtml(node.config?.timeoutSeconds || "")}" placeholder="z. B. 120">
+        <input data-node-config-field="timeoutSeconds" type="number" min="0" step="5" value="${escapeHtml(node.config?.timeoutSeconds || "")}" ${portalPlaceholderAttributes("portal.eG120", "e.g. 120")}>
       </label>
       <label${requiredFieldClass(Boolean(node.config?.timeoutSeconds) && isMissingFlowNode(branchTargetNode(node, "timeoutTarget")))}>Nach Timeout
         ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true)}
@@ -4061,7 +4842,7 @@ function renderResourceNodeConfiguration(node, kind) {
     return `
       ${sourceChoice}
       <label${requiredFieldClass(!node.config?.hours)}>Zeitfenster
-        <input data-node-config-field="hours" value="${escapeHtml(node.config?.hours || "")}" placeholder="z. B. Mo-Fr 08:00-17:00">
+        <input data-node-config-field="hours" value="${escapeHtml(node.config?.hours || "")}" ${portalPlaceholderAttributes("portal.eGMonFri08001700", "e.g. Mon-Fri 08:00-17:00")}>
       </label>
       <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, "openTarget")))}>Ziel innerhalb
         ${renderTargetSelect("", "openTarget", targetConfigValue(node.config?.openTarget), true)}
@@ -4070,16 +4851,16 @@ function renderResourceNodeConfiguration(node, kind) {
         ${renderTargetSelect("", "closedTarget", targetConfigValue(node.config?.closedTarget), true)}
       </label>
       <div class="branch-summary">
-        <strong>Ausgänge</strong>
-        <span>Innerhalb</span>
-        <span>Außerhalb</span>
+        <strong>${escapeHtml(portalMessage("portal.outputs", "Outputs"))}</strong>
+        <span>${escapeHtml(portalMessage("portal.inside", "Inside"))}</span>
+        <span>${escapeHtml(portalMessage("portal.outside_a5443", "Outside"))}</span>
       </div>
     `;
   }
   if (kind === "IVR") {
     const keys = ivrKeyNumbers(node);
     const keyFields = keys.map((key) => `
-      <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))}>Taste ${escapeHtml(key)}
+      <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))}>${escapeHtml(portalMessage("portal.keyValue", "Key {p0}", { p0: key }))}
         ${renderTargetSelect("", ivrTargetField(key), targetConfigValue(node.config?.[ivrTargetField(key)]), true)}
       </label>
     `).join("");
@@ -4087,33 +4868,40 @@ function renderResourceNodeConfiguration(node, kind) {
     return `
       ${sourceChoice}
       <label${requiredFieldClass(!node.config?.announcement)}>Ansage vor der Auswahl
-        ${renderAnnouncementSelect(node.config?.announcement || "")}
+        ${renderAnnouncementSelect(node.config?.announcement || "", ["portal.announcementBeforeSelection", "Announcement before selection"])}
       </label>
       ${keyFields}
-      <button class="secondary-button" data-add-ivr-key="${escapeHtml(node.id)}" type="button" ${nextKey ? "" : "disabled"}>Taste hinzufügen</button>
+      <button class="secondary-button" data-add-ivr-key="${escapeHtml(node.id)}" type="button" ${nextKey ? "" : "disabled"}>${escapeHtml(portalMessage("portal.addKey", "Add key"))}</button>
       <label${requiredFieldClass(isMissingFlowNode(branchTargetNode(node, "timeoutTarget")))}>Keine Eingabe / Timeout
-        ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true)}
+        ${renderTargetSelect("", "timeoutTarget", targetConfigValue(node.config?.timeoutTarget), true, ["portal.noInputTimeout", "No input / timeout"])}
       </label>
     `;
   }
   return sourceChoice;
 }
 
-function renderTargetSelect(id, configField, selectedValue = "", allowHangup = false) {
+function renderTargetSelect(id, configField, selectedValue = "", allowHangup = false, label = null) {
   const idAttribute = id ? ` id="${escapeHtml(id)}"` : "";
   const dataAttribute = configField ? ` data-node-target-config="${escapeHtml(configField)}"` : "";
-  const options = targetOptions();
+  const options = targetOptions().filter(target => !allowHangup || normalizeTargetType(target.kind) !== "HANGUP");
+  let selectedTarget = null;
+  try { selectedTarget = JSON.parse(selectedValue); } catch { /* No selected target. */ }
+  const selectedIsHangup = allowHangup && normalizeTargetType(selectedTarget?.type) === "HANGUP";
+  // New nested steps have no inventory identity yet; keep their full draft as the current option.
+  if (selectedTarget?.type && !selectedIsHangup && !options.some(target => targetOptionSelected(target.value, selectedValue))) {
+    options.unshift({ value: selectedValue, label: targetOptionLabel(selectedTarget.targetNumber || selectedTarget.number || "", selectedTarget.type, selectedTarget.title) });
+  }
   const hangupOption = allowHangup
-    ? `<option value="${escapeHtml(JSON.stringify({ type: "HANGUP", title: "Auflegen", subtitle: "Anruf beenden", tone: "muted" }))}" ${selectedValue.includes('"HANGUP"') ? "selected" : ""}>- - (Auflegen | Anruf beenden)</option>`
+    ? `<option value="${escapeHtml(JSON.stringify({ type: "HANGUP", title: portalMessage("portal.hangUp", "Hang up"), subtitle: portalMessage("portal.endCall", "End call"), tone: "muted" }))}" ${selectedIsHangup ? "selected" : ""}>${escapeHtml(portalMessage("portal.hangUpEndCall", "Hang up (end call)"))}</option>`
     : "";
   return `
     <span class="select-search-stack">
-      <input class="select-filter-input" type="search" placeholder="Ziel suchen..." aria-label="Ziel suchen">
-      <select${idAttribute}${dataAttribute}>
-        <option value="">Ziel wählen</option>
+      <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchTarget_fc750", "Search target...")} ${portalSelectLabelAttributes("portal.searchTarget", "Search target")}>
+      <select${idAttribute}${dataAttribute} ${targetSelectLabelAttributes(configField, label)}>
+        <option value="">${escapeHtml(portalMessage("portal.selectTarget", "Select target"))}</option>
         ${hangupOption}
         ${options.map((target) => `
-          <option value="${escapeHtml(target.value)}" ${targetOptionSelected(target.value, selectedValue) ? "selected" : ""}>${escapeHtml(target.label)}</option>
+          <option value="${escapeHtml(target.value)}" ${targetOptionSelected(target.value, selectedValue) ? "selected" : ""} data-i18n-ignore data-portal-target-option>${escapeHtml(target.label)}</option>
         `).join("")}
       </select>
     </span>
@@ -4124,78 +4912,123 @@ function targetOptionSelected(optionValue, selectedValue) {
   if (!selectedValue) return false;
   if (optionValue === selectedValue) return true;
   try {
-    return targetCompareKey(JSON.parse(optionValue)) === targetCompareKey(JSON.parse(selectedValue));
+    const option = JSON.parse(optionValue);
+    const selected = JSON.parse(selectedValue);
+    if (normalizeTargetType(option?.type) === "HANGUP" && normalizeTargetType(selected?.type) === "HANGUP") return true;
+    if (![option, selected].every(target => [target?.href, target?.routeNumber, target?.number, target?.targetNumber].some(value => value != null && String(value).trim() !== ""))) return false;
+    return sameTargetIdentity(option, selected);
   } catch {
     return false;
   }
 }
 
-function renderAnnouncementSelect(selectedValue = "") {
+function renderAnnouncementSelect(selectedValue = "", label = ["portal.announcement", "Announcement"]) {
   const announcements = getOverview()?.inventory?.announcements || [];
   if (!announcements.length) {
-    return `<input data-node-config-field="announcement" value="${escapeHtml(selectedValue)}" placeholder="Ansage im Portal anlegen oder Namen eingeben">`;
+    return `<input data-node-config-field="announcement" value="${escapeHtml(selectedValue)}" ${portalPlaceholderAttributes("portal.createAnAnnouncementInThePortalOrEnterIts", "Create an announcement in the Portal or enter its name")} ${portalSelectLabelAttributes(...label)}>`;
   }
   return `
     <span class="select-search-stack">
-      <input class="select-filter-input" type="search" placeholder="Ansage suchen..." aria-label="Ansage suchen">
-      <select data-node-config-field="announcement">
-        <option value="">Ansage wählen</option>
+      <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchAnnouncement_f13ad", "Search announcement...")} ${portalSelectLabelAttributes("portal.searchAnnouncement", "Search announcement")}>
+      <select data-node-config-field="announcement" ${portalSelectLabelAttributes(...label)}>
+        <option value="">${escapeHtml(portalMessage("portal.selectAnnouncement", "Select announcement"))}</option>
         ${announcements.map((announcement) => {
           const value = announcement.name || announcement.value || announcement.id;
-          return `<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHtml(value)}</option>`;
+          return `<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""} data-i18n-ignore>${escapeHtml(value)}</option>`;
         }).join("")}
       </select>
     </span>
   `;
 }
 
+function flowRoutingConflicts(flow) {
+  const nodes = flow?.nodes || [];
+  const outputs = new Map();
+  for (const edge of flow?.edges || []) {
+    if (edge.virtual) continue;
+    const source = nodes.find(node => node.id === edge.from);
+    const isStart = source?.id === "inbound" || ["DID", "TRUNK"].includes(normalizeTargetType(source?.type));
+    const field = isStart ? "" : edge.branchField || "";
+    const key = JSON.stringify([edge.from, field]);
+    const output = outputs.get(key) || { count: 0, kind: isStart ? "start" : field ? "branch" : "direct" };
+    output.count += 1;
+    outputs.set(key, output);
+  }
+  const conflicts = new Set([...outputs.values()].filter(output => output.count > 1).map(output => output.kind));
+  // Stable priority makes old drafts fail the same way regardless of edge order.
+  return ["start", "branch", "direct"].filter(kind => conflicts.has(kind));
+}
+
+function flowRoutingConflictMessage(kind) {
+  if (kind === "start") return portalMessage("portal.flowMultipleStartConnections", "The callflow has multiple start connections. Keep exactly one outgoing connection from the incoming call.");
+  if (kind === "branch") return portalMessage("portal.flowMultipleBranchTargets", "A callflow branch has multiple targets. Keep exactly one target per key or branch.");
+  return portalMessage("portal.flowMultipleDirectTargets", "A callflow step has multiple direct targets. Keep exactly one outgoing connection for that step.");
+}
+
+function flowStartNode(flow = state.flow) {
+  if (flowRoutingConflicts(flow).length) return null;
+  const nodes = flow?.nodes || [];
+  const edges = flow?.edges || [];
+  let node = nodes.find(item => item.id === "inbound")
+    || nodes.find(item => item.locked && normalizeTargetType(item.type) === "DID")
+    || nodes.find(item => item.locked);
+  if (!node) return nodes.find(item => !item.floating && !item.branchTarget && !edges.some(edge => edge.to === item.id)) || null;
+  const visited = new Set();
+  while (node?.locked || normalizeTargetType(node?.type) === "TRUNK") {
+    if (visited.has(node.id)) return null;
+    visited.add(node.id);
+    const edge = edges.find(item => item.from === node.id && !item.virtual && !item.branchField);
+    node = nodes.find(item => item.id === edge?.to);
+  }
+  return node || null;
+}
+
 function currentDraftTarget() {
-  const flowStep = (state.flow?.nodes || []).find((item) => {
-    const kind = normalizeTargetType(item.type);
-    return !item.locked && !item.isTarget && !item.branchTarget && ["TIMECONTROL", "IVR", "ANNOUNCEMENT", "QUEUE", "HANGUP"].includes(kind);
-  });
+  const conflict = flowRoutingConflicts(state.flow)[0];
+  if (conflict) return flowRoutingConflictMessage(conflict);
+  const flowStep = flowStartNode();
   if (flowStep) {
     ensureNodeConfig(flowStep);
     const kind = normalizeTargetType(flowStep.type);
     if (kind === "TIMECONTROL") {
-      if (flowStep.config?.portalMode === "existing") return `${flowStep.title}: vorhandene Zeitsteuerung`;
+      if (flowStep.config?.portalMode === "existing") return portalMessage("portal.valueExistingTimeControl", "{p0}: existing time control", { p0: flowStep.title });
       const openNode = branchTargetNode(flowStep, "openTarget");
       const closedNode = branchTargetNode(flowStep, "closedTarget");
-      const open = isMissingFlowNode(openNode) ? "Ziel fehlt" : openNode.title;
+      const open = isMissingFlowNode(openNode) ? portalMessage("portal.targetMissing", "Target missing") : openNode.title;
       const closed = isMissingFlowNode(closedNode)
-        ? (flowStep.config.announcement ? `${flowStep.config.announcement} + Auflegen` : "Ziel fehlt")
+        ? (flowStep.config.announcement ? portalMessage("portal.valueHangUp", "{p0} + hang up", { p0: flowStep.config.announcement }) : portalMessage("portal.targetMissing", "Target missing"))
         : closedNode.title;
-      return `${flowStep.title}: innerhalb ${open} / außerhalb ${closed}`;
+      return portalMessage("portal.valueInsideValueOutsideValue", "{p0}: inside {p1} / outside {p2}", { p0: flowStep.title, p1: open, p2: closed });
     }
     if (kind === "IVR") {
-      if (flowStep.config?.portalMode === "existing") return `${flowStep.title}: vorhandener Sprachdialog`;
+      if (flowStep.config?.portalMode === "existing") return portalMessage("portal.valueExistingVoiceDialog", "{p0}: existing voice dialog", { p0: flowStep.title });
       const timeoutNode = branchTargetNode(flowStep, "timeoutTarget");
       const keys = ivrKeyNumbers(flowStep)
         .map((key) => {
           const keyNode = branchTargetNode(flowStep, ivrTargetField(key));
-          return `${key} ${isMissingFlowNode(keyNode) ? "Ziel fehlt" : keyNode.title}`;
+          return `${key} ${isMissingFlowNode(keyNode) ? portalMessage("portal.targetMissing", "Target missing") : keyNode.title}`;
         })
         .join(" / ");
-      const timeout = isMissingFlowNode(timeoutNode) ? "Timeout fehlt" : timeoutNode.title;
+      const timeout = isMissingFlowNode(timeoutNode) ? portalMessage("portal.timeoutMissing", "Timeout missing") : timeoutNode.title;
       return `${flowStep.title}: ${keys} / Timeout ${timeout}`;
     }
     if (kind === "ANNOUNCEMENT") {
       const afterNode = branchTargetNode(flowStep, "afterTarget");
-      const after = isMissingFlowNode(afterNode) ? "Auflegen" : afterNode.title;
-      return `${flowStep.title}: ${flowStep.config.announcement || "Ansage fehlt"} → ${after}`;
+      const after = isMissingFlowNode(afterNode) ? portalMessage("portal.hangUp", "Hang up") : afterNode.title;
+      return `${flowStep.title}: ${flowStep.config.announcement || portalMessage("portal.announcementMissing", "Announcement missing")} → ${after}`;
     }
     if (["QUEUE", "GROUP", "SKILL"].includes(kind) && flowStep.config?.portalMode === "new") {
-      return `${flowStep.title}: neu anlegen`;
+      return portalMessage("portal.valueCreateNew", "{p0}: create new", { p0: flowStep.title });
     }
     if (kind === "QUEUE" && flowStep.config.timeoutSeconds) {
       const timeoutNode = branchTargetNode(flowStep, "timeoutTarget");
-      const timeout = isMissingFlowNode(timeoutNode) ? "Timeout fehlt" : timeoutNode.title;
+      const timeout = isMissingFlowNode(timeoutNode) ? portalMessage("portal.timeoutMissing", "Timeout missing") : timeoutNode.title;
       return `${flowStep.title}: Timeout ${flowStep.config.timeoutSeconds}s → ${timeout}`;
     }
-    if (kind === "HANGUP") return `${flowStep.title}: Auflegen`;
+    if (kind === "HANGUP") return portalMessage("portal.valueHangUp_bce31", "{p0}: hang up", { p0: flowStep.title });
   }
-  const target = (state.flow?.nodes || []).find((item) => item.isTarget) || selectedNode();
-  if (!target) return "kein Ziel";
+  const target = flowStep;
+  if (!target) return portalMessage("portal.noTarget_1186c", "No target");
   return [target.title, target.subtitle].filter(Boolean).join(" · ");
 }
 
@@ -4204,6 +5037,8 @@ function targetConfigValue(target = null) {
   const value = {
     type: target.type,
     title: target.title,
+    titleUserEdited: Boolean(target.titleUserEdited),
+    _i18nDefaults: target._i18nDefaults ? clone(target._i18nDefaults) : {},
     subtitle: target.subtitle,
     targetNumber: target.targetNumber || target.number || "",
     routeNumber: target.routeNumber || "",
@@ -4215,17 +5050,9 @@ function targetConfigValue(target = null) {
 }
 
 function currentTargetValue(node) {
-  const compare = targetCompareKey({
-    type: node.type,
-    number: node.targetNumber,
-    targetNumber: node.targetNumber,
-    routeNumber: node.routeNumber,
-    title: node.title,
-    href: node.href,
-  });
   return targetOptions().find((option) => {
     try {
-      return targetCompareKey(JSON.parse(option.value)) === compare;
+      return sameTargetIdentity(JSON.parse(option.value), node);
     } catch {
       return false;
     }
@@ -4253,12 +5080,9 @@ function ensureNodeConfig(node) {
   if (RESOURCE_STEP_KINDS.has(kind) && !node.config.portalMode && nodeHasExistingPortalTarget(node)) {
     node.config.portalMode = "existing";
   }
-  if (kind === "TIMECONTROL" && node.config.portalMode !== "new") {
-    node.config.hours ||= "Mo-Fr 08:00-17:00";
-  }
   if (kind === "IVR") {
     node.config.announcement ||= "";
-    node.config.ivrKeys ||= ivrKeyNumbers(node);
+    node.config.ivrKeys = ivrKeyNumbers(node);
   }
   if (kind === "ANNOUNCEMENT") {
     node.config.announcement ||= "";
@@ -4273,28 +5097,28 @@ function targetOptions() {
   const queues = (overview?.inventory?.queues || []).map((queue) => ({
     label: targetOptionLabel(queue.extensionNumber || queue.value, "QUEUE", queue.name),
     kind: "QUEUE",
-    value: JSON.stringify({
+    value: JSON.stringify(flowTargetFromApiTarget({
       type: "QUEUE",
       title: queue.name,
-      subtitle: (queue.extensionNumber || queue.value) ? `Warteschlange ${queue.extensionNumber || queue.value}` : "Warteschlange",
+      subtitle: (queue.extensionNumber || queue.value) ? portalMessage("portal.queueValue", "Queue {p0}", { p0: queue.extensionNumber || queue.value }) : portalMessage("portal.queue", "Queue"),
       targetNumber: queue.extensionNumber || queue.value || "",
       routeNumber: queue.serviceNumber || queue.id || queue.value || "",
       tone: targetTone("QUEUE"),
       ...serviceMetaFor("queue", queue),
-    }),
+    })),
   }));
   const skills = (overview?.inventory?.skills || []).map((skill) => ({
     label: targetOptionLabel(skill.extensionNumber || skill.value, "SKILL", skill.name),
     kind: "SKILL",
-    value: JSON.stringify({
+    value: JSON.stringify(flowTargetFromApiTarget({
       type: "SKILL",
       title: skill.name,
-      subtitle: (skill.extensionNumber || skill.value) ? `Skillgruppe ${skill.extensionNumber || skill.value}` : "Skillgruppe",
+      subtitle: (skill.extensionNumber || skill.value) ? portalMessage("portal.skillGroupValue", "Skill group {p0}", { p0: skill.extensionNumber || skill.value }) : portalMessage("portal.skillGroup", "Skill group"),
       targetNumber: skill.extensionNumber || skill.value || "",
       routeNumber: skill.serviceNumber || skill.id || skill.value || "",
       tone: targetTone("SKILL"),
       ...serviceMetaFor("skill", skill),
-    }),
+    })),
   }));
   const ivrs = (overview?.inventory?.ivrs || []).map((ivr) => ({
     label: targetOptionLabel(ivr.value, "IVR", ivr.name),
@@ -4302,7 +5126,7 @@ function targetOptions() {
     value: JSON.stringify(flowTargetFromApiTarget({
       type: "IVR",
       title: ivr.name,
-      subtitle: ivr.value ? `Sprachdialog ${ivr.value}` : "Sprachdialog",
+      subtitle: ivr.value ? portalMessage("portal.voiceDialogValue", "Voice dialog {p0}", { p0: ivr.value }) : portalMessage("portal.voiceDialog", "Voice dialog"),
       targetNumber: ivr.value || "",
       routeNumber: ivr.serviceNumber || ivr.id || ivr.value || "",
       tone: targetTone("IVR"),
@@ -4311,14 +5135,14 @@ function targetOptions() {
   const timeControls = (overview?.inventory?.timeControls || []).map((timeControl) => ({
     label: targetOptionLabel(timeControl.value, "TIMECONTROL", timeControl.name),
     kind: "TIMECONTROL",
-    value: JSON.stringify({
+    value: JSON.stringify(flowTargetFromApiTarget({
       type: "TIMECONTROL",
       title: timeControl.name,
-      subtitle: timeControl.value ? `Zeitsteuerung ${timeControl.value}` : "Zeitsteuerung",
+      subtitle: timeControl.value ? portalMessage("portal.timeControlValue", "Time control {p0}", { p0: timeControl.value }) : portalMessage("portal.timeControl", "Time control"),
       targetNumber: timeControl.value || "",
-      routeNumber: timeControl.value || timeControl.id || "",
+      routeNumber: timeControl.serviceNumber || timeControl.id || timeControl.value || "",
       tone: targetTone("TIMECONTROL"),
-    }),
+    })),
   }));
   const voicemails = [
     ...(overview?.inventory?.voicemails || []).map((voicemail) => ({
@@ -4327,7 +5151,7 @@ function targetOptions() {
       value: JSON.stringify({
         type: "VOICEMAIL",
         title: voicemail.name,
-        subtitle: (voicemail.extensionNumber || voicemail.value) ? `Anrufbeantworter ${voicemail.extensionNumber || voicemail.value}` : "Anrufbeantworter",
+        subtitle: (voicemail.extensionNumber || voicemail.value) ? portalMessage("portal.voicemailValue", "Voicemail {p0}", { p0: voicemail.extensionNumber || voicemail.value }) : portalMessage("portal.voicemail", "Voicemail"),
         targetNumber: voicemail.extensionNumber || voicemail.value || "",
         routeNumber: voicemail.serviceNumber || voicemail.id || voicemail.value || "",
         href: voicemail.href || "",
@@ -4337,12 +5161,12 @@ function targetOptions() {
     ...(overview?.inventory?.extensions || [])
       .filter((extension) => extension.voicemailHref || extension.voicemailNumber)
       .map((extension) => ({
-        label: targetOptionLabel(extension.number, "VOICEMAIL", `${extension.name} AB`),
+        label: targetOptionLabel(extension.number, "VOICEMAIL", portalMessage("portal.valueVoicemail", "{p0} voicemail", { p0: extension.name })),
         kind: "VOICEMAIL",
         value: JSON.stringify({
           type: "VOICEMAIL",
-          title: `${extension.name} AB`,
-          subtitle: `Anrufbeantworter ${extension.number}`,
+          title: portalMessage("portal.valueVoicemail", "{p0} voicemail", { p0: extension.name }),
+          subtitle: portalMessage("portal.voicemailValue", "Voicemail {p0}", { p0: extension.number }),
           targetNumber: extension.number,
           routeNumber: extension.voicemailNumber || extension.number,
           href: extension.voicemailHref || "",
@@ -4366,10 +5190,8 @@ function targetOptions() {
   }));
   const routedTargets = (overview?.inventory?.dids || [])
     .filter((did) => did.value)
-    .map((did) => ({
-      label: targetOptionLabel(did.destinationExtension, did.destinationType, did.value),
-      kind: String(did.destinationType || "").toUpperCase(),
-      value: JSON.stringify({
+    .map((did) => {
+      const target = {
         type: did.destinationType || "PHONEEXTENSION",
         title: did.value,
         subtitle: did.destinationExtension ? `${targetTypeLabel(did.destinationType)} ${did.destinationExtension}` : targetTypeLabel(did.destinationType),
@@ -4377,16 +5199,23 @@ function targetOptions() {
         routeNumber: did.destinationServiceNumber || did.destinationExtension || "",
         tone: targetTone(did.destinationType),
         ...serviceMetaForTarget(did.destinationType, did.destinationServiceNumber, did.destinationExtension, did.destinationName || did.value),
-      }),
-    }));
+      };
+      const kind = String(did.destinationType || "").toUpperCase();
+      return {
+        label: targetOptionLabel(did.destinationExtension, did.destinationType, did.value), kind,
+        value: JSON.stringify(["QUEUE", "SKILL"].includes(kind) ? flowTargetFromApiTarget(target) : target),
+      };
+    });
   const extensions = (overview?.inventory?.extensions || []).map((extension) => ({
     label: targetOptionLabel(extension.number, "PHONEEXTENSION", extension.name),
     kind: "PHONEEXTENSION",
     value: JSON.stringify({
       type: "PHONEEXTENSION",
       title: extension.name,
-      subtitle: `Nebenstelle ${extension.number}`,
+      subtitle: portalMessage("portal.extensionValue", "Extension {p0}", { p0: extension.number }),
       targetNumber: extension.number,
+      routeNumber: extension.number,
+      href: extension.href || "",
       tone: "green",
     }),
   }));
@@ -4421,14 +5250,14 @@ function parsedTargetOptions() {
 
 function daynightTargetOptions({ includeCreateOption = true } = {}) {
   const hangup = {
-    label: "Auflegen - (Anruf beenden)",
+    label: portalMessage("portal.hangUpEndCall_f2853", "Hang up - (End call)"),
     kind: "HANGUP",
-    value: JSON.stringify({ type: "HANGUP", title: "Auflegen", routeNumber: "HANGUP", number: "HANGUP" }),
+    value: JSON.stringify({ type: "HANGUP", title: portalMessage("portal.hangUp", "Hang up"), routeNumber: "HANGUP", number: "HANGUP" }),
   };
   const newDialog = {
-    label: "Neues Nachtziel erstellen - (Ansage + danach)",
+    label: portalMessage("portal.createNewNightTargetAnnouncementNextStep", "Create new night target - (announcement + next step)"),
     kind: "NEW_NIGHT_TARGET",
-    value: JSON.stringify({ type: "NEW_NIGHT_TARGET", title: "Neues Nachtziel erstellen", routeNumber: "", number: "" }),
+    value: JSON.stringify({ type: "NEW_NIGHT_TARGET", title: portalMessage("portal.createNewNightTarget", "Create new night target"), routeNumber: "", number: "" }),
   };
   const generatedGatewayName = /^TN\s+\+/i;
   return [
@@ -4476,13 +5305,42 @@ function parsedDaynightTargetOptions() {
 }
 
 function ensureProfileTargetValue(choices = parsedTargetOptions()) {
-  const preferred = choices.find(({ target: item }) => ["IVR", "TIMECONTROL"].includes(normalizeTargetType(item.type)))
-    || choices.find(({ target: item }) => normalizeTargetType(item.type) === "QUEUE")
-    || choices[0];
+  const saved = getOverview()?.daynight?.nightTarget;
+  const preferred = saved && choices.find(({target}) => target.href === saved.href || (normalizeTargetType(target.type) === normalizeTargetType(saved.type) && String(target.routeNumber || target.targetNumber || "") === String(saved.routeNumber || saved.number || "")));
   if (!choices.some(({ option }) => option.value === state.profileTargetValue)) {
-    state.profileTargetValue = preferred?.option?.value || "";
+    let current;
+    try { current = JSON.parse(state.profileTargetValue); } catch { /* No selected target. */ }
+    const matches = current ? choices.filter(({target}) => {
+      if (normalizeTargetType(target.type) !== normalizeTargetType(current.type)) return false;
+      if (["NEW_NIGHT_TARGET", "HANGUP"].includes(normalizeTargetType(current.type))) return true;
+      const route = String(current.routeNumber || current.targetNumber || current.number || "");
+      return Boolean(route && route === String(target.routeNumber || target.targetNumber || target.number || ""));
+    }) : [];
+    state.profileTargetValue = (matches.length === 1 ? matches[0].option.value : preferred?.option?.value) || "";
   }
   return state.profileTargetValue;
+}
+
+function daynightTargetOptionMarkup(option, selectedValue) {
+  const key = option.kind === "HANGUP" ? "portal.hangUpEndCall_f2853" : option.kind === "NEW_NIGHT_TARGET" ? "portal.createNewNightTargetAnnouncementNextStep" : "";
+  return `<option value="${escapeHtml(option.value)}" ${option.value === selectedValue ? "selected" : ""} ${key ? `data-i18n-key="${key}"` : "data-i18n-ignore data-portal-target-option"}>${escapeHtml(option.label)}</option>`;
+}
+
+function portalKeyedMessageMarkup(key, fallback, params = {}) {
+  return `<span data-i18n-key="${escapeHtml(key)}" data-i18n-params="${escapeHtml(JSON.stringify(params))}">${escapeHtml(portalMessage(key, fallback, params))}</span>`;
+}
+
+function daynightGatewayStatusMarkup(entry) {
+  if (!entry.gatewayExists) return portalKeyedMessageMarkup("portal.newTimeControlValue", "New · Time control {p0}", { p0: entry.gateway?.extensionNumber || "" });
+  return portalKeyedMessageMarkup(entry.gatewayNeedsUpdate ? "portal.timeControlNeedsUpdate" : "portal.timeControlMatches", entry.gatewayNeedsUpdate ? "Update target · Time control {number}" : "matching · Time control {number}", { number: entry.gateway?.extensionNumber || "" });
+}
+
+function daynightBehaviorMarkup(entry) {
+  if (entry.blockers?.length) return portalMessagesMarkup(entry.blockers, ", ");
+  if (!entry.behaviorNote) return "";
+  if (entry.currentTarget?.isUnassigned) return portalKeyedMessageMarkup("portal.server.theNumberIsUnassignedDuringTheDayWithinThe", "The number is unassigned during the day. Within the time-control window this becomes hang up; after restoration it remains without a target.");
+  if (entry.currentTarget?.isFrontdesk) return portalKeyedMessageMarkup("portal.server.frontdeskNiaRemainsTheDayTargetBehindTheTime", "Frontdesk/Nia remains the day target behind the time control. The AI solution is unchanged; only the number would initially point to the time control before Frontdesk.");
+  return portalKeyedMessageMarkup("portal.server.theOriginalTargetRemainsTheDayTargetBehindThe", "The original target remains the day target behind the time control.");
 }
 
 function gatewayTargetControlMarkup() {
@@ -4494,24 +5352,23 @@ function gatewayTargetControlMarkup() {
   const selectedAnnouncement = selectedAnnouncementName();
   const afterValue = selectedAnnouncementAfterValue();
   const announcementSource = state.daynightAnnouncementSource || "existing";
-  const displayName = state.daynightAnnouncementDisplayName || `Nachtansage ${selectedAnnouncement || "Ansage"}`;
+  const displayName = daynightAnnouncementDisplayName(selectedAnnouncement);
   const announcementPlanReady = Boolean(state.daynightGatewayPreview?.type === "daynight-announcement-target" && state.daynightGatewayPreview?.ok);
   const canPlanAnnouncementTarget = Boolean(displayName.trim() && announcements.length && announcementSource === "existing" && !state.daynightAnnouncementLoading);
-  const selectedTitle = selected ? displayTargetName(selected.type, selected.title) || targetTypeLabel(selected.type) : "kein Ziel gewählt";
+  const selectedTitle = selected ? displayTargetName(selected.type, selected.title) || targetTypeLabel(selected.type) : portalMessage("portal.noTargetSelected", "No target selected");
   return `
     <div class="daynight-target-card ${createDialog ? "is-new-target" : ""}">
       <div>
-        <span>Nachtschaltung</span>
-        <strong>${escapeHtml(selectedTitle)}</strong>
-        <small>${escapeHtml(createDialog ? "Erstelle zuerst ein Ziel. Danach kann der Nachtmodus geplant und aktiviert werden." : "Dieses vorhandene Ziel wird für den Nachtmodus verwendet.")}</small>
+        <span>${escapeHtml(portalMessage("portal.nightRouting", "Night routing"))}</span>
+        <strong ${!selected ? 'data-i18n-key="portal.noTargetSelected"' : createDialog ? 'data-i18n-key="portal.createNewNightTarget"' : normalizeTargetType(selected?.type) === "HANGUP" ? 'data-i18n-key="portal.hangUp"' : "data-i18n-ignore"}>${escapeHtml(selectedTitle)}</strong>
+        <small>${escapeHtml(createDialog ? portalMessage("portal.createATargetFirstNightModeCanThenBe", "Create a target first. Night mode can then be planned and activated.") : portalMessage("portal.thisExistingTargetIsUsedForNightMode", "This existing target is used for night mode."))}</small>
       </div>
-      <label class="profile-target-control">Nachtziel
+      <label class="profile-target-control"><span>${escapeHtml(portalMessage("portal.nightTarget", "Night target"))}</span>
         <span class="select-search-stack">
-          <input class="select-filter-input" type="search" placeholder="Ziel suchen..." aria-label="Nachtziel suchen">
+          <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchTarget_fc750", "Search target...")} ${portalSelectLabelAttributes("portal.searchNightTarget", "Search night target")}>
           <select id="daynight-gateway-target-select">
-            ${choices.map(({ option }) => `
-              <option value="${escapeHtml(option.value)}" ${option.value === state.profileTargetValue ? "selected" : ""}>${escapeHtml(option.label)}</option>
-            `).join("")}
+            <option value="" disabled ${state.profileTargetValue ? "" : "selected"}>${escapeHtml(portalMessage("portal.selectTarget", "Select target"))}</option>
+            ${choices.map(({ option }) => daynightTargetOptionMarkup(option, state.profileTargetValue)).join("")}
           </select>
         </span>
       </label>
@@ -4519,57 +5376,57 @@ function gatewayTargetControlMarkup() {
     ${createDialog ? `
       <div class="daynight-announcement-card">
         <div>
-          <span>Neues Nachtziel</span>
-          <strong>Neuen Sprachdialog anlegen</strong>
-          <small>Die vorhandene Ansage wird nur eingebunden und nicht verändert. Der Name gilt für den neuen Sprachdialog.</small>
+          <span>${escapeHtml(portalMessage("portal.newNightTarget", "New night target"))}</span>
+          <strong>${escapeHtml(portalMessage("portal.createNewVoiceDialog", "Create new voice dialog"))}</strong>
+          <small>${escapeHtml(portalMessage("portal.theExistingAnnouncementIsLinkedWithoutModificationTheName", "The existing announcement is linked without modification. The name applies to the new voice dialog."))}</small>
         </div>
-        <label class="profile-target-control">Name des neuen Sprachdialogs
-          <input id="daynight-announcement-display-name" value="${escapeHtml(displayName)}" placeholder="z. B. Nachtansage Zentrale">
+        <label class="profile-target-control"><span>${escapeHtml(portalMessage("portal.newVoiceDialogName", "New voice dialog name"))}</span>
+          <input id="daynight-announcement-display-name" ${state.daynightAnnouncementDisplayNameEdited || state.daynightAnnouncementDisplayName ? `value="${escapeHtml(displayName)}"` : portalDefaultAttributes("portal.nightAnnouncementValue", "Night announcement {p0}", { p0: selectedAnnouncement || portalMessage("portal.announcement", "Announcement") })} ${portalPlaceholderAttributes("portal.eGNightAnnouncementReception", "e.g. Night announcement reception")}>
         </label>
-        <div class="daynight-mode-toggle" role="group" aria-label="Ansage-Quelle">
+        <div class="daynight-mode-toggle" role="group" aria-label="${escapeHtml(portalMessage("portal.announcementSource", "Announcement source"))}">
           <label>
             <input name="daynight-announcement-source" type="radio" value="existing" ${announcementSource === "existing" ? "checked" : ""}>
-            <span>Vorhandene Ansage</span>
+            <span>${escapeHtml(portalMessage("portal.existingAnnouncement", "Existing announcement"))}</span>
           </label>
           <label>
             <input name="daynight-announcement-source" type="radio" value="upload" ${announcementSource === "upload" ? "checked" : ""}>
-            <span>MP3/WAV hochladen</span>
+            <span>${escapeHtml(portalMessage("portal.uploadMp3Wav", "Upload MP3/WAV"))}</span>
           </label>
         </div>
         ${announcementSource === "existing" ? `
-          <label class="profile-target-control">Ansage
+          <label class="profile-target-control"><span>${escapeHtml(portalMessage("portal.announcement", "Announcement"))}</span>
             <span class="select-search-stack">
-              <input class="select-filter-input" type="search" placeholder="Ansage suchen..." aria-label="Ansage suchen">
+              <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchAnnouncement_f13ad", "Search announcement...")} ${portalSelectLabelAttributes("portal.searchAnnouncement", "Search announcement")}>
               <select id="daynight-announcement-select" ${announcements.length ? "" : "disabled"}>
                 ${announcements.length ? announcements.map((announcement) => {
                   const value = announcement.name || announcement.value || announcement.id;
-                  return `<option value="${escapeHtml(value)}" ${value === selectedAnnouncement ? "selected" : ""}>${escapeHtml(value)}</option>`;
-                }).join("") : `<option value="">Keine Ansage gefunden</option>`}
+                  return `<option value="${escapeHtml(value)}" ${value === selectedAnnouncement ? "selected" : ""} data-i18n-ignore>${escapeHtml(value)}</option>`;
+                }).join("") : `<option value="">${escapeHtml(portalMessage("portal.noAnnouncementFound", "No announcement found"))}</option>`}
               </select>
             </span>
           </label>
         ` : `
           <div class="announcement-upload-placeholder" aria-disabled="true">
-            <span>MP3/WAV Datei</span>
+            <span>${escapeHtml(portalMessage("portal.mp3WavFile", "MP3/WAV file"))}</span>
             <div class="upload-control is-disabled">
-              <strong>Upload vorbereitet</strong>
-              <small>Wird nach dem Audiotest aktiviert</small>
+              <strong>${escapeHtml(portalMessage("portal.uploadPrepared", "Upload prepared"))}</strong>
+              <small>${escapeHtml(portalMessage("portal.enabledAfterTheAudioTest", "Enabled after the audio test"))}</small>
               <input id="daynight-announcement-upload" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav,audio/x-wav" disabled tabindex="-1" aria-hidden="true">
             </div>
-            <small>Bis dahin bitte eine vorhandene Ansage verwenden.</small>
+            <small>${escapeHtml(portalMessage("portal.useAnExistingAnnouncementUntilThen", "Use an existing announcement until then."))}</small>
           </div>
         `}
-        <label class="profile-target-control">Danach
+        <label class="profile-target-control"><span>${escapeHtml(portalMessage("portal.next", "Next"))}</span>
           <span class="select-search-stack">
-            <input class="select-filter-input" type="search" placeholder="Ziel suchen..." aria-label="Ansage-Danach-Ziel suchen">
+            <input class="select-filter-input" type="search" ${portalPlaceholderAttributes("portal.searchTarget_fc750", "Search target...")} ${portalSelectLabelAttributes("portal.searchTargetAfterAnnouncement", "Search target after announcement")}>
             <select id="daynight-announcement-after-select">
-              ${daynightTargetOptions({ includeCreateOption: false }).map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === afterValue ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+              ${daynightTargetOptions({ includeCreateOption: false }).map(option => daynightTargetOptionMarkup(option, afterValue)).join("")}
             </select>
           </span>
         </label>
         <div class="daynight-announcement-actions">
-          <button class="secondary-button" id="plan-daynight-announcement-target" type="button" ${canPlanAnnouncementTarget ? "" : "disabled"}>${state.daynightAnnouncementLoading ? "Prüft..." : "Neues Ziel prüfen"}</button>
-          <button class="primary-button" id="apply-daynight-announcement-target" type="button" ${state.daynightAnnouncementLoading || !announcementPlanReady || !liveWritesEnabled() ? "disabled" : ""}>Neues Nachtziel anlegen</button>
+          <button class="secondary-button" id="plan-daynight-announcement-target" type="button" ${canPlanAnnouncementTarget ? "" : "disabled"}>${state.daynightAnnouncementLoading ? portalMessage("portal.checking", "Checking...") : portalMessage("portal.checkNewTarget", "Check new target")}</button>
+          <button class="primary-button" id="apply-daynight-announcement-target" type="button" ${state.daynightAnnouncementLoading || !announcementPlanReady || !liveApplyPermitted() ? "disabled" : ""}>${escapeHtml(portalMessage("portal.createNewNightTarget_24c33", "Create new night target"))}</button>
         </div>
       </div>
     ` : ""}
@@ -4639,27 +5496,40 @@ function normalizeTargetType(type) {
 
 function targetCompareKey(target) {
   const type = normalizeTargetType(target?.type);
-  const href = target?.href || "";
-  if (href) return `${type}:href:${String(href).toLowerCase()}`;
-  const number = target?.routeNumber || target?.number || target?.targetNumber || "";
-  return `${type}:${String(number).toLowerCase()}`;
+  let href = String(target?.href || "");
+  if (href) {
+    try { href = new URL(href, window.location.origin || "http://localhost").pathname.replace(/\/+$/, ""); } catch { /* Keep non-URL identifiers literal. */ }
+    return `${type}:href:${href.toLowerCase()}`;
+  }
+  const number = [target?.routeNumber, target?.number, target?.targetNumber].find(value => value != null && String(value).trim() !== "");
+  return `${type}:${number == null ? "" : String(number).trim().toLowerCase()}`;
 }
 
-function filterSearchableSelect(input) {
+function sameTargetIdentity(left, right) {
+  if (normalizeTargetType(left?.type) !== normalizeTargetType(right?.type)) return false;
+  if (left?.href && right?.href) return targetCompareKey(left) === targetCompareKey(right);
+  // Applied flows include hrefs that inventory options may omit. Compare the
+  // typed provider route only when an explicit href is missing on either side.
+  const leftKey = targetCompareKey({ ...left, href: "" });
+  const rightKey = targetCompareKey({ ...right, href: "" });
+  return leftKey !== `${normalizeTargetType(left?.type)}:` && leftKey === rightKey;
+}
+
+function filterSearchableSelect(input, { preserveSelection = false } = {}) {
   const stack = input.closest(".select-search-stack");
   const select = stack?.querySelector("select");
   if (!select) return;
-  const query = input.value.trim().toLocaleLowerCase("de-DE");
+  const query = input.value.trim().toLocaleLowerCase(portalLocale());
   let firstMatch = null;
   Array.from(select.options).forEach((option) => {
-    const keep = !query || !option.value || option.textContent.toLocaleLowerCase("de-DE").includes(query);
+    const keep = !query || !option.value || option.textContent.toLocaleLowerCase(portalLocale()).includes(query);
     option.hidden = !keep;
     option.disabled = Boolean(query && option.value && !keep);
     if (query && keep && option.value && !firstMatch) {
       firstMatch = option;
     }
   });
-  if (query && firstMatch && select.value !== firstMatch.value) {
+  if (!preserveSelection && query && firstMatch && select.value !== firstMatch.value) {
     select.value = firstMatch.value;
     syncSearchableSelectState(select);
   }
@@ -4745,7 +5615,7 @@ function buildChangesFromProfile(profile) {
 }
 
 function formatProfileTime(profile) {
-  if (!profile?.createdAt) return "nicht gesichert";
+  if (!profile?.createdAt) return portalMessage("portal.notSaved", "Not saved");
   return formatTime(profile.createdAt);
 }
 
@@ -4753,7 +5623,19 @@ function validateFlow() {
   return validateFlowDetails().checks;
 }
 
+function validTimeWindow(value) {
+  const match = String(value || "").trim().match(/^([A-Za-zÄÖÜäöü]+)(?:\s*-\s*([A-Za-zÄÖÜäöü]+))?\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+  const days = new Set("MON MONDAY TUE TUESDAY WED WEDNESDAY THU THURSDAY FRI FRIDAY SAT SATURDAY SUN SUNDAY".split(" "));
+  return Boolean(match && days.has(match[1].toUpperCase()) && days.has((match[2] || match[1]).toUpperCase()) && Number(match[3]) < 24 && Number(match[4]) < 60 && Number(match[5]) < 24 && Number(match[6]) < 60);
+}
+
 function validateFlowDetails() {
+  if (state.flow?.providerConflict) {
+    const message = portalMessage("portal.error.flowProviderChanged", "Provider routing changed. The local draft is preserved. Delete the local draft to load the current routing.");
+    return { ok: false, liveCapable: false, complex: false, ambiguous: true, checks: [], problems: [message] };
+  }
+  const routingProblems = flowRoutingConflicts(state.flow).map(flowRoutingConflictMessage);
+  if (routingProblems.length) return { ok: false, liveCapable: false, complex: flowHasComplexNodes(), ambiguous: true, checks: routingProblems, problems: routingProblems };
   const did = selectedDid();
   if (state.flow) {
     pruneDisconnectedFlowNodes(state.flow);
@@ -4761,24 +5643,20 @@ function validateFlowDetails() {
   }
   const nodes = state.flow?.nodes || [];
   const complex = flowHasComplexNodes();
-  const firstComplexStep = nodes.find((item) => {
-    if (item.locked || item.branchTarget) return false;
-    const kind = normalizeTargetType(item.type);
-    return ["TIMECONTROL", "IVR", "ANNOUNCEMENT", "QUEUE", "HANGUP"].includes(kind);
-  });
-  const target = nodes.find((item) => item.isTarget) || firstComplexStep || selectedNode();
+  // Validate the connected route used by preview/apply, independently of canvas selection.
+  const target = flowStartNode();
   const checks = [];
   const problems = [];
-  if (did) checks.push("Rufnummer gewählt");
-  else problems.push("Rufnummer fehlt");
+  if (did) checks.push(portalMessage("portal.numberSelected", "Number selected"));
+  else problems.push(portalMessage("portal.numberMissing", "Number missing"));
 
   if (complex) {
-    if (firstComplexStep?.title) checks.push("Start-Schritt gesetzt");
-    else problems.push("Start-Schritt fehlt");
+    if (target?.title) checks.push(portalMessage("portal.startingStepSet", "Starting step set"));
+    else problems.push(portalMessage("portal.startingStepMissing", "Starting step missing"));
   } else if (target?.title) {
-    checks.push("Ziel gesetzt");
+    checks.push(portalMessage("portal.targetSet", "Target set"));
   } else {
-    problems.push("Ziel fehlt");
+    problems.push(portalMessage("portal.targetMissing", "Target missing"));
   }
 
   for (const node of nodes) {
@@ -4787,59 +5665,60 @@ function validateFlowDetails() {
     const kind = normalizeTargetType(node.type);
     if (kind === "TIMECONTROL") {
       if (!node.config.portalMode) {
-        problems.push("Zeitsteuerung braucht Neu oder Auswahl");
+        problems.push(portalMessage("portal.chooseNewOrExistingForTheTimeControl", "Choose new or existing for the time control"));
       } else if (node.config.portalMode === "existing") {
-        if (node.routeNumber || node.targetNumber) checks.push("Vorhandene Zeitsteuerung gewählt");
-        else problems.push("Vorhandene Zeitsteuerung fehlt");
+        if (node.routeNumber || node.targetNumber) checks.push(portalMessage("portal.existingTimeControlSelected", "Existing time control selected"));
+        else problems.push(portalMessage("portal.existingTimeControlMissing", "Existing time control missing"));
       } else {
-        if (node.config.hours) checks.push("Zeitsteuerung hat Zeitfenster");
-        else problems.push("Zeitsteuerung braucht ein Zeitfenster");
-        if (!isMissingFlowNode(branchTargetNode(node, "openTarget"))) checks.push("Zeitsteuerung: Ziel innerhalb");
-        else problems.push("Zeitsteuerung braucht ein Ziel innerhalb der Zeiten");
-        if (!isMissingFlowNode(branchTargetNode(node, "closedTarget")) || node.config.announcement) checks.push("Zeitsteuerung: Ziel außerhalb");
-        else problems.push("Zeitsteuerung braucht ein Ziel oder eine Ansage außerhalb der Zeiten");
+        if (validTimeWindow(node.config.hours)) checks.push(portalMessage("portal.timeControlHasATimeWindow", "Time control has a time window"));
+        else problems.push(portalMessage("portal.error.dayFormat", "Use English day names, for example Mon-Fri 08:00-17:00."));
+        if (!isMissingFlowNode(branchTargetNode(node, "openTarget"))) checks.push(portalMessage("portal.timeControlTargetInsideOpeningHours", "Time control: target inside opening hours"));
+        else problems.push(portalMessage("portal.timeControlRequiresATargetInsideOpeningHours", "Time control requires a target inside opening hours"));
+        if (!isMissingFlowNode(branchTargetNode(node, "closedTarget")) || node.config.announcement) checks.push(portalMessage("portal.timeControlTargetOutsideOpeningHours", "Time control: target outside opening hours"));
+        else problems.push(portalMessage("portal.timeControlRequiresATargetOrAnnouncementOutsideOpening", "Time control requires a target or announcement outside opening hours"));
       }
     }
     if (kind === "IVR") {
       if (!node.config.portalMode) {
-        problems.push("Sprachdialog braucht Neu oder Auswahl");
+        problems.push(portalMessage("portal.chooseNewOrExistingForTheVoiceDialog", "Choose new or existing for the voice dialog"));
       } else if (node.config.portalMode === "existing") {
-        if (node.routeNumber || node.targetNumber) checks.push("Vorhandener Sprachdialog gewählt");
-        else problems.push("Vorhandener Sprachdialog fehlt");
+        if (node.routeNumber || node.targetNumber) checks.push(portalMessage("portal.existingVoiceDialogSelected", "Existing voice dialog selected"));
+        else problems.push(portalMessage("portal.existingVoiceDialogMissing", "Existing voice dialog missing"));
       } else {
-        if (node.config.announcement) checks.push("Sprachdialog hat Ansage");
-        else problems.push("Sprachdialog braucht eine Ansage");
-        if (ivrKeyNumbers(node).some((key) => !isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))) checks.push("Sprachdialog hat Tasten-Ziel");
-        else problems.push("Sprachdialog braucht mindestens ein Tasten-Ziel");
-        if (!isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) checks.push("Sprachdialog hat Timeout-Ziel");
-        else problems.push("Sprachdialog braucht ein Timeout-Ziel");
+        if (node.config.announcement) checks.push(portalMessage("portal.voiceDialogHasAnAnnouncement", "Voice dialog has an announcement"));
+        else problems.push(portalMessage("portal.voiceDialogRequiresAnAnnouncement", "Voice dialog requires an announcement"));
+        if (ivrKeyNumbers(node).some((key) => !isMissingFlowNode(branchTargetNode(node, ivrTargetField(key))))) checks.push(portalMessage("portal.voiceDialogHasAKeyTarget", "Voice dialog has a key target"));
+        else problems.push(portalMessage("portal.voiceDialogRequiresAtLeastOneKeyTarget", "Voice dialog requires at least one key target"));
+        if (!isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) checks.push(portalMessage("portal.voiceDialogHasATimeoutTarget", "Voice dialog has a timeout target"));
+        else problems.push(portalMessage("portal.voiceDialogRequiresATimeoutTarget", "Voice dialog requires a timeout target"));
       }
     }
     if (["QUEUE", "GROUP", "SKILL"].includes(kind)) {
       if (!node.config.portalMode) {
-        problems.push(`${readableNodeType(kind)} braucht Neu oder Auswahl`);
+        problems.push(portalMessage("portal.chooseNewOrExistingForValue", "Choose new or existing for {p0}", { p0: readableNodeType(kind) }));
       } else if (node.config.portalMode === "existing" && !(node.routeNumber || node.targetNumber)) {
-        problems.push(`Vorhandene ${readableNodeType(kind)} fehlt`);
+        problems.push(portalMessage("portal.existingValueMissing", "Existing {p0} missing", { p0: readableNodeType(kind) }));
       }
     }
     if (kind === "ANNOUNCEMENT") {
-      if (node.config.announcement) checks.push("Ansage gewählt");
-      else problems.push("Ansage-Schritt braucht eine Ansage");
+      problems.push(portalMessage("portal.server.announcementsAreMediaInThePortalApiAndCannot", "Announcements are media in the Portal API and cannot be used as standalone routing targets. Use them in a voice dialog or queue."));
     }
     if (kind === "QUEUE" && node.config.timeoutSeconds) {
-      checks.push(`Queue-Timeout ${node.config.timeoutSeconds}s`);
-      if (!isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) checks.push("Queue hat Timeout-Ziel");
-      else problems.push("Queue braucht ein Ziel nach Timeout");
+      checks.push(portalMessage("portal.queueTimeoutValues", "Queue timeout {p0}s", { p0: node.config.timeoutSeconds }));
+      if (!isMissingFlowNode(branchTargetNode(node, "timeoutTarget"))) checks.push(portalMessage("portal.queueHasATimeoutTarget", "Queue has a timeout target"));
+      else problems.push(portalMessage("portal.queueRequiresATargetAfterTimeout", "Queue requires a target after timeout"));
     }
     if (kind === "PLACEHOLDER") {
-      problems.push("Offener Pfad braucht einen Schritt");
+      problems.push(portalMessage("portal.openPathRequiresAStep", "Open path requires a step"));
     }
   }
 
   const targetReady = Boolean(target?.title && (target?.routeNumber || target?.targetNumber || target?.type === "HANGUP"));
-  const liveCapable = Boolean(did) && (complex || targetReady);
+  const routedNodeIds = reachableFlowNodeIds(state.flow);
+  const unsupportedStep = nodes.some(node => routedNodeIds.has(node.id) && normalizeTargetType(node.type) === "ANNOUNCEMENT");
+  const liveCapable = !unsupportedStep && Boolean(did && target) && (complex || targetReady);
   if (problems.length) checks.push(...problems);
-  else checks.push(liveCapable ? (complex ? "Portal-Objekte live anlegbar" : "live übernehmbar") : "vollständiger Entwurf");
+  else checks.push(liveCapable ? (complex ? portalMessage("portal.portalObjectsCanBeCreatedLive", "Portal objects can be created live") : portalMessage("portal.readyToApplyLive", "Ready to apply live")) : portalMessage("portal.completeDraft", "Complete draft"));
 
   return {
     ok: problems.length === 0,
@@ -4863,7 +5742,7 @@ function renderChangeAssistant() {
   const target = $("#change-assistant");
   if (!target) return;
   target.innerHTML = `
-    <div class="empty-state">Nebenstellen-Aktionen liegen jetzt im Bereich Nebenstellen.</div>
+    <div class="empty-state">${escapeHtml(portalMessage("portal.extensionActionsAreNowInTheExtensionsSection", "Extension actions are now in the Extensions section."))}</div>
   `;
 }
 
@@ -4874,15 +5753,15 @@ function extensionActionMarkup() {
   const cloneForm = `
     <form class="action-form" id="clone-form">
       <label>Vorlage
-        <input value="${escapeHtml(extension ? `${extension.number} ${extension.name}` : "Keine Auswahl")}" disabled>
+        <input value="${escapeHtml(extension ? `${extension.number} ${extension.name}` : portalMessage("portal.noSelection", "No selection"))}" disabled>
       </label>
       <label>Neue Nummer
         <input name="extensionNumber" value="${escapeHtml(nextNumber)}" required>
       </label>
       <label>Name
-        <input name="displayName" value="${escapeHtml(extension ? `${extension.name} Kopie` : "Neue Nebenstelle")}" required>
+        <input name="displayName" ${extension ? portalDefaultAttributes("portal.valueCopy", "{p0} copy", { p0: extension.name }) : portalDefaultAttributes("portal.newExtension", "New extension")} required>
       </label>
-      <button class="primary-button" type="submit">Kopie vorbereiten</button>
+      <button class="primary-button" type="submit">${escapeHtml(portalMessage("portal.prepareCopy", "Prepare copy"))}</button>
     </form>
   `;
   const createForm = `
@@ -4891,26 +5770,26 @@ function extensionActionMarkup() {
         <input name="extensionNumber" value="299" required>
       </label>
       <label>Name
-        <input name="displayName" value="Neue Nebenstelle" required>
+        <input name="displayName" ${portalDefaultAttributes("portal.newExtension", "New extension")} required>
       </label>
-      <button class="secondary-button" type="submit">Neue Nebenstelle vorbereiten</button>
+      <button class="secondary-button" type="submit">${escapeHtml(portalMessage("portal.prepareNewExtension", "Prepare new extension"))}</button>
     </form>
   `;
   return `
     <div class="extension-action-layout">
       <button class="extension-action-choice ${mode === "clone" ? "is-active" : ""}" type="button" data-extension-action-mode="clone">
-        <strong>Einrichtung kopieren</strong>
-        <span>Kopie der ausgewählten Nebenstelle vorbereiten.</span>
+        <strong>${escapeHtml(portalMessage("portal.copySetup", "Copy setup"))}</strong>
+        <span>${escapeHtml(portalMessage("portal.prepareACopyOfTheSelectedExtension", "Prepare a copy of the selected extension."))}</span>
       </button>
 
       <button class="extension-action-choice ${mode === "create" ? "is-active" : ""}" type="button" data-extension-action-mode="create">
-        <strong>Neue Nebenstelle</strong>
-        <span>Neue Nebenstelle vorbereiten.</span>
+        <strong>${escapeHtml(portalMessage("portal.newExtension", "New extension"))}</strong>
+        <span>${escapeHtml(portalMessage("portal.prepareANewExtension", "Prepare a new extension."))}</span>
       </button>
 
       <section class="assistant-card extension-action-editor">
-        <h3>${mode === "clone" ? "Einrichtung kopieren" : "Neue Nebenstelle"}</h3>
-        <p>${mode === "clone" ? "Bereitet eine Kopie der ausgewählten Nebenstelle vor. Es wird nichts im Portal gespeichert." : "Bereitet eine neue Nebenstelle vor. Es wird nichts im Portal gespeichert."}</p>
+        <h3>${mode === "clone" ? portalMessage("portal.copySetup", "Copy setup") : portalMessage("portal.newExtension", "New extension")}</h3>
+        <p>${mode === "clone" ? portalMessage("portal.preparesACopyOfTheSelectedExtensionNothingIs", "Prepares a copy of the selected extension. Nothing is saved to the Portal.") : portalMessage("portal.preparesANewExtensionNothingIsSavedToThe", "Prepares a new extension. Nothing is saved to the Portal.")}</p>
         ${mode === "clone" ? cloneForm : createForm}
       </section>
     </div>
@@ -4918,19 +5797,22 @@ function extensionActionMarkup() {
 }
 
 function renderActionPlan() {
+  const setupPlan = $("#action-plan");
+  const showSetupPlan = Boolean(state.actionPlan?.type === "profile" && state.actionPlan.context === "changes");
+  if (setupPlan) setupPlan.hidden = !showSetupPlan;
   const extensionPlanCard = $("#extension-action-plan-card");
   const showExtensionPlan = Boolean(state.actionPlan && state.actionPlan.context === "extensions");
   if (extensionPlanCard) {
     extensionPlanCard.hidden = !showExtensionPlan;
   }
-  const targets = ["#action-plan", showExtensionPlan ? "#extension-action-plan" : ""]
+  const targets = [showSetupPlan ? "#action-plan" : "", showExtensionPlan ? "#extension-action-plan" : ""]
     .filter(Boolean)
     .map((selector) => $(selector))
     .filter(Boolean);
   if (!targets.length) return;
   if (!state.actionPlan) {
     targets.forEach((target) => {
-      target.innerHTML = `<div class="empty-state">Keine vorbereitete Änderung.</div>`;
+      target.innerHTML = `<div class="empty-state">${escapeHtml(portalMessage("portal.noPreparedChange", "No prepared change."))}</div>`;
     });
     return;
   }
@@ -4939,70 +5821,69 @@ function renderActionPlan() {
   const isFlowPlan = Boolean(state.actionPlan.flow);
   const isProfilePlan = state.actionPlan.type === "profile";
   const isPhonebookPlan = state.actionPlan.type === "phonebook-sync";
-  const writesEnabled = liveWritesEnabled();
   const hasApplyPayload = Boolean(state.actionPlan.applyPayload);
-  const canApplyFlow = isFlowPlan && hasApplyPayload && !state.actionPlan.applied && writesEnabled;
+  const canApplyFlow = isFlowPlan && hasApplyPayload && !state.actionPlan.applied && localApplyPermitted();
   const canApplyProfile = isProfilePlan
     && state.actionPlan.applyPayload?.changes?.length
     && !state.actionPlan.applied
     && state.actionPlan.ok !== false
-    && writesEnabled;
+    && liveApplyPermitted();
   const checklist = isPhonebookPlan
     ? [
-      `Quelle: ${state.actionPlan.source?.googleContacts ?? 0} Kontakte / ${state.actionPlan.source?.googlePhones ?? 0} Telefonnummern`,
-      `NFON: ${state.actionPlan.target?.portalEntries ?? 0} Telefonbuch-Einträge in ${state.actionPlan.target?.phoneBook || "Telefonbuch"}`,
-      `Differenz: ${state.actionPlan.summary?.create ?? 0} neu, ${state.actionPlan.summary?.update ?? 0} ändern, ${state.actionPlan.summary?.unchanged ?? 0} unverändert`,
-      state.actionPlan.applied ? "Änderungen wurden an die Portal API gesendet." : "Übernahme erfolgt direkt im Telefonbuch-Sync.",
+      portalMessage("portal.sourceValueContactsValuePhoneNumbers", "Source: {p0} contacts / {p1} phone numbers", { p0: state.actionPlan.source?.googleContacts ?? 0, p1: state.actionPlan.source?.googlePhones ?? 0 }),
+      portalMessage("portal.nfonValuePhonebookEntriesInValue", "NFON: {p0} phonebook entries in {p1}", { p0: state.actionPlan.target?.portalEntries ?? 0, p1: state.actionPlan.target?.phoneBook || portalMessage("portal.phonebook", "Phonebook") }),
+      portalMessage("portal.differenceValueNewValueUpdatedValueUnchanged", "Difference: {p0} new, {p1} updated, {p2} unchanged", { p0: state.actionPlan.summary?.create ?? 0, p1: state.actionPlan.summary?.update ?? 0, p2: state.actionPlan.summary?.unchanged ?? 0 }),
+      state.actionPlan.applied ? portalMessage("portal.changesWereSentToThePortalApi", "Changes were sent to the Portal API.") : portalMessage("portal.applyChangesDirectlyInPhonebookSync", "Apply changes directly in phonebook sync."),
     ]
     : isProfilePlan
     ? [
-      `${state.actionPlan.changeCount || 0} Rufnummer${state.actionPlan.changeCount === 1 ? "" : "n"} prüfen.`,
+      portalMessage("portal.checkValueNumbers", "Check {p0} numbers.", { p0: state.actionPlan.changeCount || 0, p1: state.actionPlan.changeCount === 1 ? "" : "n" }),
       ...(state.actionPlan.changes || []).slice(0, 4).map((change) => `${change.before || "-"} / ${change.after || "-"}`),
-      state.actionPlan.applied ? "Profil wurde live an die Portal API gesendet." : "Live-Übernahme erst nach Bestätigung.",
+      state.actionPlan.applied ? portalMessage("portal.theProfileWasSentToTheLivePortalApi", "The profile was sent to the live Portal API.") : portalMessage("portal.liveChangesRequireConfirmation", "Live changes require confirmation."),
     ]
     : isFlowPlan
     ? [
-      `Callflow für ${state.actionPlan.did || "die gewählte Rufnummer"} prüfen.`,
-      `Vorher: ${state.actionPlan.before || "-"}`,
-      `Entwurf: ${state.actionPlan.after || "-"}`,
-      state.actionPlan.applied ? "Änderung wurde live an die Portal API gesendet." : "Live-Übernahme erst nach Bestätigung.",
+      portalMessage("portal.checkCallflowForValue", "Check callflow for {p0}.", { p0: state.actionPlan.did || portalMessage("portal.theSelectedNumber", "the selected number") }),
+      portalMessage("portal.beforeValue", "Before: {p0}", { p0: state.actionPlan.before || "-" }),
+      portalMessage("portal.draftValue", "Draft: {p0}", { p0: state.actionPlan.after || "-" }),
+      STATIC_DEMO_MODE ? portalMessage(state.actionPlan.applied ? "portal.demo.changeSaved" : "portal.demo.localApplyAvailable", "") : state.actionPlan.applied ? portalMessage("portal.theChangeWasSentToTheLivePortalApi", "The change was sent to the live Portal API.") : portalMessage("portal.liveChangesRequireConfirmation", "Live changes require confirmation."),
     ]
     : [
-      `Nebenstelle ${body.extensionNumber || "neu"} mit Name ${body.displayName || "-"} vorbereiten.`,
-      "Vor dem echten Speichern Geräte, Rufnummern und Callflow prüfen.",
-      "Live-Übernahme erfolgt erst nach separater Freigabe.",
+      portalMessage("portal.prepareExtensionValueNamedValue", "Prepare extension {p0} named {p1}.", { p0: body.extensionNumber || portalMessage("portal.new_b1688", "new"), p1: body.displayName || "-" }),
+      portalMessage("portal.checkDevicesNumbersAndCallflowBeforeSavingLive", "Check devices, numbers and callflow before saving live."),
+      portalMessage("portal.liveChangesRequireSeparateApproval", "Live changes require separate approval."),
     ];
   const statusLabel = state.actionPlan.ok === false
-    ? "Fehler"
+    ? portalMessage("portal.error", "Error")
     : state.actionPlan.blocked
-      ? "Hinweis"
+      ? portalMessage("portal.server.notice", "Notice")
     : state.actionPlan.applied
-      ? "live übernommen"
-      : "prüfen";
+      ? (STATIC_DEMO_MODE ? portalMessage("portal.demo.localWriteNotice", "Demo PBX: changes are saved locally.") : portalMessage("portal.appliedLive", "Applied live"))
+      : portalMessage("portal.check_9a90a", "check");
   const html = `
     <div class="plan-summary">
       <span class="pill ${state.actionPlan.ok === false ? "is-error" : state.actionPlan.blocked ? "is-warning" : ""}">${escapeHtml(statusLabel)}</span>
-      <strong>${escapeHtml(state.actionPlan.title || "Änderung vorbereitet")}</strong>
-      <span>${escapeHtml(state.actionPlan.message || "Es wurde nichts im Portal gespeichert.")}</span>
+      <strong>${escapeHtml(state.actionPlan.title || portalMessage("portal.changePrepared", "Change prepared"))}</strong>
+      <span>${escapeHtml(state.actionPlan.message || portalMessage("portal.nothingWasSavedInThePortal", "Nothing was saved in the Portal."))}</span>
       <ol class="check-list">
         ${checklist.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
       </ol>
-      ${canApplyFlow ? `<button class="primary-button" id="apply-flow-live" type="button">Flow live übernehmen</button>` : ""}
-      ${canApplyProfile ? `<button class="primary-button" id="apply-profile-live" type="button">Profil live übernehmen</button>` : ""}
-      ${((hasApplyPayload || isPhonebookPlan) && !writesEnabled && !state.actionPlan.applied) ? `<span class="plan-note">${escapeHtml(liveWritesDisabledText())}</span>` : ""}
+      ${canApplyFlow ? `<button class="primary-button" id="apply-flow-live" type="button">${STATIC_DEMO_MODE ? portalMessage("portal.demo.applyFlowLocally", "Apply flow locally") : portalMessage("portal.applyFlowLive", "Apply flow live")}</button>` : ""}
+      ${canApplyProfile ? `<button class="primary-button" id="apply-profile-live" type="button">${escapeHtml(portalMessage("portal.applyProfileLive", "Apply profile live"))}</button>` : ""}
+      ${((hasApplyPayload || isPhonebookPlan) && !localApplyPermitted() && !canApplyFlow && !state.actionPlan.applied) ? `<span class="plan-note">${escapeHtml(liveWritesDisabledText())}</span>` : ""}
       ${isPhonebookPlan ? `
         <div class="sync-action-preview">
           ${(state.actionPlan.actions || []).slice(0, 8).map((action) => `
             <div class="sync-action-row">
-              <span>${escapeHtml(action.action === "create-phonebook" ? "Telefonbuch" : action.action === "create" ? "Anlegen" : "Aktualisieren")}</span>
-              <strong>${escapeHtml(action.contact || "-")}</strong>
-              <small>${escapeHtml(action.phone || "")}</small>
+              <span>${escapeHtml(action.action === "create-phonebook" ? portalMessage("portal.phonebook", "Phonebook") : action.action === "create" ? portalMessage("portal.create", "Create") : portalMessage("portal.refresh", "Refresh"))}</span>
+              <strong data-i18n-ignore>${escapeHtml(action.contact || "-")}</strong>
+              <small data-i18n-ignore>${escapeHtml(action.phone || "")}</small>
             </div>
-          `).join("") || `<div class="empty-state is-compact">Keine Änderung am Telefonbuch nötig.</div>`}
+          `).join("") || `<div class="empty-state is-compact">${escapeHtml(portalMessage("portal.noPhonebookChangeNeeded", "No phonebook change needed."))}</div>`}
         </div>
       ` : ""}
       <details>
-        <summary>Technische Details</summary>
+        <summary>${escapeHtml(portalMessage("portal.technicalDetails", "Technical details"))}</summary>
         <pre>${escapeHtml(JSON.stringify(state.actionPlan, null, 2))}</pre>
       </details>
     </div>
@@ -5012,14 +5893,40 @@ function renderActionPlan() {
   });
 }
 
+function flowAvailability() {
+  if (state.loading) return { kind: "loading", ok: false, message: portalMessage("portal.loading", "Loading") };
+  const overview = getOverview();
+  if (state.error || !overview || overview.endpoints?.dids?.ok === false || overview.connection?.state === "unavailable") return { kind: "error", ok: false, message: `${portalMessage("portal.loadingFailed", "Loading failed")}. ${portalMessage("portal.inventoryUnavailable", "Data could not be loaded.")}` };
+  if (overview.connection?.authenticationRequired) return { kind: "error", ok: false, message: portalMessage("portal.loginRequired", "Sign in required") };
+  if (!(getOverview()?.inventory?.dids || []).length) return { kind: "empty", ok: false, message: portalMessage("portal.noNumbersFound", "No numbers found.") };
+  return null;
+}
+
+function fitFlowDidMenu() {
+  const menu = $("#flow-did-menu");
+  if (!menu || menu.hidden) return;
+  const viewport = window.visualViewport;
+  let bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+  for (let ancestor = menu.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    if (!/^(auto|scroll|hidden|clip)$/.test(getComputedStyle(ancestor).overflowY)) continue;
+    const rect = ancestor.getBoundingClientRect();
+    bottom = Math.min(bottom, rect.top + ancestor.clientTop + ancestor.clientHeight);
+  }
+  const available = Math.floor(bottom - menu.getBoundingClientRect().top - 8);
+  menu.style.maxHeight = `${Math.max(0, Math.min(360, available))}px`;
+}
+
 function renderFlowFeedback() {
   const feedback = $("#flow-feedback");
   if (!feedback) return;
+  localizeResponseMessages(state.flowFeedback);
   const plan = state.view === "callflow" && state.actionPlan?.context === "callflow" ? state.actionPlan : null;
   const complexSaved = Boolean(plan?.flow && !plan.applyPayload && plan.ok !== false);
-  const hasLocalDraft = !plan && Boolean(state.flow?.draftUpdatedAt);
+  const hasLocalDraft = Boolean(state.flow?.draftUpdatedAt) && (!plan || state.flow?.providerConflict);
   const selected = selectedDid();
-  const message = plan
+  const availability = flowAvailability();
+  const message = state.flow?.providerConflict ? { ok: false, title: selectedDidHeadline(selected),
+    message: portalMessage("portal.error.flowProviderChanged", "Provider routing changed. The local draft is preserved. Delete the local draft to load the current routing.") } : availability ? { ...availability, title: selectedDidHeadline(selected) } : plan
     ? {
       ok: plan.ok !== false,
       title: selectedDidHeadline(selected),
@@ -5029,38 +5936,39 @@ function renderFlowFeedback() {
       ok: true,
       title: selectedDidHeadline(selected),
       message: state.flow?.draftUpdatedAt
-        ? `Lokaler Entwurf geladen (${formatTime(state.flow.draftUpdatedAt)}).`
+        ? portalMessage("portal.localDraftLoadedValue", "Local draft loaded ({p0}).", { p0: formatTime(state.flow.draftUpdatedAt) })
         : state.flow?.appliedSnapshotAt
-          ? `Live-Änderung geladen (${formatTime(state.flow.appliedSnapshotAt)}). Die Detailstruktur stammt aus dem übernommenen Flow.`
-        : "Live-Zustand geladen. Änderungen bleiben lokal bis zur Prüfung.",
+          ? (STATIC_DEMO_MODE ? portalMessage("portal.demo.localFlowLoaded", "Locally applied callflow loaded ({p0}).", { p0: formatTime(state.flow.appliedSnapshotAt) }) : portalMessage("portal.liveChangeLoadedValueTheDetailedStructureComesFrom", "Live change loaded ({p0}). The detailed structure comes from the applied flow.", { p0: formatTime(state.flow.appliedSnapshotAt) }))
+        : portalMessage("portal.liveStateLoadedChangesRemainLocalUntilReview", "Live state loaded. Changes remain local until review."),
     };
-  feedback.className = `flow-feedback ${message.ok ? "is-ok" : "is-error"}`;
+  feedback.className = `flow-feedback ${availability && availability.kind !== "error" ? `is-${availability.kind}` : message.ok ? "is-ok" : "is-error"}`;
   feedback.innerHTML = `
     <div class="flow-feedback-copy">
       <button class="flow-did-selector" id="flow-did-selector" type="button" aria-expanded="false">
-        <strong>${escapeHtml(message.title)}</strong>
+        <strong data-i18n-ignore>${escapeHtml(message.title)}</strong>
         <span aria-hidden="true">⌄</span>
       </button>
       <span>${escapeHtml(message.message || "")}</span>
       <div class="flow-did-menu" id="flow-did-menu" hidden>
         ${(getOverview()?.inventory?.dids || []).map((did) => `
           <button class="flow-did-option ${did.id === state.selectedDidId ? "is-selected" : ""}" type="button" data-did-id="${escapeHtml(did.id)}">
-            <strong>${escapeHtml(did.name || did.value || "Rufnummer")}</strong>
-            <span>${escapeHtml(did.value || did.destinationName || "kein Ziel erkannt")}</span>
+            <strong data-i18n-ignore>${escapeHtml(did.name || did.value || portalMessage("portal.number_b7905", "Number"))}</strong>
+            <span ${(did.value || did.destinationName) ? 'data-i18n-ignore' : 'data-i18n-key="portal.noTargetDetected"'}>${escapeHtml(did.value || did.destinationName || portalMessage("portal.noTargetDetected", "No target detected"))}</span>
           </button>
         `).join("")}
       </div>
     </div>
-    ${complexSaved ? `<span class="pill">Lokal gespeichert</span>` : ""}
-    ${complexSaved ? `<button class="secondary-button is-compact" id="save-flow-draft-from-plan" type="button">Erneut speichern</button>` : ""}
+    ${complexSaved ? `<span class="pill">${escapeHtml(portalMessage("portal.savedLocally", "Saved locally"))}</span>` : ""}
+    ${complexSaved ? `<button class="secondary-button is-compact" id="save-flow-draft-from-plan" type="button">${escapeHtml(portalMessage("portal.saveAgain", "Save again"))}</button>` : ""}
+    ${state.flow?.previousDraft ? `<button class="secondary-button is-compact" id="restore-previous-flow-draft" type="button">${escapeHtml(portalMessage("portal.restorePreviousDraft", "Restore previous draft"))}</button>` : ""}
   `;
   const clearDraftButton = $("#clear-flow-draft");
   if (clearDraftButton) clearDraftButton.hidden = !hasLocalDraft;
 }
 
 function selectedDidHeadline(did = selectedDid()) {
-  if (!did) return "Keine Rufnummer ausgewählt";
-  return did.name || did.value || "Rufnummer";
+  if (!did) return portalMessage("portal.noNumberSelected", "No number selected");
+  return did.name || did.value || portalMessage("portal.number_b7905", "Number");
 }
 
 function renderFlowProfileActions() {
@@ -5070,8 +5978,8 @@ function renderFlowProfileActions() {
   ensureProfileTargetValue(choices);
   const standardProfile = readProfile("standard");
   target.innerHTML = `
-    <button class="secondary-button" id="save-standard-flow-profile" type="button">Standard sichern</button>
-    <button class="secondary-button" id="stage-standard-flow-profile" type="button">Standard wiederherstellen</button>
+    <button class="secondary-button" id="save-standard-flow-profile" type="button">${escapeHtml(portalMessage("portal.saveDefault", "Save default"))}</button>
+    <button class="secondary-button" id="stage-standard-flow-profile" type="button">${escapeHtml(portalMessage("portal.restoreDefault", "Restore default"))}</button>
     <input id="standard-flow-import-file" type="file" accept=".json,application/json" hidden>
   `;
   const summary = $("#daynight-summary");
@@ -5082,32 +5990,32 @@ function renderFlowProfileActions() {
     const target = selectedProfileTarget();
     const readiness = [
       {
-        label: "Zeitsteuerungen",
+        label: portalMessage("portal.timeControls", "Time controls"),
         ok: endpoint?.ok || (overview?.inventory?.timeControls || []).length > 0,
         detail: endpoint?.ok
-          ? `${overview?.counts?.timeControls || 0} geladen`
-          : endpoint?.error || "nicht geladen",
+          ? portalMessage("portal.valueLoaded", "{p0} loaded", { p0: overview?.counts?.timeControls || 0 })
+          : endpoint?.error || portalMessage("portal.notLoaded", "not loaded"),
       },
       {
-        label: "Nachtziel",
+        label: portalMessage("portal.nightTarget", "Night target"),
         ok: Boolean(target),
-        detail: target ? `${displayTargetName(target.type, target.title) || target.type} ${target.routeNumber || target.targetNumber || ""}`.trim() : "kein Ziel gewählt",
+        detail: target ? `${displayTargetName(target.type, target.title) || target.type} ${target.routeNumber || target.targetNumber || ""}`.trim() : portalMessage("portal.noTargetSelected", "No target selected"),
       },
       {
-        label: "Standardprofil",
+        label: portalMessage("portal.defaultProfile", "Default profile"),
         ok: Boolean(standardProfile),
-        detail: standardProfile ? `gesichert ${formatProfileTime(standardProfile)}` : "noch nicht gesichert",
+        detail: standardProfile ? portalMessage("portal.savedValue", "Saved {p0}", { p0: formatProfileTime(standardProfile) }) : portalMessage("portal.notSavedYet", "not saved yet"),
       },
       {
-        label: "Rufnummern",
+        label: portalMessage("portal.numbers", "Numbers"),
         ok: didCount > 0,
-        detail: `${didCount} Rufnummer${didCount === 1 ? "" : "n"} verfügbar`,
+        detail: portalMessage("portal.valueNumbersAvailable", "{p0} numbers available", { p0: didCount, p1: didCount === 1 ? "" : "n" }),
       },
     ];
-    const statusTitle = standardProfile ? "Standardprofil gesichert" : "Standardprofil fehlt";
+    const statusTitle = standardProfile ? portalMessage("portal.server.defaultProfileSaved", "Default profile saved") : portalMessage("portal.defaultProfileMissing", "Default profile missing");
     const statusDetail = standardProfile
-      ? "Nachtmodus kann geprüft und später auf Standard zurückgestellt werden."
-      : "Aktuellen Zustand zuerst als Standard sichern.";
+      ? portalMessage("portal.nightModeCanBeCheckedAndLaterRestoredTo", "Night mode can be checked and later restored to the default.")
+      : portalMessage("portal.saveTheCurrentStateAsTheDefaultFirst", "Save the current state as the default first.");
     summary.innerHTML = `
       <div class="daynight-summary-item ${standardProfile ? "" : "is-muted"}">
         <strong>${escapeHtml(statusTitle)}</strong>
@@ -5131,8 +6039,10 @@ function daynightActivationReady() {
   const summary = preview?.summary || {};
   return Boolean(
     preview?.ok
+      && isCurrentWriteContext(preview.writeContext)
       && summary.total > 0
       && summary.gatewaysExisting === summary.total
+      && !summary.gatewaysToUpdate
       && !daynightRequiresDialogCreation()
   );
 }
@@ -5146,13 +6056,25 @@ function updateDaynightHeaderButton() {
   switchLabel.classList.toggle("is-night-active", state.daynightActive);
   switchLabel.classList.toggle("is-loading", state.daynightModeSwitchLoading);
   toggle.checked = state.daynightActive;
-  toggle.disabled = state.daynightModeSwitchLoading || state.daynightGatewayRoutingLoading || state.daynightGatewayResetLoading;
-  text.textContent = state.daynightModeSwitchLoading ? "Bitte warten..." : state.daynightActive ? "☾ Nachtmodus aktiv" : "☀ Tagmodus";
+  toggle.disabled = state.daynightSetupLoading || state.daynightModeSwitchLoading || state.daynightGatewayRoutingLoading || state.daynightGatewayResetLoading;
+  text.textContent = state.daynightModeSwitchLoading ? portalMessage("portal.server.pleaseWait_ea36c", "Please wait...") : state.daynightActive ? portalMessage("portal.nightModeActive", "☾ Night mode active") : portalMessage("portal.dayMode", "☀ Day mode");
   const title = state.daynightActive
-    ? "Tagmodus wiederherstellen"
-    : "Nachtmodus aktivieren";
+    ? portalMessage("portal.restoreDayMode", "Restore day mode")
+    : portalMessage("portal.activateNightMode_5e185", "Activate night mode");
   switchLabel.title = title;
   toggle.setAttribute("aria-label", title);
+}
+
+function daynightSetupPermitted() {
+  const settings = getOverview()?.settings;
+  return !STATIC_DEMO_MODE && Boolean(settings?.configured && settings.liveWritesPermitted && !settings.liveWritesLocked);
+}
+
+function daynightSetupActionMarkup() {
+  const busy = state.daynightSetupLoading || state.daynightGatewayLoading || state.daynightGatewayApplyLoading || state.daynightGatewayRoutingLoading || state.daynightGatewayResetLoading;
+  return `<div class="daynight-action-row">
+    <button class="primary-button" id="prepare-and-activate-night-mode" type="button" ${busy || state.daynightActive || !daynightSetupPermitted() ? "disabled" : ""}>${escapeHtml(portalMessage(state.daynightSetupLoading ? "portal.settingUpNightMode" : "portal.setUpAndActivateNightMode", "Set up and activate night mode"))}</button>
+  </div>`;
 }
 
 function renderDaynightGatewayPreview() {
@@ -5165,12 +6087,14 @@ function renderDaynightGatewayPreview() {
       <section class="daynight-preview-card is-muted">
         ${gatewayTargetControlMarkup()}
         <div>
-          <strong>Zeitsteuerungs-Plan noch nicht geprüft</strong>
-          <span>${escapeHtml(requiresDialogCreation ? "Lege zuerst den neuen Sprachdialog als Nachtziel an. Danach kann der Zeitsteuerungs-Plan geprüft werden." : "Schritt 1 liest nur API-Daten. Zeitsteuerungen und Rufnummern bleiben unverändert.")}</span>
+          <span>${escapeHtml(portalMessage("portal.nightSetupDescription", "Save day routing, prepare time controls and activate night mode."))}</span>
         </div>
+        ${daynightSetupActionMarkup()}
+        <details><summary>${escapeHtml(portalMessage("portal.daynightAdvanced", "Details and maintenance"))}</summary>
         <div class="daynight-action-row">
-          <button class="secondary-button" id="preview-daynight-gateway" type="button" ${state.daynightGatewayLoading || requiresDialogCreation ? "disabled" : ""}>${state.daynightGatewayLoading ? "Prüft..." : "Zeitsteuerungs-Plan prüfen"}</button>
+          <button class="secondary-button" id="preview-daynight-gateway" type="button" ${state.daynightGatewayLoading || requiresDialogCreation ? "disabled" : ""}>${state.daynightGatewayLoading ? portalMessage("portal.checking", "Checking...") : portalMessage("portal.checkTimeControlPlan", "Check time-control plan")}</button>
         </div>
+        </details>
       </section>
     `;
     updateDaynightHeaderButton();
@@ -5181,21 +6105,22 @@ function renderDaynightGatewayPreview() {
       <section class="daynight-preview-card">
         <div class="daynight-preview-header">
           <div>
-            <h3>${escapeHtml(preview.title || "Neues Nachtziel geprüft")}</h3>
+            <h3 data-i18n-ignore>${escapeHtml(preview.title || portalMessage("portal.newNightTargetChecked", "New night target checked"))}</h3>
             <p>${escapeHtml(preview.message || "")}</p>
           </div>
           <span class="batch-status-pill ${preview.ok ? "is-ok" : "is-warning"}">Plan</span>
         </div>
         ${gatewayTargetControlMarkup()}
+        ${daynightSetupActionMarkup()}
         ${preview.ok ? `
           <div class="readiness-item is-ok">
-            <strong>Nächster Schritt</strong>
-            <span>Lege das neue Nachtziel an. Danach wird es automatisch als Nachtziel ausgewählt und der Zeitsteuerungs-Plan kann geprüft werden.</span>
+            <strong>${escapeHtml(portalMessage("portal.nextStep", "Next step"))}</strong>
+            <span>${escapeHtml(portalMessage("portal.createTheNewNightTargetItIsThenSelected", "Create the new night target. It is then selected automatically and the time-control plan can be checked."))}</span>
           </div>
         ` : `
           <div class="readiness-item is-warning">
-            <strong>Bitte korrigieren</strong>
-            <span>${escapeHtml((preview.blockers || []).join(" ") || "Der Plan ist noch nicht vollständig.")}</span>
+            <strong>${escapeHtml(portalMessage("portal.pleaseCorrect", "Please correct"))}</strong>
+            <span>${portalMessagesMarkup(preview.blockers?.length ? preview.blockers : [portalMessage("portal.thePlanIsNotCompleteYet", "The plan is not complete yet.")], " ")}</span>
           </div>
         `}
       </section>
@@ -5204,130 +6129,133 @@ function renderDaynightGatewayPreview() {
     return;
   }
   const summary = preview.summary || {};
-  const writesEnabled = liveWritesEnabled();
+  const writesEnabled = liveApplyPermitted();
   const gatewayChangeCount = (summary.gatewaysToCreate || 0) + (summary.gatewaysToUpdate || 0);
   const canCreateGateways = Boolean(preview.ok && gatewayChangeCount > 0 && writesEnabled && !state.daynightGatewayApplyLoading);
   const allGatewaysReady = Boolean(preview.ok && summary.total > 0 && summary.gatewaysExisting === summary.total);
   const canRouteGateways = Boolean(allGatewaysReady && writesEnabled && !state.daynightGatewayRoutingLoading);
   const cleanupCount = summary.cleanupCandidates || preview.staleTimeControls?.length || 0;
   const managedGatewayCount = summary.gatewaysExisting || 0;
-  const canCleanupGateways = Boolean((cleanupCount > 0 || managedGatewayCount > 0) && writesEnabled && !state.daynightGatewayCleanupLoading && !state.daynightGatewayResetLoading);
-  const canResetGateways = Boolean(managedGatewayCount > 0 && writesEnabled && !state.daynightGatewayResetLoading);
-  const cleanupButtonLabel = cleanupCount > 0 ? "Alte Zeitsteuerungen löschen" : "Zeitsteuerungen löschen";
+  const canCleanupGateways = Boolean(cleanupCount > 0 && writesEnabled && !state.daynightGatewayCleanupLoading && !state.daynightGatewayResetLoading);
+  const canResetGateways = Boolean(managedGatewayCount > 0 && portalApplyPermitted() && !state.daynightGatewayResetLoading);
+  const cleanupButtonLabel = cleanupCount > 0 ? portalMessage("portal.deleteOldTimeControls", "Delete old time controls") : portalMessage("portal.deleteTimeControls", "Delete time controls");
   const capabilities = preview.capabilities || {};
   const operationFeedback = state.daynightOperationFeedback;
   const capabilityRows = [
-    ["Rufnummern", capabilities.dids],
-    ["Zeitsteuerungen", capabilities.timeControls],
-    ["Sprachdialoge", capabilities.ivrs],
-    ["Ansagen", capabilities.announcements],
+    [portalMessage("portal.numbers", "Numbers"), capabilities.dids],
+    [portalMessage("portal.timeControls", "Time controls"), capabilities.timeControls],
+    [portalMessage("portal.voiceDialogs", "Voice dialogs"), capabilities.ivrs],
+    [portalMessage("portal.announcements", "Announcements"), capabilities.announcements],
     ["Frontdesk/Nia", capabilities.frontdesks],
   ];
   target.innerHTML = `
     <section class="daynight-preview-card">
       <div class="daynight-preview-header">
         <div>
-          <h3>${escapeHtml(preview.title || "Zeitsteuerungs-Check")}</h3>
+          <h3>${escapeHtml(portalMessage("portal.timeControlCheck", "Time-control check"))}</h3>
           <p>${escapeHtml(preview.message || "")}</p>
         </div>
-        <span class="batch-status-pill ${preview.ok ? "is-ok" : "is-warning"}">${preview.readOnly ? "Read-only" : "Plan"}</span>
+        <span class="batch-status-pill ${preview.ok ? "is-ok" : "is-warning"}">${preview.readOnly ? portalMessage("portal.readOnlyLabel", "Read only") : portalMessage("portal.readOnlyLabel", "Read only")}</span>
       </div>
       ${gatewayTargetControlMarkup()}
+      ${daynightSetupActionMarkup()}
+      <details><summary>${escapeHtml(portalMessage("portal.daynightAdvanced", "Details and maintenance"))}</summary>
       <div class="daynight-step-grid">
         <div class="daynight-step ${preview.ok ? "is-ok" : "is-current"}">
           <span>1</span>
-          <strong>Plan prüfen</strong>
-          <small>${escapeHtml(preview.ok ? "API-Daten eindeutig" : "Blocker prüfen")}</small>
+          <strong>${escapeHtml(portalMessage("portal.checkPlan", "Check plan"))}</strong>
+          <small>${escapeHtml(preview.ok ? portalMessage("portal.apiDataIsUnambiguous", "API data is unambiguous") : portalMessage("portal.checkBlockers", "Check blockers"))}</small>
         </div>
         <div class="daynight-step ${allGatewaysReady ? "is-ok" : gatewayChangeCount ? "is-current" : ""}">
           <span>2</span>
-          <strong>Zeitsteuerungen anlegen/aktualisieren</strong>
-          <small>${escapeHtml(`${summary.gatewaysReady || 0} passend, ${summary.gatewaysToCreate || 0} neu, ${summary.gatewaysToUpdate || 0} Ziel ändern`)}</small>
+          <strong>${escapeHtml(portalMessage("portal.createUpdateTimeControls", "Create/update time controls"))}</strong>
+          <small>${escapeHtml(portalMessage("portal.valueMatchingValueNewValueTargetsToUpdate", "{p0} matching, {p1} new, {p2} targets to update", { p0: summary.gatewaysReady || 0, p1: summary.gatewaysToCreate || 0, p2: summary.gatewaysToUpdate || 0 }))}</small>
         </div>
         <div class="daynight-step ${allGatewaysReady ? "is-current" : ""}">
           <span>3</span>
-          <strong>Rufnummern umhängen</strong>
-          <small>${escapeHtml(allGatewaysReady ? "separater Live-Schritt" : "erst nach Zeitsteuerungs-Anlage")}</small>
+          <strong>${escapeHtml(portalMessage("portal.reassignNumbers", "Reassign numbers"))}</strong>
+          <small>${escapeHtml(allGatewaysReady ? portalMessage("portal.separateLiveStep", "separate live step") : portalMessage("portal.afterCreatingTimeControls", "after creating time controls"))}</small>
         </div>
       </div>
       <div class="daynight-action-row">
-        <button class="secondary-button" id="preview-daynight-gateway" type="button" ${state.daynightGatewayLoading || requiresDialogCreation ? "disabled" : ""}>${state.daynightGatewayLoading ? "Prüft..." : "Plan erneut prüfen"}</button>
-        <button class="primary-button" id="apply-daynight-gateways" type="button" ${canCreateGateways ? "" : "disabled"}>${state.daynightGatewayApplyLoading ? "Zeitsteuerungen werden geschrieben..." : "Zeitsteuerungen anlegen/aktualisieren"}</button>
-        <button class="secondary-button" id="cleanup-daynight-time-controls" type="button" ${canCleanupGateways ? "" : "disabled"}>${state.daynightGatewayCleanupLoading || state.daynightGatewayResetLoading ? "Löscht..." : cleanupButtonLabel}</button>
-        <button class="secondary-button" id="reset-daynight-time-controls" type="button" ${canResetGateways ? "" : "disabled"}>${state.daynightGatewayResetLoading ? "Setzt zurück..." : "Nachtschaltung zurücksetzen"}</button>
-        <button class="danger-button" id="apply-daynight-gateway-routing" type="button" ${canRouteGateways ? "" : "disabled"}>${state.daynightGatewayRoutingLoading ? "Rufnummern werden umgehängt..." : "Rufnummern auf Zeitsteuerungen umhängen"}</button>
+        <button class="secondary-button" id="preview-daynight-gateway" type="button" ${state.daynightGatewayLoading || requiresDialogCreation ? "disabled" : ""}>${state.daynightGatewayLoading ? portalMessage("portal.checking", "Checking...") : portalMessage("portal.checkPlanAgain", "Check plan again")}</button>
+        <button class="primary-button" id="apply-daynight-gateways" type="button" ${canCreateGateways ? "" : "disabled"}>${state.daynightGatewayApplyLoading ? portalMessage("portal.writingTimeControls", "Writing time controls...") : portalMessage("portal.createUpdateTimeControls", "Create/update time controls")}</button>
+        <button class="secondary-button" id="cleanup-daynight-time-controls" type="button" ${canCleanupGateways ? "" : "disabled"}>${state.daynightGatewayCleanupLoading || state.daynightGatewayResetLoading ? portalMessage("portal.deleting_685a9", "Deleting...") : cleanupButtonLabel}</button>
+        <button class="secondary-button" id="reset-daynight-time-controls" type="button" ${canResetGateways ? "" : "disabled"}>${state.daynightGatewayResetLoading ? portalMessage("portal.resetting", "Resetting...") : portalMessage("portal.resetNightRouting", "Reset night routing")}</button>
+        <button class="danger-button" id="apply-daynight-gateway-routing" type="button" ${canRouteGateways ? "" : "disabled"}>${state.daynightGatewayRoutingLoading ? portalMessage("portal.reassigningNumbers", "Reassigning numbers...") : portalMessage("portal.reassignNumbersToTimeControls", "Reassign numbers to time controls")}</button>
       </div>
       ${operationFeedback ? `
         <div class="readiness-item ${operationFeedback.ok ? "is-ok" : "is-warning"}">
-          <strong>${escapeHtml(operationFeedback.title)}</strong>
+          <strong data-i18n-ignore>${escapeHtml(operationFeedback.title)}</strong>
           <span>${escapeHtml([
             operationFeedback.message,
             ...(operationFeedback.details || []),
-            operationFeedback.appliedAt ? `um ${formatTime(operationFeedback.appliedAt)}` : "",
+            operationFeedback.appliedAt ? portalMessage("portal.atValue", "at {p0}", { p0: formatTime(operationFeedback.appliedAt) }) : "",
           ].filter(Boolean).join(" · "))}</span>
         </div>
       ` : ""}
-      ${!writesEnabled ? `<div class="readiness-item is-warning"><strong>Live-Schreiben aus</strong><span>${escapeHtml(liveWritesDisabledText())}</span></div>` : ""}
+      ${!writesEnabled ? `<div class="readiness-item is-warning"><strong>${escapeHtml(portalMessage("portal.liveWritesOff", "Live writes off"))}</strong><span>${escapeHtml(liveWritesDisabledText())}</span></div>` : ""}
       <div class="sync-stat-grid">
-        <div><span>Rufnummern</span><strong>${escapeHtml(summary.total || 0)}</strong></div>
-        <div><span>Bereit</span><strong>${escapeHtml(summary.ready || 0)}</strong></div>
-        <div><span>Zeitsteuerungen offen</span><strong>${escapeHtml(summary.gatewaysToCreate || 0)}</strong></div>
-        <div><span>Ziel ändern</span><strong>${escapeHtml(summary.gatewaysToUpdate || 0)}</strong></div>
-        <div><span>Cleanup</span><strong>${escapeHtml(cleanupCount)}</strong></div>
+        <div><span>${escapeHtml(portalMessage("portal.numbers", "Numbers"))}</span><strong>${escapeHtml(summary.total || 0)}</strong></div>
+        <div><span>${escapeHtml(portalMessage("portal.ready", "Ready"))}</span><strong>${escapeHtml(summary.ready || 0)}</strong></div>
+        <div><span>${escapeHtml(portalMessage("portal.pendingTimeControls", "Pending time controls"))}</span><strong>${escapeHtml(summary.gatewaysToCreate || 0)}</strong></div>
+        <div><span>${escapeHtml(portalMessage("portal.targetsToUpdate", "Targets to update"))}</span><strong>${escapeHtml(summary.gatewaysToUpdate || 0)}</strong></div>
+        <div><span>${escapeHtml(portalMessage("portal.cleanupLabel", "Cleanup"))}</span><strong>${escapeHtml(cleanupCount)}</strong></div>
       </div>
       ${cleanupCount ? `
         <div class="readiness-item is-warning">
-          <strong>Namenskonvention ${escapeHtml(preview.namingConvention || "TN <Rufnummer>")}</strong>
-          <span>${escapeHtml(`${cleanupCount} nicht mehr benötigte Zeitsteuerung${cleanupCount === 1 ? "" : "en"} können gelöscht werden.`)}</span>
+          <strong>${escapeHtml(portalMessage("portal.namingConventionValue", "Naming convention {p0}", { p0: preview.namingConvention || "TN <number>" }))}</strong>
+          <span>${escapeHtml(portalMessage("portal.valueObsoleteTimeControlsCanBeDeleted", "{p0} obsolete time controls can be deleted.", { p0: cleanupCount, p1: cleanupCount === 1 ? "" : "en" }))}</span>
         </div>
       ` : ""}
       <div class="daynight-capabilities">
         ${capabilityRows.map(([label, item]) => `
           <div class="readiness-item ${item?.ok ? "is-ok" : "is-warning"}">
             <strong>${escapeHtml(label)}</strong>
-            <span>${escapeHtml(item?.ok ? `${item.count || 0} geladen` : item?.error || "nicht geladen")}</span>
+            <span>${escapeHtml(item?.ok ? portalMessage("portal.valueLoaded", "{p0} loaded", { p0: item.count || 0 }) : item?.error || portalMessage("portal.notLoaded", "not loaded"))}</span>
           </div>
         `).join("")}
       </div>
       <div class="daynight-preview-table">
         <div class="daynight-preview-table-head" role="row">
-          <span>Rufnummer</span>
-          <span>Aktuelles Tagesziel</span>
-          <span>Zeitsteuerung</span>
-          <span>Nachtziel</span>
-          <span>Bewertung</span>
+          <span>${escapeHtml(portalMessage("portal.number_b7905", "Number"))}</span>
+          <span>${escapeHtml(portalMessage("portal.currentDayTarget", "Current day target"))}</span>
+          <span>${escapeHtml(portalMessage("portal.timeControl", "Time control"))}</span>
+          <span>${escapeHtml(portalMessage("portal.nightTarget", "Night target"))}</span>
+          <span>${escapeHtml(portalMessage("portal.assessment", "Assessment"))}</span>
         </div>
         ${(preview.entries || []).map((entry) => `
           <article class="daynight-preview-row ${entry.ok ? "" : "is-warning"}" role="row">
             <div data-label="Rufnummer">
-              <strong>${escapeHtml(entry.did?.name || entry.did?.id || "-")}</strong>
+              <strong data-i18n-ignore>${escapeHtml(entry.did?.name || entry.did?.id || "-")}</strong>
               <small>${escapeHtml(entry.did?.trunkNumber || "")}</small>
             </div>
             <div data-label="Aktuelles Tagesziel">
-              <strong>${escapeHtml(entry.currentTarget?.label || "-")}</strong>
+              <strong ${entry.currentTarget?.isUnassigned ? 'data-i18n-key="portal.noTarget_1186c"' : entry.currentTarget?.label ? "data-i18n-ignore" : 'data-i18n-key="portal.noTargetDetected"'}>${escapeHtml(entry.currentTarget?.label || portalMessage("portal.noTargetDetected", "No target detected"))}</strong>
               <small>${escapeHtml(`${targetTypeLabel(entry.currentTarget?.type)} ${entry.currentTarget?.routeNumber || ""}`.trim())}</small>
             </div>
             <div data-label="Zeitsteuerung">
-              <strong>${escapeHtml(entry.gateway?.name || "-")}</strong>
-              <small>${escapeHtml(entry.gatewayExists ? `${entry.gatewayNeedsUpdate ? "Ziel aktualisieren" : "passend"} · Zeitsteuerung ${entry.gateway?.extensionNumber || ""}`.trim() : `neu · Zeitsteuerung ${entry.gateway?.extensionNumber || ""}`.trim())}</small>
+              <strong data-i18n-ignore>${escapeHtml(entry.gateway?.name || "-")}</strong>
+              <small>${daynightGatewayStatusMarkup(entry)}</small>
             </div>
             <div data-label="Nachtziel">
-              <strong>${escapeHtml(displayTargetName(preview.nightTarget?.type, preview.nightTarget?.title) || "Nachtziel")}</strong>
+              <strong ${normalizeTargetType(preview.nightTarget?.type) === "HANGUP" ? 'data-i18n-key="portal.hangUp"' : preview.nightTarget?.title ? "data-i18n-ignore" : 'data-i18n-key="portal.nightTarget"'}>${escapeHtml(displayTargetName(preview.nightTarget?.type, preview.nightTarget?.title) || portalMessage("portal.nightTarget", "Night target"))}</strong>
               <small>${escapeHtml(`${targetTypeLabel(preview.nightTarget?.type)} ${preview.nightTarget?.routeNumber || ""}`.trim())}</small>
             </div>
             <div data-label="Bewertung">
-              <strong>${escapeHtml(entry.ok ? "prüfbar" : "Blocker")}</strong>
-              <small>${escapeHtml(entry.blockers?.length ? entry.blockers.join(", ") : entry.behaviorNote || "")}</small>
+              <strong>${escapeHtml(entry.ok ? portalMessage("portal.eligible", "eligible") : "Blocker")}</strong>
+              <small>${daynightBehaviorMarkup(entry)}</small>
             </div>
           </article>
         `).join("")}
       </div>
       ${(preview.blockers || []).length ? `
         <div class="readiness-item is-warning">
-          <strong>Blocker vor Live-Migration</strong>
-          <span>${escapeHtml(preview.blockers.join(" | "))}</span>
+          <strong>${escapeHtml(portalMessage("portal.blockersBeforeLiveMigration", "Blockers before live migration"))}</strong>
+          <span>${portalMessagesMarkup(preview.blockers, " | ")}</span>
         </div>
       ` : ""}
+      </details>
     </section>
   `;
   updateDaynightHeaderButton();
@@ -5341,32 +6269,32 @@ function renderPhonebookSync() {
   const plan = state.actionPlan?.type === "phonebook-sync" ? state.actionPlan : null;
   const visiblePlan = state.phonebookManualDirty ? null : plan;
   const settings = overview?.settings || {};
-  const writesEnabled = liveWritesEnabled();
+  const writesEnabled = liveApplyPermitted();
   button.disabled = state.phonebookSyncLoading;
-  button.textContent = state.phonebookSyncLoading ? "Lädt..." : "Übernehmen";
+  button.textContent = state.phonebookSyncLoading ? portalMessage("portal.loading_7a72d", "Loading...") : portalMessage("portal.apply", "Apply");
   const summaryData = visiblePlan?.summary || {};
   const changeCount = Number(summaryData.create || 0) + Number(summaryData.update || 0);
   const hasChanges = changeCount > 0 && visiblePlan?.ok !== false && !visiblePlan?.applied;
   const isSynced = visiblePlan?.ok !== false && changeCount === 0 && visiblePlan && !visiblePlan.results?.length;
   const statusTitle = visiblePlan?.applied
-    ? "Änderungen übernommen"
+    ? portalMessage("portal.changesApplied_ca9bb", "Changes applied")
     : isSynced
-      ? "Alles synchron"
-      : visiblePlan?.title || "Bereit zum Prüfen";
+      ? portalMessage("portal.server.everythingIsInSync", "Everything is in sync")
+      : visiblePlan?.title || portalMessage("portal.readyToCheck", "Ready to check");
   const statusMessage = visiblePlan?.applied
-    ? visiblePlan.message || "Die Änderungen wurden an die Portal API gesendet."
+    ? visiblePlan.message || portalMessage("portal.theChangesWereSentToThePortalApi", "The changes were sent to the Portal API.")
     : isSynced
-      ? `${summaryData.unchanged || 0} Einträge sind bereits synchron. Es gibt nichts zu übernehmen.`
-      : visiblePlan?.message || "Kontaktquelle und NFON-Kontakte können abgeglichen werden.";
+      ? portalMessage("portal.valueEntriesAreAlreadyInSyncThereAreNo", "{p0} entries are already in sync. There are no changes to apply.", { p0: summaryData.unchanged || 0 })
+      : visiblePlan?.message || portalMessage("portal.theContactSourceCanBeComparedWithNfonContacts", "The contact source can be compared with NFON contacts.");
   const nfonRows = visiblePlan?.preview?.nfon?.length
     ? visiblePlan.preview.nfon
     : phonebookInventoryRows(overview?.inventory?.phoneBooks || []);
   const googleFile = settings.googleContactsFile || visiblePlan?.source?.file || "";
   const googleSourceLabel = googleFile
-    ? googleFile.split(/[\\/]/).filter(Boolean).pop() || "Kontaktdatei"
+    ? googleFile.split(/[\\/]/).filter(Boolean).pop() || portalMessage("portal.server.contactFile", "Contact file")
     : "";
   const sourceDisplayLabel = googleSourceLabel && googleSourceLabel.toLowerCase().includes("google")
-    ? "lokale Kontaktquelle"
+    ? portalMessage("portal.localContactSource", "Local contact source")
     : googleSourceLabel;
   const uploadFeedback = state.phonebookUploadFeedback;
   const manualPending = state.phonebookManualDirty && collectManualPhonebookRows().length > 0;
@@ -5376,16 +6304,16 @@ function renderPhonebookSync() {
       <section class="phonebook-fixed-grid">
         <form class="phonebook-card phonebook-upload-form" id="phonebook-upload-form">
           <div>
-            <span class="step-label">Quelle</span>
-            <h3>Telefonbuch Upload</h3>
+            <span class="step-label">${escapeHtml(portalMessage("portal.source", "Source"))}</span>
+            <h3>${escapeHtml(portalMessage("portal.phonebookUpload", "Phonebook upload"))}</h3>
             <p class="helper-copy">CSV / JSON</p>
           </div>
           <div class="phonebook-file-row">
             <label class="phonebook-file-picker" for="phonebook-upload-file">
-              <span>Datei auswählen</span>
+              <span>${escapeHtml(portalMessage("portal.selectFile", "Select file"))}</span>
               <strong id="phonebook-upload-file-name"></strong>
             </label>
-            <button class="phonebook-format-help-button" id="phonebook-format-help-toggle" type="button" aria-label="Format-Hilfe anzeigen" aria-expanded="${state.phonebookFormatHelpOpen ? "true" : "false"}" aria-controls="phonebook-format-help">i</button>
+            <button class="phonebook-format-help-button" id="phonebook-format-help-toggle" type="button" aria-label="${escapeHtml(portalMessage("portal.showFormatHelp", "Show format help"))}" aria-expanded="${state.phonebookFormatHelpOpen ? "true" : "false"}" aria-controls="phonebook-format-help" data-i18n-ignore>i</button>
           </div>
           <input id="phonebook-upload-file" name="phonebookFile" type="file" accept=".json,.csv,application/json,text/csv">
           ${state.phonebookFormatHelpOpen ? `
@@ -5400,7 +6328,7 @@ Clara,Wagner,+491701234569</pre>
               </div>
               <div>
                 <strong>JSON</strong>
-                <span>Array oder contacts-Liste</span>
+                <span>${escapeHtml(portalMessage("portal.arrayOrContactsList", "Array or contacts list"))}</span>
                 <pre>{
   "contacts": [
     {"firstName":"Anna","name":"Becker","phones":"+491701234567"},
@@ -5411,43 +6339,43 @@ Clara,Wagner,+491701234569</pre>
               </div>
             </div>
           ` : ""}
-          <button class="secondary-button" type="submit">Datei übernehmen</button>
+          <button class="secondary-button" type="submit">${escapeHtml(portalMessage("portal.applyFile", "Apply file"))}</button>
           <div class="phonebook-source-state">
-            <strong>Aktive Quelle</strong>
-            <span>${escapeHtml(sourceDisplayLabel || "keine lokale Quelle")}</span>
+            <strong>${escapeHtml(portalMessage("portal.activeSource", "Active source"))}</strong>
+            <span>${escapeHtml(sourceDisplayLabel || portalMessage("portal.noLocalSource", "no local source"))}</span>
           </div>
           <div class="phonebook-manual-panel">
             <div>
-              <span class="step-label">Manuell</span>
-              <h4>Kontakt hinzufügen</h4>
+              <span class="step-label">${escapeHtml(portalMessage("portal.manual", "Manual"))}</span>
+              <h4>${escapeHtml(portalMessage("portal.addContact", "Add contact"))}</h4>
             </div>
             <div class="phonebook-manual-grid">
               <label>Vorname
-                <input data-phonebook-manual-field="firstName" value="${escapeHtml(state.phonebookManualDraft.firstName)}" placeholder="optional">
+                <input data-phonebook-manual-field="firstName" value="${escapeHtml(state.phonebookManualDraft.firstName)}" ${portalPlaceholderAttributes("portal.optionalField", "Optional")}>
               </label>
               <label>Name
-                <input data-phonebook-manual-field="name" value="${escapeHtml(state.phonebookManualDraft.name)}" placeholder="Name">
+                <input data-phonebook-manual-field="name" value="${escapeHtml(state.phonebookManualDraft.name)}" ${portalPlaceholderAttributes("portal.nameField", "Name")}>
               </label>
               <label>Rufnummer
                 <input data-phonebook-manual-field="phone" value="${escapeHtml(state.phonebookManualDraft.phone)}" placeholder="+49 ...">
               </label>
             </div>
-            <button class="secondary-button" id="add-phonebook-manual-contact" type="button">Kontakt hinzufügen</button>
+            <button class="secondary-button" id="add-phonebook-manual-contact" type="button">${escapeHtml(portalMessage("portal.addContact", "Add contact"))}</button>
             <div class="phonebook-manual-list">
               ${state.phonebookManualRows.length ? state.phonebookManualRows.map((row, index) => `
                 <div class="phonebook-manual-row">
-                  <strong>${escapeHtml([row.firstName, row.name].filter(Boolean).join(" ") || "Kontakt")}</strong>
-                  <span>${escapeHtml(row.phone)}</span>
+                  <strong ${([row.firstName, row.name].filter(Boolean).join(" ")) ? 'data-i18n-ignore' : 'data-i18n-key="portal.contact"'}>${escapeHtml([row.firstName, row.name].filter(Boolean).join(" ") || portalMessage("portal.contact", "Contact"))}</strong>
+                  <span data-i18n-ignore>${escapeHtml(row.phone)}</span>
                   <button class="icon-button" data-phonebook-manual-remove="${index}" type="button" aria-label="Kontakt entfernen">×</button>
                 </div>
-              `).join("") : `<div class="empty-state is-compact">Noch keine manuellen Kontakte.</div>`}
+              `).join("") : `<div class="empty-state is-compact">${escapeHtml(portalMessage("portal.noManualContactsYet", "No manual contacts yet."))}</div>`}
             </div>
           </div>
-          ${uploadFeedback ? `<div class="sync-note ${uploadFeedback.ok ? "" : "is-warning"}"><strong>${escapeHtml(uploadFeedback.title)}</strong><span>${escapeHtml(uploadFeedback.message)}</span></div>` : ""}
+          ${uploadFeedback ? `<div class="sync-note ${uploadFeedback.ok ? "" : "is-warning"}"><strong data-i18n-ignore>${escapeHtml(uploadFeedback.title)}</strong><span>${escapeHtml(uploadFeedback.message)}</span></div>` : ""}
           ${manualPending ? `
             <div class="sync-note">
-              <strong>Manuelle Kontakte bereit</strong>
-              <span>Oben rechts mit Übernehmen als lokale Quelle setzen und mit dem NFON-Telefonbuch abgleichen.</span>
+              <strong>${escapeHtml(portalMessage("portal.manualContactsReady", "Manual contacts ready"))}</strong>
+              <span>${escapeHtml(portalMessage("portal.useApplyAtTheTopRightToSetThe", "Use Apply at the top right to set the local source and compare it with the NFON phonebook."))}</span>
             </div>
           ` : ""}
           ${visiblePlan ? `
@@ -5458,8 +6386,8 @@ Clara,Wagner,+491701234569</pre>
           ` : ""}
           ${hasChanges ? `
             <div class="sync-apply-row">
-              <button class="primary-button" id="apply-phonebook-sync-live" type="button" ${writesEnabled ? "" : "disabled"}>Änderungen übernehmen</button>
-              <span>${escapeHtml(writesEnabled ? `${changeCount} Änderung${changeCount === 1 ? "" : "en"} werden live in der Portal API gespeichert.` : "Live-Schreiben ist global in Settings deaktiviert.")}</span>
+              <button class="primary-button" id="apply-phonebook-sync-live" type="button" ${writesEnabled ? "" : "disabled"}>${escapeHtml(portalMessage("portal.applyChanges", "Apply changes"))}</button>
+              <span>${escapeHtml(writesEnabled ? portalMessage("portal.valueChangesWillBeSavedInTheLivePortal", "{p0} changes will be saved in the live Portal API.", { p0: changeCount, p1: changeCount === 1 ? "" : "en" }) : portalMessage("portal.liveWritesAreDisabledGloballyInSettings", "Live writes are disabled globally in Settings."))}</span>
             </div>
           ` : ""}
         </form>
@@ -5468,9 +6396,9 @@ Clara,Wagner,+491701234569</pre>
           <div class="phonebook-preview-header">
             <div>
               <span class="step-label">NFON</span>
-              <h3>Aktuelles Telefonbuch</h3>
+              <h3>${escapeHtml(portalMessage("portal.currentPhonebook", "Current phonebook"))}</h3>
             </div>
-            <strong>${escapeHtml(nfonRows.length || visiblePlan?.target?.portalEntries || overview?.counts?.phoneBooks || 0)} Einträge</strong>
+            <strong>${portalKeyedMessageMarkup("portal.valueEntries", "Entries: {p11}", { p11: nfonRows.length || visiblePlan?.target?.portalEntries || overview?.counts?.phoneBooks || 0 })}</strong>
           </div>
           <div class="phonebook-table">
             ${renderPhonebookPreviewRows(nfonRows, "nfon")}
@@ -5481,13 +6409,13 @@ Clara,Wagner,+491701234569</pre>
       ${(visiblePlan?.results || []).length ? `
         <section class="phonebook-card">
           <div class="phonebook-preview-header">
-            <h3>Übernahme-Protokoll</h3>
+            <h3>${escapeHtml(portalMessage("portal.applyLog", "Applied changes log"))}</h3>
           </div>
           <div class="sync-action-preview">
             ${(visiblePlan.results || []).slice(0, 8).map((result) => `
               <div class="sync-action-row ${result.ok ? "" : "is-error"}">
-                <span>${escapeHtml(result.ok ? "Gespeichert" : "Fehler")}</span>
-                <strong>${escapeHtml(result.contact || result.action || "-")}</strong>
+                <span>${escapeHtml(result.ok ? portalMessage("portal.saved", "Saved") : portalMessage("portal.error", "Error"))}</span>
+                <strong ${result.contact ? "data-i18n-ignore" : ""}>${escapeHtml(result.contact || result.action || "-")}</strong>
                 <small>${escapeHtml(result.ok ? (result.location || `HTTP ${result.status}`) : result.error || `HTTP ${result.status}`)}</small>
               </div>
             `).join("")}
@@ -5500,13 +6428,13 @@ Clara,Wagner,+491701234569</pre>
 
 function renderPhonebookPreviewRows(rows, source) {
   if (!rows?.length) {
-    return `<div class="empty-state is-compact">${source === "google" ? "Noch keine API-Kontakte geladen." : "Keine NFON-Kontakte geladen."}</div>`;
+    return `<div class="empty-state is-compact">${source === "google" ? portalMessage("portal.noApiContactsLoadedYet", "No API contacts loaded yet.") : portalMessage("portal.noNfonContactsLoaded", "No NFON contacts loaded.")}</div>`;
   }
   return rows.slice(0, 60).map((row) => `
     <div class="phonebook-row">
       <span class="phonebook-row-state is-${escapeHtml(row.status || "present")}">${escapeHtml(phonebookStatusLabel(row.status, source))}</span>
-      <strong>${escapeHtml(row.contact || "-")}</strong>
-      <span>${escapeHtml(row.phone || "-")}</span>
+      <strong data-i18n-ignore>${escapeHtml(row.contact || "-")}</strong>
+      <span data-i18n-ignore>${escapeHtml(row.phone || "-")}</span>
       ${row.reason ? `<small>${escapeHtml(row.reason)}</small>` : ""}
     </div>
   `).join("");
@@ -5518,23 +6446,23 @@ function phonebookInventoryRows(entries = []) {
     const primaryPhone = phones.find((phone) => phone?.value || phone?.normalized) || {};
     return {
       status: "present",
-      contact: entry.name || "Telefonbuch-Eintrag",
+      contact: entry.name || portalMessage("portal.phonebookEntry", "Phonebook entry"),
       phone: primaryPhone.value || primaryPhone.normalized || "-",
-      book: entry.bookName || "NFON Telefonbuch",
+      book: entry.bookName || portalMessage("portal.nfonPhonebook", "NFON phonebook"),
     };
   });
 }
 
 function phonebookStatusLabel(status, source) {
   return {
-    create: "Neu",
-    update: "Ändern",
+    create: portalMessage("portal.new", "New"),
+    update: portalMessage("portal.update", "Update"),
     unchanged: "OK",
     skipped: "Skip",
     present: "NFON",
     unmapped: "NFON",
-    "no-phone": "Ohne Nr.",
-  }[status] || (source === "google" ? "Quelle" : "NFON");
+    "no-phone": portalMessage("portal.server.noNumber", "No number"),
+  }[status] || (source === "google" ? portalMessage("portal.source", "Source") : "NFON");
 }
 
 function addManualPhonebookContact() {
@@ -5544,7 +6472,7 @@ function addManualPhonebookContact() {
     phone: String(state.phonebookManualDraft.phone || "").trim(),
   };
   if (!draft.name || !draft.phone) {
-    state.phonebookUploadFeedback = { ok: false, title: "Kontakt unvollständig", message: "Name und Rufnummer sind Pflichtfelder." };
+    state.phonebookUploadFeedback = { ok: false, title: portalMessage("portal.contactIncomplete", "Contact incomplete"), message: portalMessage("portal.nameAndPhoneNumberAreRequired", "Name and phone number are required.") };
     renderPhonebookSync();
     return;
   }
@@ -5576,27 +6504,29 @@ function collectManualPhonebookRows() {
   return rows;
 }
 
-async function persistManualPhonebookContacts() {
+async function persistManualPhonebookContacts(writeContext = state.overview?.settings?.writeContext) {
   const rows = collectManualPhonebookRows();
   if (!rows.length) return false;
   const contacts = rows.map((row, index) => ({
     id: `manual-${index + 1}`,
     firstName: row.firstName,
+    lastName: row.name,
     name: [row.firstName, row.name].filter(Boolean).join(" ") || row.name,
     phones: row.phone,
   }));
   const result = await fetchJson("/api/phonebook-sync/upload", {
-    method: "POST",
+    method: "POST", writeContext,
     body: JSON.stringify({ contacts, source: "manuelle-kontakte", syncedAt: new Date().toISOString() }),
   });
+  if (!isCurrentWriteContext(writeContext)) return false;
   if (state.overview) state.overview.settings = result.settings;
   state.phonebookManualRows = rows;
   state.phonebookManualDraft = { firstName: "", name: "", phone: "" };
   state.phonebookManualDirty = false;
   state.phonebookUploadFeedback = {
     ok: true,
-    title: "Manuelle Kontakte aktiv",
-    message: `${result.contacts} Kontakt${result.contacts === 1 ? "" : "e"} werden als lokale Quelle verwendet.`,
+    title: portalMessage("portal.manualContactsActive", "Manual contacts active"),
+    message: portalMessage("portal.valueContactsWillBeUsedAsTheLocalSource", "{p0} contacts will be used as the local source.", { p0: result.contacts, p1: result.contacts === 1 ? "" : "e" }),
   };
   return true;
 }
@@ -5607,9 +6537,9 @@ function renderLegacyPhonebookSync() {
   if (!summary || !button) return;
   const overview = getOverview();
   const plan = state.actionPlan?.type === "phonebook-sync" ? state.actionPlan : null;
-  const writesEnabled = liveWritesEnabled();
+  const writesEnabled = liveApplyPermitted();
   button.disabled = state.phonebookSyncLoading;
-  button.textContent = state.phonebookSyncLoading ? "Lädt..." : "Übernehmen";
+  button.textContent = state.phonebookSyncLoading ? portalMessage("portal.loading_7a72d", "Loading...") : portalMessage("portal.apply", "Apply");
 
   if (plan) {
     const summaryData = plan.summary || {};
@@ -5617,36 +6547,36 @@ function renderLegacyPhonebookSync() {
     const hasChanges = changeCount > 0 && plan.ok !== false && !plan.applied;
     const isSynced = plan.ok !== false && changeCount === 0 && !plan.results?.length;
     const statusTitle = plan.applied
-      ? "Änderungen übernommen"
+      ? portalMessage("portal.changesApplied_ca9bb", "Changes applied")
       : isSynced
-        ? "Alles synchron"
-        : plan.title || "Telefonbuch-Sync";
+        ? portalMessage("portal.server.everythingIsInSync", "Everything is in sync")
+        : plan.title || portalMessage("portal.phonebookSync", "Phonebook sync");
     const statusMessage = plan.applied
-      ? plan.message || "Die Änderungen wurden an die Portal API gesendet."
+      ? plan.message || portalMessage("portal.theChangesWereSentToThePortalApi", "The changes were sent to the Portal API.")
       : isSynced
-        ? `${summaryData.unchanged || 0} Einträge sind bereits synchron. Es gibt nichts zu übernehmen.`
-        : plan.message || "Differenzen wurden ermittelt.";
+        ? portalMessage("portal.valueEntriesAreAlreadyInSyncThereAreNo", "{p0} entries are already in sync. There are no changes to apply.", { p0: summaryData.unchanged || 0 })
+        : plan.message || portalMessage("portal.server.differencesIdentified", "Differences identified.");
     summary.innerHTML = `
       <div class="sync-stat-grid">
         <div class="sync-stat">
-          <span>Quelle</span>
+          <span>${escapeHtml(portalMessage("portal.source", "Source"))}</span>
           <strong>${escapeHtml(plan.source?.googleContacts ?? "-")}</strong>
-          <small>${escapeHtml(plan.source?.googleSyncedAt ? `Cache ${formatTime(plan.source.googleSyncedAt)}` : "Kontaktquelle")}</small>
+          <small>${escapeHtml(plan.source?.googleSyncedAt ? `Cache ${formatTime(plan.source.googleSyncedAt)}` : portalMessage("portal.contactSource", "Contact source"))}</small>
         </div>
         <div class="sync-stat">
-          <span>Ziel</span>
+          <span>${escapeHtml(portalMessage("portal.destination", "Destination"))}</span>
           <strong>${escapeHtml(plan.target?.portalEntries ?? "-")}</strong>
-          <small>NFON Telefonbuch</small>
+          <small>${escapeHtml(portalMessage("portal.nfonPhonebook", "NFON phonebook"))}</small>
         </div>
         <div class="sync-stat">
-          <span>Neu</span>
+          <span>${escapeHtml(portalMessage("portal.new", "New"))}</span>
           <strong>${escapeHtml(summaryData.create ?? 0)}</strong>
-          <small>anzulegen</small>
+          <small>${escapeHtml(portalMessage("portal.toCreate", "To create"))}</small>
         </div>
         <div class="sync-stat">
-          <span>Ändern</span>
+          <span>${escapeHtml(portalMessage("portal.update", "Update"))}</span>
           <strong>${escapeHtml(summaryData.update ?? 0)}</strong>
-          <small>zu aktualisieren</small>
+          <small>${escapeHtml(portalMessage("portal.toUpdate", "To update"))}</small>
         </div>
       </div>
       <div class="sync-note ${plan.ok === false ? "is-warning" : ""}">
@@ -5655,17 +6585,17 @@ function renderLegacyPhonebookSync() {
       </div>
       ${hasChanges ? `
         <div class="sync-apply-row">
-          <button class="primary-button" id="apply-phonebook-sync-live" type="button" ${writesEnabled ? "" : "disabled"}>Änderungen übernehmen</button>
-          <span>${escapeHtml(writesEnabled ? `${changeCount} Änderung${changeCount === 1 ? "" : "en"} werden live in der Portal API gespeichert.` : "Live-Schreiben ist global in Settings deaktiviert.")}</span>
+          <button class="primary-button" id="apply-phonebook-sync-live" type="button" ${writesEnabled ? "" : "disabled"}>${escapeHtml(portalMessage("portal.applyChanges", "Apply changes"))}</button>
+          <span>${escapeHtml(writesEnabled ? portalMessage("portal.valueChangesWillBeSavedInTheLivePortal", "{p0} changes will be saved in the live Portal API.", { p0: changeCount, p1: changeCount === 1 ? "" : "en" }) : portalMessage("portal.liveWritesAreDisabledGloballyInSettings", "Live writes are disabled globally in Settings."))}</span>
         </div>
       ` : ""}
       ${(plan.actions || []).length ? `
         <div class="sync-action-preview">
           ${(plan.actions || []).slice(0, 8).map((action) => `
             <div class="sync-action-row">
-              <span>${escapeHtml(action.action === "create" ? "Neu" : "Ändern")}</span>
-              <strong>${escapeHtml(action.contact || "-")}</strong>
-              <small>${escapeHtml(action.phone || "")}</small>
+              <span>${escapeHtml(action.action === "create" ? portalMessage("portal.new", "New") : portalMessage("portal.update", "Update"))}</span>
+              <strong data-i18n-ignore>${escapeHtml(action.contact || "-")}</strong>
+              <small data-i18n-ignore>${escapeHtml(action.phone || "")}</small>
             </div>
           `).join("")}
         </div>
@@ -5674,8 +6604,8 @@ function renderLegacyPhonebookSync() {
         <div class="sync-action-preview">
           ${(plan.results || []).slice(0, 8).map((result) => `
             <div class="sync-action-row ${result.ok ? "" : "is-error"}">
-              <span>${escapeHtml(result.ok ? "Gespeichert" : "Fehler")}</span>
-              <strong>${escapeHtml(result.contact || result.action || "-")}</strong>
+              <span>${escapeHtml(result.ok ? portalMessage("portal.saved", "Saved") : portalMessage("portal.error", "Error"))}</span>
+              <strong ${result.contact ? "data-i18n-ignore" : ""}>${escapeHtml(result.contact || result.action || "-")}</strong>
               <small>${escapeHtml(result.ok ? (result.location || `HTTP ${result.status}`) : result.error || `HTTP ${result.status}`)}</small>
             </div>
           `).join("")}
@@ -5688,8 +6618,8 @@ function renderLegacyPhonebookSync() {
   const phoneBooks = overview?.counts?.phoneBooks ?? 0;
   summary.innerHTML = `
     <div class="sync-note">
-      <strong>${escapeHtml(phoneBooks)} Telefonbuch${phoneBooks === 1 ? "" : "er"} in der Portal API</strong>
-      <span>Die Vorschau liest die lokale Kontaktquelle und vergleicht Telefonnummern gegen das NFON-Telefonbuch. Es wird nichts live geschrieben.</span>
+      <strong>${escapeHtml(portalMessage("portal.phonebooksCount", "Phonebooks in the Portal API: {count}", { count: phoneBooks }))}</strong>
+      <span>${escapeHtml(portalMessage("portal.thePreviewReadsTheLocalContactSourceAndCompares", "The preview reads the local contact source and compares phone numbers with the NFON phonebook. No live changes are written."))}</span>
     </div>
   `;
 }
@@ -5700,30 +6630,35 @@ function renderSettingsSummary() {
   const overview = getOverview();
   const settings = overview?.settings || {};
   const account = visibleAccount(overview);
+  const connection = portalConnectionStatus(overview);
+  const writesEnabled = portalLiveWritesEnabled();
+  const lockMessage = portalMessage("portal.liveWritesLockedByServer", "Read-only mode is enforced by the server.");
   target.innerHTML = `
     <div class="settings-grid">
-      <div class="settings-card settings-status-card ${settings.configured ? "is-ok" : "is-warning"}">
+      <div class="settings-card settings-status-card ${connection.tone === "online" ? "is-ok" : "is-warning"}">
         <div class="settings-card-header">
           <span>Status</span>
-          <strong>${settings.configured ? "Bereit" : "Prüfen"}</strong>
+          <strong>${escapeHtml(connection.label)}</strong>
         </div>
         <div class="settings-card-body">
           <div class="settings-meta-row settings-account-row">
-            <strong>${escapeHtml(account || "Anmeldung erforderlich")}</strong>
+            <strong ${account ? "data-i18n-ignore" : 'data-i18n-key="portal.server.loginRequired"'}>${escapeHtml(account || portalMessage("portal.server.loginRequired", "Login required"))}</strong>
           </div>
+          ${connection.detail ? `<small>${escapeHtml(connection.detail)}</small>` : ""}
         </div>
       </div>
-      <div class="settings-card settings-live-card ${settings.liveWritesEnabled ? "is-warning" : "is-ok"}">
+      <div class="settings-card settings-live-card ${writesEnabled ? "is-warning" : "is-ok"}">
         <div class="settings-card-header">
-          <span>Sicherheit</span>
-          <strong>${settings.liveWritesEnabled ? "Schreibschutz (AUS)" : "Schreibschutz (AN)"}</strong>
+          <span>${portalMessage("portal.security", "Security")}</span>
+          <strong>${writesEnabled ? portalMessage("portal.liveWritesOn", "Live writes on") : portalMessage("portal.liveWritesOff", "Live writes off")}</strong>
         </div>
         <div class="settings-card-body">
           <div class="settings-control-row settings-control-row-toggle-only">
-            <button class="settings-live-switch ${settings.liveWritesEnabled ? "is-on" : ""}" data-live-writes="${settings.liveWritesEnabled ? "off" : "on"}" type="button" ${state.liveWritesSaving || !settings.configured ? "disabled" : ""} aria-pressed="${settings.liveWritesEnabled ? "true" : "false"}" aria-label="${settings.liveWritesEnabled ? "Live-Schreiben deaktivieren" : "Live-Schreiben aktivieren"}">
+            <button class="settings-live-switch ${writesEnabled ? "is-on" : ""}" data-live-writes="${writesEnabled ? "off" : "on"}" type="button" ${state.liveWritesSaving || !settings.configured || settings.liveWritesLocked || settings.liveWritesPermitted === false ? "disabled" : ""} aria-pressed="${writesEnabled ? "true" : "false"}" aria-label="${settings.liveWritesLocked ? escapeHtml(lockMessage) : writesEnabled ? portalMessage("portal.server.disableLiveWrites", "Disable live writes") : portalMessage("portal.enableLiveWrites", "Enable live writes")}" ${settings.liveWritesLocked ? 'aria-describedby="live-writes-lock-reason"' : ""}>
               <span class="settings-live-switch-track" aria-hidden="true"><span></span></span>
             </button>
           </div>
+          ${settings.liveWritesLocked || settings.liveWritesPermitted === false ? `<small id="live-writes-lock-reason">${escapeHtml(lockMessage)}</small>` : ""}
         </div>
       </div>
     </div>
@@ -5738,48 +6673,49 @@ function renderAuthLoginPanel() {
   const mode = state.authLoginMode || settings.authMode || "env";
   const draft = state.browserLoginDraft;
   const account = visibleAccount(overview);
-  const activeSource = settings.browserCredentialsActive ? "Browser-Login aktiv" : settings.sources?.environment ? ".env aktiv" : "Lokale Secret-Datei aktiv";
+  const activeSourceKey = settings.browserCredentialsActive ? "portal.server.browserLoginActive" : settings.sources?.environment ? "portal.envActive" : "portal.localSecretFileActive";
+  const activeSource = portalMessage(activeSourceKey, settings.browserCredentialsActive ? "Browser login active" : settings.sources?.environment ? ".env active" : "Local secret file active");
   const envActive = mode !== "browser";
   const configured = Boolean(settings.configured);
   const envExample = [
     "PORTAL_BASE_URL=https://portal-api.nfon.net:8090",
     "PORTAL_API_KEY_ID=...",
     "PORTAL_API_KEY_SECRET=...",
-    "PORTAL_CUSTOMER_ACCOUNT=<ANLAGENNUMMER>",
+    "PORTAL_CUSTOMER_ACCOUNT=<CUSTOMER_ACCOUNT>",
   ].join("\n");
   target.innerHTML = `
     <div class="panel-header auth-login-head">
       <div>
-        <h2>Anmeldung</h2>
-        <p>Portal-API-Zugang per lokaler Datei oder Browser-Formular setzen.</p>
+        <h2>${escapeHtml(portalMessage("portal.login", "Login"))}</h2>
+        <p>${escapeHtml(portalMessage("portal.setPortalApiAccessViaLocalFileOrBrowser", "Set Portal API access via local file or browser form."))}</p>
       </div>
-      <span class="auth-login-state ${configured ? "is-configured" : "is-required"}">${configured ? "Zugang konfiguriert" : "Login erforderlich"}</span>
+      <span class="auth-login-state ${configured ? "is-configured" : "is-required"}">${configured ? portalMessage("portal.accessConfigured", "Access configured") : portalMessage("portal.loginRequired", "Login required")}</span>
     </div>
     <div class="auth-login-body">
       <div class="auth-mode-switch" role="tablist" aria-label="Anmeldemethode">
-        <button class="${envActive ? "is-active" : ""}" type="button" data-auth-login-mode="env">Login via .env</button>
-        <button class="${!envActive ? "is-active" : ""}" type="button" data-auth-login-mode="browser">Login via Browser</button>
+        <button class="${envActive ? "is-active" : ""}" type="button" data-auth-login-mode="env" data-i18n-key="portal.signInViaEnv">${escapeHtml(portalMessage("portal.signInViaEnv", "Sign in via .env"))}</button>
+        <button class="${!envActive ? "is-active" : ""}" type="button" data-auth-login-mode="browser" data-i18n-key="portal.signInViaBrowser">${escapeHtml(portalMessage("portal.signInViaBrowser", "Sign in via browser"))}</button>
       </div>
       ${envActive ? `
         <section class="auth-login-card is-active">
-          <span>Lokale Konfiguration</span>
-          <h3>${escapeHtml(activeSource)}</h3>
+          <span>${escapeHtml(portalMessage("portal.localConfiguration", "Local configuration"))}</span>
+          <h3 data-i18n-key="${activeSourceKey}">${escapeHtml(activeSource)}</h3>
           <p>Im Ordner <strong>Portal_API</strong> eine Datei <strong>.env</strong> anlegen. Der Server liest sie beim Start automatisch.</p>
           <pre>${escapeHtml(envExample)}</pre>
-          <p>Danach den Portal-Server neu starten. Secrets bleiben lokal und werden nicht an das Frontend zurückgegeben.</p>
+          <p>${escapeHtml(portalMessage("portal.restartThePortalServerAfterwardsSecretsStayLocalAnd", "Restart the Portal server afterwards. Secrets stay local and are not returned to the frontend."))}</p>
         </section>
       ` : `
         <form class="auth-login-card browser-login-form" id="browser-login-form">
-          <span>Browser-Konfiguration</span>
-          <h3>${settings.browserCredentialsActive ? "Zugang für diese Sitzung aktiv" : "Zugangsdaten für diese Sitzung setzen"}</h3>
+          <span>${escapeHtml(portalMessage("portal.browserConfiguration", "Browser configuration"))}</span>
+          <h3>${settings.browserCredentialsActive ? portalMessage("portal.accessEnabledForThisSession", "Access enabled for this session") : portalMessage("portal.setCredentialsForThisSession", "Set credentials for this session")}</h3>
           <div class="auth-form-grid">
             <label>Portal URL<input name="baseUrl" type="url" value="${escapeHtml(draft.baseUrl || settings.baseUrl || "https://portal-api.nfon.net:8090")}" placeholder="https://portal-api.nfon.net:8090" autocomplete="off"></label>
-            <label>API Key ID<input name="apiKeyId" type="text" value="${escapeHtml(draft.apiKeyId)}" placeholder="Key ID" autocomplete="off"></label>
-            <label>API Key Secret<input name="apiKeySecret" type="password" value="${escapeHtml(draft.apiKeySecret)}" placeholder="Secret" autocomplete="off"></label>
-            <label>Anlage<input name="customerAccount" type="text" value="${escapeHtml(draft.customerAccount || account)}" placeholder="Anlagennummer" autocomplete="off"></label>
+            <label>API Key ID<input name="apiKeyId" type="text" value="${escapeHtml(draft.apiKeyId)}" ${portalPlaceholderAttributes("portal.apiKeyIdField", "Key ID")} autocomplete="off"></label>
+            <label>API Key Secret<input name="apiKeySecret" type="password" value="${escapeHtml(draft.apiKeySecret)}" ${portalPlaceholderAttributes("portal.apiKeySecretField", "Secret")} autocomplete="off"></label>
+            <label>${escapeHtml(portalMessage("portal.pbx", "PBX"))}<input name="customerAccount" type="text" value="${escapeHtml(draft.customerAccount || account)}" ${portalPlaceholderAttributes("portal.pbxAccount", "PBX account")} autocomplete="off"></label>
           </div>
           <div class="auth-form-actions">
-            <button class="primary-button" type="submit" ${state.browserLoginSaving ? "disabled" : ""}>${state.browserLoginSaving ? "Prüft..." : "Browser-Login aktivieren"}</button>
+            <button class="primary-button" type="submit" ${state.browserLoginSaving ? "disabled" : ""}>${state.browserLoginSaving ? portalMessage("portal.checking", "Checking...") : portalMessage("portal.server.activateBrowserLogin", "Activate browser login")}</button>
             <span>Wird nur im laufenden Node-Server gespeichert. Bei Neustart gilt wieder <strong>.env</strong> oder die lokale Secret-Datei.</span>
           </div>
         </form>
@@ -5799,7 +6735,7 @@ async function applyBrowserLogin(form) {
     customerAccount: String(data.customerAccount || "").trim(),
   };
   state.browserLoginSaving = true;
-  state.browserLoginFeedback = { ok: true, title: "Browser-Login wird geprüft", message: "Die Anlage wird mit den eingegebenen Zugangsdaten gelesen." };
+  state.browserLoginFeedback = { ok: true, title: portalMessage("portal.checkingBrowserLogin", "Checking browser login"), message: portalMessage("portal.readingThePbxUsingTheSuppliedCredentials", "Reading the PBX using the supplied credentials.") };
   renderAuthLoginPanel();
   try {
     const result = await fetchJson("/api/settings/browser-login", {
@@ -5807,12 +6743,12 @@ async function applyBrowserLogin(form) {
       body: JSON.stringify(state.browserLoginDraft),
     });
     state.browserLoginDraft.apiKeySecret = "";
-    state.browserLoginFeedback = { ok: true, title: "Browser-Login aktiv", message: result.message || "Zugangsdaten sind für diese Sitzung aktiv." };
+    state.browserLoginFeedback = { ok: true, title: portalMessage("portal.server.browserLoginActive", "Browser login active"), message: result.message || portalMessage("portal.credentialsAreActiveForThisSession", "Credentials are active for this session.") };
     state.authLoginMode = "browser";
     resetAccountScopedState();
     await loadOverview();
   } catch (error) {
-    state.browserLoginFeedback = { ok: false, title: "Browser-Login fehlgeschlagen", message: error.message };
+    state.browserLoginFeedback = { ok: false, title: portalMessage("portal.server.browserLoginFailed", "Browser login failed"), message: error.message };
   } finally {
     state.browserLoginSaving = false;
     render();
@@ -5834,7 +6770,7 @@ function renderFlowPlan() {
     <div class="plan-summary">
       <button class="plan-close" id="close-flow-plan" type="button" aria-label="Technische Details schließen">×</button>
       <details>
-        <summary>Technische Details</summary>
+        <summary>${escapeHtml(portalMessage("portal.technicalDetails", "Technical details"))}</summary>
         <pre>${escapeHtml(JSON.stringify(plan, null, 2))}</pre>
       </details>
     </div>
@@ -5847,8 +6783,9 @@ function serviceFeedbackMarkup() {
   const tone = feedback.type === "error" ? "is-error" : feedback.type === "success" ? "is-success" : "";
   return `
     <div class="service-feedback ${tone}">
-      <strong>${escapeHtml(feedback.title || "")}</strong>
-      <span>${escapeHtml(feedback.message || "")}</span>
+      <strong data-i18n-ignore>${escapeHtml(feedback.title || "")}</strong>
+      <span data-i18n-ignore>${escapeHtml(feedback.message || "")}</span>
+      ${feedback.operations ? `<p>${escapeHtml(portalMessage("portal.partialMembership", "Completed: {done}. Failed: {failed}. Not attempted: {pending}.", {done:feedback.operations.completed.length,failed:1,pending:feedback.operations.notAttempted.length}))}</p>` : ""}
     </div>
   `;
 }
@@ -5868,21 +6805,21 @@ function renderServices() {
   });
   const serviceApplyButton = $("#apply-service-draft");
   if (serviceApplyButton) {
-    serviceApplyButton.disabled = !liveWritesEnabled();
-    serviceApplyButton.title = liveWritesEnabled() ? "" : liveWritesDisabledText();
+    serviceApplyButton.disabled = state.serviceApplying || !localApplyPermitted();
+    serviceApplyButton.title = localApplyPermitted() ? "" : liveWritesDisabledText();
   }
   const serviceUndoButton = $("#undo-service-draft");
   if (serviceUndoButton) {
     serviceUndoButton.disabled = !(state.serviceDraftHistory || []).length;
-    serviceUndoButton.title = serviceUndoButton.disabled ? "Keine lokale Änderung zum Zurücknehmen." : "Letzte lokale Änderung zurücknehmen.";
+    serviceUndoButton.title = serviceUndoButton.disabled ? portalMessage("portal.noLocalChangeToUndo", "No local change to undo.") : portalMessage("portal.undoTheLastLocalChange", "Undo the last local change.");
   }
-  feedback.hidden = !state.serviceFeedback;
-  feedback.innerHTML = serviceFeedbackMarkup();
+  feedback.hidden = !state.serviceFeedback && !state.serviceDraftConflicts?.length;
+  feedback.innerHTML = serviceFeedbackMarkup() + (state.serviceDraftConflicts?.length ? `<div class="service-feedback"><span>${escapeHtml(portalMessage("portal.staleDraft", "Memberships changed. Saved changes need review."))}</span><button type="button" class="secondary-button" id="review-service-conflicts">${escapeHtml(portalMessage("portal.reviewChanges", "Review saved changes"))}</button></div>` : "");
   if (filter && filter.value !== state.serviceFilter) filter.value = state.serviceFilter;
 
   if (!state.serviceGroups) {
-    extensionList.innerHTML = `<div class="empty-state">${state.serviceLoading ? "Nebenstellen werden geladen." : "Mitgliedschaften werden automatisch geladen."}</div>`;
-    board.innerHTML = `<div class="service-empty-board"><strong>${state.serviceLoading ? "Lädt" : "Bereit zum Laden"}</strong><span>Warteschlangen und Skillgruppen werden direkt aus der Portal API gelesen.</span></div>`;
+    extensionList.innerHTML = `<div class="empty-state">${state.serviceLoading ? portalMessage("portal.loadingExtensions", "Loading extensions.") : portalMessage("portal.membershipsLoadAutomatically", "Memberships load automatically.")}</div>`;
+    board.innerHTML = `<div class="service-empty-board"><strong>${state.serviceLoading ? portalMessage("portal.loading", "Loading") : portalMessage("portal.readyToLoad", "Ready to load")}</strong><span>${escapeHtml(portalMessage("portal.queuesAndSkillGroupsAreReadDirectlyFromThe", "Queues and skill groups are read directly from the Portal API."))}</span></div>`;
     workspace?.classList.add("is-inspector-hidden");
     inspector.classList.add("is-hidden");
     inspector.innerHTML = "";
@@ -5899,15 +6836,15 @@ function renderServices() {
     ? `<div class="service-selection-box" style="left:${Math.min(selection.startX, selection.currentX)}px;top:${Math.min(selection.startY, selection.currentY)}px;width:${Math.abs(selection.currentX - selection.startX)}px;height:${Math.abs(selection.currentY - selection.startY)}px"></div>`
     : "";
   extensionList.innerHTML = `${selectionBox}${extensions.map((extension) => `
-    <div class="service-extension-card extension-row ${selectedExtensionIds.has(String(extension.id)) || selectedExtensionIds.has(String(extension.number)) ? "is-selected" : ""}" draggable="true" data-service-extension-id="${escapeHtml(extension.id)}">
-      <span class="extension-number">${escapeHtml(extension.number || extension.id)}</span>
+    <div class="service-extension-card extension-row ${selectedExtensionIds.has(String(extension.id)) || selectedExtensionIds.has(String(extension.number)) ? "is-selected" : ""}" draggable="true" tabindex="0" role="button" data-service-extension-id="${escapeHtml(extension.id)}">
+      <span class="extension-number" data-i18n-ignore>${escapeHtml(extension.number || extension.id)}</span>
       <span class="extension-copy">
-        <span class="extension-name">${escapeHtml(extension.name || "Nebenstelle")}</span>
+        <span class="extension-name" ${(extension.name) ? 'data-i18n-ignore' : 'data-i18n-key="portal.extension"'}>${escapeHtml(extension.name || portalMessage("portal.extension", "Extension"))}</span>
         <span class="extension-meta">${escapeHtml(extension.type || "PHONE")}</span>
       </span>
-      <span class="extension-action">Ziehen</span>
+      <span class="extension-action">${escapeHtml(portalMessage("portal.drag", "Drag"))}</span>
     </div>
-  `).join("") || `<div class="empty-state">Keine Nebenstelle gefunden.</div>`}`;
+  `).join("") || `<div class="empty-state">${escapeHtml(portalMessage("portal.noExtensionFound_8e49e", "No extension found."))}</div>`}`;
 
   const kind = serviceTypeFromMode();
   createSlot.innerHTML = serviceCreateCardMarkup(kind);
@@ -5922,28 +6859,28 @@ function renderServices() {
     const changed = serviceHasChanges(kind, service);
     const selected = serviceKey(kind, service) === state.selectedServiceKey;
     const meta = serviceMetaFor(kind, service);
-    const memberCount = meta.memberCount || 0;
+    const memberCount = service.memberError ? "—" : (meta.memberCount || 0);
     const memberPreview = (entry.members || []).slice(0, 6);
     return `
       <article class="service-card ${selected ? "is-selected" : ""} ${changed ? "has-changes" : ""}" style="${serviceColorStyle(entry.color)}" data-service-card data-service-kind="${escapeHtml(kind)}" data-service-id="${escapeHtml(id)}">
         <button class="service-card-hit" type="button" data-select-service="${escapeHtml(serviceKey(kind, service))}">
           <span class="service-card-top">
-            <span class="service-kind">${kind === "skill" ? "Skillgruppe" : "Warteschlange"}</span>
-            <span class="service-member-count">${memberCount} Mitglied${memberCount === 1 ? "" : "er"}</span>
+            <span class="service-kind">${kind === "skill" ? portalMessage("portal.skillGroup", "Skill group") : portalMessage("portal.queue", "Queue")}</span>
+            <span class="service-member-count">${escapeHtml(portalMessage("portal.membersCount", "Members: {count}", { count: memberCount }))}</span>
           </span>
-          <strong>${escapeHtml(service.name || `${kind} ${id}`)}</strong>
-          <small>${escapeHtml(id || "ohne Nummer")}${service.memberError ? ` · ${service.memberError}` : ""}</small>
+          <strong data-i18n-ignore>${escapeHtml(service.name || `${kind} ${id}`)}</strong>
+          <small>${escapeHtml(id || portalMessage("portal.noNumber", "No number"))}${service.memberError ? ` · ${escapeHtml(service.memberError)}` : ""}</small>
         </button>
-        <button class="node-edit-button service-edit-button" type="button" data-edit-service="${escapeHtml(serviceKey(kind, service))}" aria-label="${escapeHtml(service.name || `${kind} ${id}`)} bearbeiten">Edit</button>
+        <button class="node-edit-button service-edit-button" type="button" data-edit-service="${escapeHtml(serviceKey(kind, service))}" aria-label="${escapeHtml(service.name || `${kind} ${id}`)}" data-i18n-ignore aria-description="${escapeHtml(portalMessage("portal.edit", "Edit"))}">${escapeHtml(portalMessage("portal.edit", "Edit"))}</button>
         <div class="service-members">
           ${memberPreview.map((member) => `
             <div class="service-member-chip">
-              <span>${escapeHtml(member.name || "Nebenstelle")} (${escapeHtml(member.extensionNumber)})</span>
-              <button class="text-button" data-remove-service-member data-service-kind="${escapeHtml(kind)}" data-service-id="${escapeHtml(id)}" data-extension-number="${escapeHtml(member.extensionNumber)}" type="button">Entfernen</button>
+              <span data-i18n-ignore>${escapeHtml(member.name || portalMessage("portal.extension", "Extension"))} (${escapeHtml(member.extensionNumber)})</span>
+              <button class="text-button" data-remove-service-member data-service-kind="${escapeHtml(kind)}" data-service-id="${escapeHtml(id)}" data-extension-number="${escapeHtml(member.extensionNumber)}" type="button">${escapeHtml(portalMessage("portal.remove", "Remove"))}</button>
             </div>
           `).join("")}
-          ${(entry.members || []).length > memberPreview.length ? `<div class="service-member-more">+${(entry.members || []).length - memberPreview.length} weitere</div>` : ""}
-          ${(entry.members || []).length ? "" : `<div class="service-drop-hint">Nebenstelle hier ablegen</div>`}
+          ${(entry.members || []).length > memberPreview.length ? `<div class="service-member-more">${escapeHtml(portalMessage("portal.moreCount", "+{count} more", { count: (entry.members || []).length - memberPreview.length }))}</div>` : ""}
+          ${service.memberError ? `<div class="service-drop-hint">${escapeHtml(portalMessage("portal.inventoryUnavailable", "Data could not be loaded."))}</div>` : (entry.members || []).length ? "" : `<div class="service-drop-hint">${escapeHtml(portalMessage("portal.dropExtensionHere", "Drop extension here"))}</div>`}
         </div>
       </article>
     `;
@@ -5951,8 +6888,8 @@ function renderServices() {
   board.innerHTML = `
     ${serviceCards || `
       <div class="service-empty-board">
-        <strong>Keine ${kind === "skill" ? "Skillgruppen" : "Warteschlangen"} gefunden.</strong>
-        <span>${kind === "skill" ? "Lege oben eine Skillgruppe an." : "Lege oben eine Warteschlange an."}</span>
+        <strong>${escapeHtml(portalMessage("portal.noValueFound", "No {p0} found.", { p0: kind === "skill" ? portalMessage("portal.skillGroups", "Skill groups") : portalMessage("portal.queues", "Queues") }))}</strong>
+        <span>${kind === "skill" ? portalMessage("portal.createASkillGroupAbove", "Create a skill group above.") : portalMessage("portal.createAQueueAbove", "Create a queue above.")}</span>
       </div>
     `}
   `;
@@ -5971,10 +6908,10 @@ function renderServices() {
   const serviceNumbers = serviceNumberMeta(entry);
   inspector.innerHTML = `
     <div class="service-inspector-head" style="${serviceColorStyle(entry.color)}">
-      <span class="service-kind">${selectedKind === "skill" ? "Skillgruppe" : "Warteschlange"}</span>
-      <h3>${escapeHtml(selected.name || entry.serviceNumber)}</h3>
+      <span class="service-kind">${selectedKind === "skill" ? portalMessage("portal.skillGroup", "Skill group") : portalMessage("portal.queue", "Queue")}</span>
+      <h3 data-i18n-ignore>${escapeHtml(selected.name || entry.serviceNumber)}</h3>
       ${serviceNumbers ? `<span class="service-number-meta">${escapeHtml(serviceNumbers)}</span>` : ""}
-      <p>${(entry.members || []).length} Mitglied${(entry.members || []).length === 1 ? "" : "er"}</p>
+      <p>${escapeHtml(portalMessage("portal.membersCount", "Members: {count}", { count: (entry.members || []).length }))}</p>
     </div>
     <div class="service-color-section">
       <label class="service-color-select">Farbe im Callflow
@@ -5988,20 +6925,20 @@ function renderServices() {
     <div class="service-member-settings">
       ${(entry.members || []).length ? `
         <div class="service-member-settings-header">
-          <strong>${selectedKind === "skill" ? "Skill-Stufen" : "Prioritäten"}</strong>
-          <span class="service-priority-help">${selectedKind === "skill" ? "Höhere Zahl = stärkerer Skill-Fokus." : "0 wird zuerst gerufen. Höhere Zahlen werden nachrangiger genutzt."}</span>
+          <strong>${selectedKind === "skill" ? portalMessage("portal.skillLevels", "Skill levels") : portalMessage("portal.priorities", "Priorities")}</strong>
+          <span class="service-priority-help">${selectedKind === "skill" ? portalMessage("portal.higherNumbersGiveAStrongerSkillPreference", "Higher numbers give a stronger skill preference.") : portalMessage("portal.priority0IsCalledFirstHigherNumbersHaveLower", "Priority 0 is called first. Higher numbers have lower priority.")}</span>
         </div>
       ` : ""}
       ${(entry.members || []).map((member) => `
         <label class="service-member-setting">
-          <span>${escapeHtml(member.name || "Nebenstelle")} (${escapeHtml(member.extensionNumber)})</span>
+          <span data-i18n-ignore>${escapeHtml(member.name || portalMessage("portal.extension", "Extension"))} (${escapeHtml(member.extensionNumber)})</span>
           ${selectedKind === "skill" ? `
             <input type="number" min="1" max="9" value="${escapeHtml(member.skillLevel || 1)}" data-update-service-member data-field="skillLevel" data-service-kind="${escapeHtml(selectedKind)}" data-service-id="${escapeHtml(entry.serviceNumber)}" data-extension-number="${escapeHtml(member.extensionNumber)}">
           ` : `
             <input type="number" min="0" max="99" value="${escapeHtml(member.penalty || 0)}" data-update-service-member data-field="penalty" data-service-kind="${escapeHtml(selectedKind)}" data-service-id="${escapeHtml(entry.serviceNumber)}" data-extension-number="${escapeHtml(member.extensionNumber)}">
           `}
         </label>
-      `).join("") || `<div class="empty-state">Noch keine Mitglieder im Entwurf.</div>`}
+      `).join("") || `<div class="empty-state">${escapeHtml(portalMessage("portal.noMembersInTheDraftYet", "No members in the draft yet."))}</div>`}
     </div>
   `;
 }
@@ -6010,44 +6947,47 @@ function renderEndpoints() {
   const endpoints = getOverview()?.endpoints || {};
   const overview = getOverview() || {};
   const endpointDetails = {
-    version: { label: "API-Version", purpose: "Basischeck: Portal API erreichbar.", required: false },
-    basicData: { label: "Kundendaten", purpose: "Account- und Mandanteninfo für Status und Diagnose.", required: false },
-    contract: { label: "Vertrag", purpose: "Zusatzinfo zum Kundenvertrag, nicht workflowkritisch.", required: false },
-    featureStatus: { label: "Features", purpose: "Optionale Lizenz-/Feature-Info. Ein 403 blockiert die Workflows nicht.", required: false },
-    extensions: { label: "Nebenstellen", purpose: "Bestand für Nebenstellenliste, Batch Import und Zielauswahl.", required: true },
-    devices: { label: "Geräte", purpose: "Gerätebezug zu Nebenstellen und Inventar.", required: true },
-    trunks: { label: "Leitungen", purpose: "SIP-Trunk-Bestand für eingehende Rufnummern.", required: true },
-    dids: { label: "Rufnummern", purpose: "DID-Routing für Callflow und Tag/Nacht-Zeitsteuerungen.", required: true },
-    phoneBooks: { label: "Telefonbücher", purpose: "Bestand und Schreibziel für Telefonbuch-Sync.", required: true },
-    groups: { label: "Teams", purpose: "Gruppen-Ziele für Routing und Callflow.", required: true },
-    queues: { label: "Warteschlangen", purpose: "Warteschlangen-Ziele und Mitgliederverwaltung.", required: true },
-    skills: { label: "Skillgruppen", purpose: "Skill-Ziele und Skill-Level-Verwaltung.", required: true },
-    ivrs: { label: "Sprachdialoge", purpose: "Sprachdialog-Ziele, auch für Ansage-Ziel mit Folgeaktion.", required: true },
-    timeControls: { label: "Zeitsteuerungen", purpose: "Tag/Nacht-Zeitsteuerungen und Öffnungszeit-Routing.", required: true },
-    announcements: { label: "Ansagen", purpose: "Vorhandene Audioansagen für Ansage-Ziele.", required: true },
+    version: { label: "API-Version", purpose: portalMessage("portal.server.basicCheckPortalApiReachable", "Basic check: Portal API reachable."), required: false },
+    basicData: { label: portalMessage("portal.server.customerData", "Customer data"), purpose: portalMessage("portal.accountAndTenantInformationForStatusAndDiagnostics", "Account and tenant information for status and diagnostics."), required: false },
+    contract: { label: portalMessage("portal.server.contract", "Contract"), purpose: portalMessage("portal.additionalContractInformationOptionalForWorkflows", "Additional contract information; optional for workflows."), required: false },
+    featureStatus: { label: "Features", purpose: portalMessage("portal.optionalLicenceAndFeatureInformationA403DoesNot", "Optional licence and feature information. A 403 does not block workflows."), required: false },
+    extensions: { label: portalMessage("portal.extensions", "Extensions"), purpose: portalMessage("portal.inventoryForExtensionListsBatchImportsAndTargetSelection", "Inventory for extension lists, batch imports and target selection."), required: true },
+    devices: { label: portalMessage("portal.devices", "Devices"), purpose: portalMessage("portal.deviceAssociationsForExtensionsAndInventory", "Device associations for extensions and inventory."), required: true },
+    trunks: { label: portalMessage("portal.server.trunks", "Trunks"), purpose: portalMessage("portal.sipTrunkInventoryForIncomingNumbers", "SIP trunk inventory for incoming numbers."), required: true },
+    dids: { label: portalMessage("portal.numbers", "Numbers"), purpose: portalMessage("portal.didRoutingForCallflowAndDayNightTimeControls", "DID routing for callflow and day/night time controls."), required: true },
+    phoneBooks: { label: portalMessage("portal.phonebooks", "Phonebooks"), purpose: portalMessage("portal.inventoryAndWriteTargetForPhonebookSync", "Inventory and write target for phonebook sync."), required: true },
+    groups: { label: "Teams", purpose: portalMessage("portal.groupTargetsForRoutingAndCallflow", "Group targets for routing and callflow."), required: true },
+    queues: { label: portalMessage("portal.queues", "Queues"), purpose: portalMessage("portal.queueTargetsAndMembershipManagement", "Queue targets and membership management."), required: true },
+    skills: { label: portalMessage("portal.skillGroups", "Skill groups"), purpose: portalMessage("portal.skillTargetsAndSkillLevelManagement", "Skill targets and skill-level management."), required: true },
+    voicemails: { label: portalMessage("portal.voicemail", "Voicemail"), purpose: portalMessage("portal.optionalRoutingTargets", "Additional routing targets, where supported by the API."), required: false },
+    frontdesks: { label: "Frontdesk/Nia", purpose: portalMessage("portal.optionalRoutingTargets", "Additional routing targets, where supported by the API."), required: false },
+    ivrs: { label: portalMessage("portal.voiceDialogs", "Voice dialogs"), purpose: portalMessage("portal.voiceDialogTargetsIncludingAnnouncementsWithAFollowUp", "Voice dialog targets, including announcements with a follow-up action."), required: true },
+    timeControls: { label: portalMessage("portal.timeControls", "Time controls"), purpose: portalMessage("portal.dayNightTimeControlsAndOpeningHoursRouting", "Day/night time controls and opening-hours routing."), required: true },
+    announcements: { label: portalMessage("portal.announcements", "Announcements"), purpose: portalMessage("portal.existingAudioAnnouncementsForAnnouncementTargets", "Existing audio announcements for announcement targets."), required: true },
   };
 
   if (!Object.keys(endpoints).length) {
-    $("#endpoint-status").innerHTML = `<div class="empty-state">Demo-Daten aktiv.</div>`;
+    const status = portalConnectionStatus(overview);
+    $("#endpoint-status").innerHTML = `<div class="empty-state">${escapeHtml(status.detail || status.label)}</div>`;
     return;
   }
 
   $("#endpoint-status").classList.toggle("is-collapsed", !state.technicalOpen);
-  $("#toggle-technical").textContent = state.technicalOpen ? "Details ausblenden" : "Details anzeigen";
+  $("#toggle-technical").textContent = state.technicalOpen ? portalMessage("portal.hideDetails", "Hide details") : portalMessage("portal.showDetails", "Show details");
   $("#endpoint-status").innerHTML = Object.entries(endpointDetails).map(([key, detail]) => {
     const endpoint = endpoints[key];
     if (!endpoint) return "";
-    const isOptional = !detail.required || OPTIONAL_ENDPOINT_KEYS.has(key);
+    const isOptional = endpoint.optional || !detail.required || OPTIONAL_ENDPOINT_KEYS.has(key);
     const statusLabel = endpoint.ok
       ? "OK"
       : isOptional
         ? "Optional"
-        : "Fehler";
+        : portalMessage("portal.error", "Error");
     const countText = endpoint.ok
-      ? (Number(endpoint.count) === 1 ? "1 Datensatz geladen" : `${endpoint.count ?? 0} Datensätze geladen`)
-      : (isOptional ? "Optionaler Endpoint nicht verfügbar" : "Pflicht-Endpunkt nicht verfügbar");
+      ? (Number(endpoint.count) === 1 ? portalMessage("portal.1RecordLoaded", "1 record loaded") : portalMessage("portal.valueRecordsLoaded", "{p0} records loaded", { p0: endpoint.count ?? 0 }))
+      : (isOptional ? portalMessage("portal.optionalEndpointUnavailable", "Optional endpoint unavailable") : portalMessage("portal.requiredEndpointUnavailable", "Required endpoint unavailable"));
     const path = endpoint.path || "";
-    const errorText = endpoint.ok ? "" : endpoint.error || "Keine Detailmeldung verfügbar.";
+    const errorText = portalEndpointErrorText(endpoint);
     const dataRows = endpointDataRows(key, overview);
     return `
       <div class="endpoint-item ${endpoint.ok ? "is-ok" : "is-error"}">
@@ -6081,14 +7021,14 @@ function endpointDataRows(key, overview) {
       ];
     case "basicData":
       return [
-        ["Kunde", customer.name || "unbekannt"],
-        ["Account", account || "nach Login sichtbar"],
+        [portalMessage("portal.customer", "Customer"), customer.name || "unbekannt"],
+        ["Account", account || portalMessage("portal.visibleAfterLogin", "Visible after login")],
         ["Snom Transfer", customer.snomTransfer || "unbekannt"],
       ];
     case "contract":
-      return contractRows.length ? contractRows : [["Vertrag", "Keine freigegebenen Vertragsfelder geliefert"]];
+      return contractRows.length ? contractRows : [[portalMessage("portal.server.contract", "Contract"), portalMessage("portal.noPermittedContractFieldsReturned", "No permitted contract fields returned")]];
     case "featureStatus":
-      return [["Status", "Kein Zugriff auf Feature-Details"]];
+      return [["Status", portalMessage("portal.noAccessToFeatureDetails", "No access to feature details")]];
     default:
       return [];
   }
@@ -6108,8 +7048,8 @@ function endpointDataRowsMarkup(rows) {
 }
 
 function formatEndpointValue(value) {
-  if (value === true) return "Ja";
-  if (value === false) return "Nein";
+  if (value === true) return portalMessage("portal.yes", "Yes");
+  if (value === false) return portalMessage("portal.no", "No");
   return value;
 }
 
@@ -6188,7 +7128,7 @@ function renderView() {
   const railButton = $("#toggle-did-rail");
   if (railButton) {
     railButton.textContent = "‹";
-    railButton.title = "Menü ausblenden";
+    railButton.title = portalMessage("portal.hideMenu", "Hide menu");
     railButton.setAttribute("aria-label", railButton.title);
   }
   document.querySelectorAll("[data-flow-menu]").forEach((button) => {
@@ -6205,18 +7145,19 @@ function renderView() {
 
 function flowMenuTitle(menu) {
   return {
-    dids: "Rufnummern",
-    extensions: "Nebenstellen",
-    queues: "Warteschlangen",
-    ivrs: "Sprachdialoge",
-    skills: "Skillgruppen",
-    timeControls: "Zeitsteuerung",
-    menus: "Sprachdialoge",
+    dids: portalMessage("portal.numbers", "Numbers"),
+    extensions: portalMessage("portal.extensions", "Extensions"),
+    queues: portalMessage("portal.queues", "Queues"),
+    ivrs: portalMessage("portal.voiceDialogs", "Voice dialogs"),
+    skills: portalMessage("portal.skillGroups", "Skill groups"),
+    timeControls: portalMessage("portal.timeControl", "Time control"),
+    menus: portalMessage("portal.voiceDialogs", "Voice dialogs"),
   }[menu] || "Callflow";
 }
 
 function setView(view) {
   if (!VIEW_IDS.has(view)) return;
+  const enteringCallflow = view === "callflow" && state.view !== "callflow";
   state.view = view;
   const nextHash = `#${view}`;
   if (window.location.hash !== nextHash) {
@@ -6232,6 +7173,8 @@ function setView(view) {
     loadServiceGroups();
   }
   renderView();
+  if (enteringCallflow && state.overview?.settings?.configured && !state.loading && !STATIC_DEMO_MODE) loadOverview();
+  if (view === "callflow") requestAnimationFrame(() => { if (state.view === "callflow") renderCallflow(); });
   if (view === "services") {
     renderServices();
   }
@@ -6244,8 +7187,11 @@ function setFlowZoom(value) {
 
 function updateNodeField(field, value) {
   const node = selectedNode();
-  if (!node) return;
+  if (!node || node[field] === value) return;
+  rememberFlowUndo();
+  clearFlowNodeDefault(node, field);
   node[field] = value;
+  if (field === "title") node.titleUserEdited = true;
   if (field === "type") {
     applyNodeTypeDefaults(node, value);
     if (isComplexStepKind(value) || normalizeTargetType(value) === "PLACEHOLDER") node.isTarget = false;
@@ -6266,8 +7212,11 @@ function updateNodeField(field, value) {
 
 function updateNodeFieldWithoutHelperRender(field, value) {
   const node = selectedNode();
-  if (!node) return;
+  if (!node || node[field] === value) return;
+  rememberFlowUndo({ editKey: `${node.id}:field:${field}` });
+  clearFlowNodeDefault(node, field);
   node[field] = value;
+  if (field === "title") node.titleUserEdited = true;
   if (field === "subtitle") node.targetNumber = targetNumberFromText(value);
   syncBranchSourceConfig(node);
   if (state.flow) materializeBranchNodes(state.flow);
@@ -6276,52 +7225,48 @@ function updateNodeFieldWithoutHelperRender(field, value) {
   state.flowFeedback = null;
   renderCallflow();
   renderFlowFeedback();
+  refreshFlowDraftPreview();
+}
+
+function clearFlowNodePortalIdentity(node) {
+  // A changed type or new source must never reuse the previous Portal object.
+  for (const field of ["routeNumber", "targetNumber", "number", "serviceNumber", "extensionNumber", "href", "serviceKind", "serviceColor", "serviceAccent", "serviceSoft", "memberCount", "memberNames", "memberTargets"]) delete node[field];
+  node.subtitle = "";
+  clearFlowNodeDefault(node, "subtitle");
 }
 
 function applyNodeTypeDefaults(node, type) {
   const kind = normalizeTargetType(type);
   node.type = kind;
   node.tone = targetTone(kind);
+  clearFlowNodePortalIdentity(node);
   node.config = {};
-  if (!node.title || node.title === "Neuer Schritt" || node.missing) {
-    const titles = {
-      TIMECONTROL: "Geschäftszeiten",
-      IVR: "Sprachdialog",
-      ANNOUNCEMENT: "Ansage",
-      HANGUP: "Auflegen",
-      QUEUE: "Warteschlange",
-      GROUP: "Skillgruppe",
-      SKILL: "Skillgruppe",
-      VOICEMAIL: "Anrufbeantworter",
-      PHONEEXTENSION: "Nebenstelle",
-      FRONTDESK: "Frontdesk",
-      PLACEHOLDER: "Neuer Schritt",
-    };
-    node.title = titles[kind] || "Neuer Schritt";
+  const defaults = flowNodeDefaultMetadata(kind);
+  if (!node.titleUserEdited && (!node.title || ["Neuer Schritt", "New step", portalMessage("portal.newStep", "New step")].includes(node.title) || node.missing || node._i18nDefaults?.title)) {
+    if (kind === "FRONTDESK") { node.title = "Frontdesk"; clearFlowNodeDefault(node, "title"); }
+    else setFlowNodeDefault(node, "title", defaults.title || flowNodeDefaultMetadata("PLACEHOLDER").title);
   }
-  if (kind === "PLACEHOLDER") node.subtitle = "Art wählen";
-  if (kind === "TIMECONTROL") node.subtitle = "Zeitfenster festlegen";
-  if (kind === "IVR") node.subtitle = "Tasten konfigurieren";
-  if (kind === "ANNOUNCEMENT") node.subtitle = "Ansage wählen";
-  if (kind === "HANGUP") node.subtitle = "Anruf beenden";
+  if (defaults.subtitle) setFlowNodeDefault(node, "subtitle", defaults.subtitle);
   if (["QUEUE", "GROUP", "SKILL", "IVR", "TIMECONTROL"].includes(kind)) {
     node.config.portalMode = "new";
+    node.isTarget = false;
   }
   if (kind === "IVR") node.config.ivrKeys = ["1", "2"];
-  if (kind === "TIMECONTROL") node.config.hours = "Mo-Fr 08:00-17:00";
+  if (kind === "TIMECONTROL") setFlowNodeDefault(node, "config.hours", defaults["config.hours"]);
   node.missing = kind === "PLACEHOLDER";
   ensureNodeConfig(node);
 }
 
 function updateNodeConfig(field, value) {
   const node = selectedNode();
-  if (!node) return;
+  if (!node || node.config?.[field] === value) return;
+  rememberFlowUndo();
   ensureNodeConfig(node);
   if (field === "portalMode") {
     node.config.portalMode = value;
     if (value === "new") {
-      delete node.routeNumber;
-      delete node.targetNumber;
+      clearFlowNodePortalIdentity(node);
+      node.isTarget = false;
       delete node.config.timeoutSeconds;
       delete node.config.timeoutTarget;
       delete node.config.openTarget;
@@ -6335,6 +7280,7 @@ function updateNodeConfig(field, value) {
     if (value === "existing") {
       for (const key of ["timeoutTarget", "openTarget", "closedTarget", "afterTarget"]) delete node.config[key];
     }
+    syncBranchSourceConfig(node);
     materializeBranchNodes(state.flow);
     saveCurrentFlowDraft(false);
     state.flowFeedback = null;
@@ -6343,11 +7289,13 @@ function updateNodeConfig(field, value) {
     renderFlowFeedback();
     return;
   }
+  clearFlowNodeDefault(node, `config.${field}`);
+  if (field === "hours" || field === "announcement") clearFlowNodeDefault(node, "subtitle");
   node.config[field] = value;
   if (normalizeTargetType(node.type) === "TIMECONTROL" && field === "hours") node.subtitle = value;
   if (["announcement"].includes(field) && value) node.subtitle = value;
-  if (state.flow) materializeBranchNodes(state.flow);
   syncBranchSourceConfig(node);
+  if (state.flow) materializeBranchNodes(state.flow);
   saveCurrentFlowDraft(false);
   state.flowFeedback = null;
   renderCallflow();
@@ -6357,18 +7305,21 @@ function updateNodeConfig(field, value) {
 
 function updateNodeConfigWithoutHelperRender(field, value) {
   const node = selectedNode();
-  if (!node) return;
+  if (!node || field === "portalMode" || node.config?.[field] === value) return;
+  rememberFlowUndo({ editKey: `${node.id}:config:${field}` });
   ensureNodeConfig(node);
-  if (field === "portalMode") return;
+  clearFlowNodeDefault(node, `config.${field}`);
+  if (field === "hours" || field === "announcement") clearFlowNodeDefault(node, "subtitle");
   node.config[field] = value;
   if (normalizeTargetType(node.type) === "TIMECONTROL" && field === "hours") node.subtitle = value;
   if (["announcement"].includes(field) && value) node.subtitle = value;
-  if (state.flow) materializeBranchNodes(state.flow);
   syncBranchSourceConfig(node);
+  if (state.flow) materializeBranchNodes(state.flow);
   saveCurrentFlowDraft(false);
   state.flowFeedback = null;
   renderCallflow();
   renderFlowFeedback();
+  refreshFlowDraftPreview();
 }
 
 function applyResourceTargetSelection(value) {
@@ -6381,6 +7332,7 @@ function applyResourceTargetSelection(value) {
   }
   const node = selectedNode();
   if (!node || node.locked) return;
+  rememberFlowUndo();
   applyTargetToNode(node, target);
   ensureNodeConfig(node);
   node.config.portalMode = "existing";
@@ -6399,6 +7351,7 @@ function updateNodeTargetConfig(field, value) {
   if (!node) return;
   ensureNodeConfig(node);
   if (!value) {
+    rememberFlowUndo();
     const ivrKey = ivrKeyFromField(field);
     if (normalizeTargetType(node.type) === "IVR" && ivrKey) {
       removeIvrKey(node, ivrKey);
@@ -6406,6 +7359,7 @@ function updateNodeTargetConfig(field, value) {
       delete node.config[field];
       removeBranch(state.flow, node, field);
     }
+    syncBranchSourceConfig(node);
     materializeBranchNodes(state.flow);
     saveCurrentFlowLayout();
     saveCurrentFlowDraft(false);
@@ -6421,15 +7375,21 @@ function updateNodeTargetConfig(field, value) {
   } catch {
     return;
   }
+  if (JSON.stringify(node.config[field]) === JSON.stringify(target)) return;
+  rememberFlowUndo();
   node.config[field] = target;
   const ivrKey = ivrKeyFromField(field);
   if (normalizeTargetType(node.type) === "IVR" && ivrKey) {
     node.config.ivrKeys = [...new Set([...ivrKeyNumbers(node), ivrKey])];
     node.config.ivrKeysVerified = true;
   }
+  syncBranchSourceConfig(node);
   materializeBranchNodes(state.flow);
   const branchNode = branchTargetNode(node, field);
-  if (branchNode) applyTargetToNode(branchNode, target);
+  if (branchNode) {
+    applyTargetToNode(branchNode, target);
+    syncBranchSourceConfig(branchNode);
+  }
   saveCurrentFlowDraft(false);
   state.flowFeedback = null;
   renderCallflow();
@@ -6443,7 +7403,9 @@ function addIvrKey(nodeId) {
   ensureNodeConfig(node);
   const key = nextIvrKey(node);
   if (!key) return;
+  rememberFlowUndo();
   node.config.ivrKeys = [...new Set([...ivrKeyNumbers(node), key])];
+  syncBranchSourceConfig(node);
   materializeBranchNodes(state.flow);
   saveCurrentFlowLayout();
   saveCurrentFlowDraft(false);
@@ -6471,6 +7433,7 @@ function addFlowNode(fromId = "", toId = "") {
     addFlowNode(inferredBranchEdge.from, inferredBranchEdge.to);
     return;
   }
+  rememberFlowUndo();
   const target = nodes.find((node) => node.id === (exactEdge?.to || ""));
   const id = `local-${Date.now()}`;
   const x = exactEdge && target
@@ -6479,12 +7442,13 @@ function addFlowNode(fromId = "", toId = "") {
   const y = exactEdge && target
     ? clamp(((Number(selected.y) || 35) + (Number(target.y) || 50)) / 2, 4, 78)
     : Math.min((Number(selected.y) || 35) + 14, 78);
-  const position = safeFlowPosition(x, y);
+  const position = vacantFlowPosition(x, y, buildVisibleFlowGraph(state.flow).nodes);
   const next = {
     id,
     type: "PLACEHOLDER",
-    title: "Neuer Schritt",
-    subtitle: "Art wählen",
+    _i18nDefaults: flowNodeDefaultMetadata("PLACEHOLDER"),
+    title: portalMessage("portal.newStep", "New step"),
+    subtitle: portalMessage("portal.selectType", "Select type"),
     x: position.x,
     y: position.y,
     tone: targetTone("PLACEHOLDER"),
@@ -6497,7 +7461,7 @@ function addFlowNode(fromId = "", toId = "") {
     if (exactEdge.branchField) {
       const source = nodes.find((node) => node.id === exactEdge.from);
       if (source) {
-        markBranchTarget(next, source, branchSpec(exactEdge.branchField, exactEdge.label || "danach", "Neuer Schritt", "Art wählen", 0, 0));
+        markBranchTarget(next, source, branchSpec(exactEdge.branchField, exactEdge.label || "danach", portalMessage("portal.newStep", "New step"), portalMessage("portal.selectType", "Select type"), 0, 0));
         ensureNodeConfig(source);
         delete source.config[exactEdge.branchField];
       }
@@ -6539,11 +7503,12 @@ function addFlowNode(fromId = "", toId = "") {
 
 function addPaletteNodeToCanvas(target, point) {
   if (!state.flow || !target) return;
+  rememberFlowUndo();
   const id = `local-${Date.now()}`;
   const node = {
     id,
     type: normalizeTargetType(target.type || "PLACEHOLDER"),
-    title: target.title || "Neuer Schritt",
+    title: target.title || portalMessage("portal.newStep", "New step"),
     subtitle: target.subtitle || targetTypeLabel(target.type),
     targetNumber: target.targetNumber || "",
     routeNumber: target.routeNumber || "",
@@ -6559,7 +7524,8 @@ function addPaletteNodeToCanvas(target, point) {
     node.config.portalMode = "existing";
   }
   node.id = id;
-  Object.assign(node, safeFlowPosition((point.x / FLOW_WORLD_WIDTH) * 100, (point.y / FLOW_POSITION_HEIGHT) * 100));
+  Object.assign(node, vacantFlowPosition((point.x / FLOW_WORLD_WIDTH) * 100, (point.y / FLOW_POSITION_HEIGHT) * 100,
+    buildVisibleFlowGraph(state.flow).nodes, node));
   node.floating = true;
   state.flow.nodes.push(node);
   state.selectedNodeId = id;
@@ -6578,8 +7544,8 @@ function flowExtensionTarget(target) {
   if (!number) return null;
   return {
     type: "PHONEEXTENSION",
-    title: target.title || `Nebenstelle ${number}`,
-    subtitle: `Nebenstelle ${number}`,
+    title: target.title || portalMessage("portal.extensionValue", "Extension {p0}", { p0: number }),
+    subtitle: portalMessage("portal.extensionValue", "Extension {p0}", { p0: number }),
     targetNumber: number,
     routeNumber: number,
     tone: "green",
@@ -6642,7 +7608,7 @@ function applyServiceMembershipConnection(first, second) {
   const serviceRef = serviceContext;
   const extensionNumber = flowNodeExtensionNumber(extensionNode);
   if (!serviceRef || !extensionNumber) return false;
-
+  const undo = rememberFlowUndo({ service: true });
   addServiceMembers(serviceRef.kind, serviceId(serviceRef.service), [extensionNumber]);
   const storedServiceNode = (state.flow?.nodes || []).find((node) => node.id === serviceNode.id) || serviceNode;
   updateServiceNodeMeta(storedServiceNode, serviceRef);
@@ -6665,6 +7631,7 @@ function applyServiceMembershipConnection(first, second) {
   state.selectedNodeIds = [];
   state.selectedBranchField = "";
   state.inspectorOpen = false;
+  finishFlowMembershipUndo(undo);
   render();
   return true;
 }
@@ -6672,8 +7639,10 @@ function applyServiceMembershipConnection(first, second) {
 function assignExtensionToBranchSource(source, target) {
   const branchField = firstAvailableBranchField(source);
   if (!branchField) return false;
+  rememberFlowUndo();
   ensureNodeConfig(source);
   source.config[branchField] = targetFromFlowNode(target);
+  syncBranchSourceConfig(source);
   materializeBranchNodes(state.flow);
   const branchNode = (state.flow.nodes || []).find((node) => node.sourceId === source.id && node.branchField === branchField);
   if (branchNode) applyTargetToNode(branchNode, target);
@@ -6689,6 +7658,7 @@ function assignExtensionDropToNode(targetNode, extensionTarget, point) {
     const serviceRef = serviceContext;
     const serviceNode = serviceContext.node;
     const extensionNumber = extensionTarget.extensionId || extensionTarget.targetNumber;
+    const undo = rememberFlowUndo({ service: true });
     addServiceMembers(serviceRef.kind, serviceId(serviceRef.service), [extensionNumber]);
     updateServiceNodeMeta(serviceNode, serviceRef);
     ensureServiceNodeExpanded(serviceNode.id);
@@ -6701,10 +7671,12 @@ function assignExtensionDropToNode(targetNode, extensionTarget, point) {
     saveCurrentFlowLayout();
     saveCurrentFlowDraft(false);
     state.flowFeedback = null;
+    finishFlowMembershipUndo(undo);
     render();
     return true;
   }
   if (targetNode.branchTarget) {
+    rememberFlowUndo();
     applyTargetToNode(targetNode, extensionTarget);
     syncBranchSourceConfig(targetNode);
     finalizeFlowMutation();
@@ -6714,7 +7686,7 @@ function assignExtensionDropToNode(targetNode, extensionTarget, point) {
     return assignExtensionToBranchSource(targetNode, extensionTarget);
   }
   addPaletteNodeToCanvas(extensionTarget, point || { x: nodeWorldBox(targetNode).centerX + 260, y: nodeWorldBox(targetNode).centerY });
-  connectFlowNodes(targetNode.id, state.selectedNodeId);
+  connectFlowNodes(targetNode.id, state.selectedNodeId, { skipUndo: true });
   return true;
 }
 
@@ -6774,7 +7746,7 @@ function clearPairConnections(flow, firstId, secondId) {
   });
 }
 
-function connectFlowNodes(fromId, toId) {
+function connectFlowNodes(fromId, toId, { skipUndo = false } = {}) {
   if (!state.flow || !fromId || !toId || fromId === toId) return;
   const first = (state.flow.nodes || []).find((node) => node.id === fromId) || visibleFlowNodeById(fromId);
   const second = (state.flow.nodes || []).find((node) => node.id === toId) || visibleFlowNodeById(toId);
@@ -6782,6 +7754,7 @@ function connectFlowNodes(fromId, toId) {
   if (applyServiceMembershipConnection(first, second)) return;
   if (first.virtual || second.virtual) return;
   const { source, target } = resolveLogicalConnection(first, second);
+  if (!skipUndo) rememberFlowUndo();
   clearPairConnections(state.flow, source.id, target.id);
   const branchField = firstAvailableBranchField(source);
   if (branchField) {
@@ -6790,18 +7763,20 @@ function connectFlowNodes(fromId, toId) {
     const label = branchField === "openTarget"
       ? "innerhalb"
       : branchField === "closedTarget"
-        ? "außerhalb"
+        ? portalMessage("portal.outside", "Outside")
         : ivrKeyFromField(branchField)
-          ? `Taste ${ivrKeyFromField(branchField)}`
+          ? portalMessage("portal.keyValue", "Key {p0}", { p0: ivrKeyFromField(branchField) })
           : branchField === "afterTarget"
             ? "danach"
-            : "führt zu";
+            : portalMessage("portal.routesTo", "routes to");
     state.flow.edges = (state.flow.edges || []).filter((edge) => !(edge.from === source.id && edge.branchField === branchField));
     state.flow.edges.push({ from: source.id, to: target.id, label, branchField });
     markBranchTarget(target, source, branchSpec(branchField, label, target.title, target.subtitle, 0, 0, targetFromFlowNode(target)));
   } else {
-    state.flow.edges.push({ from: source.id, to: target.id, label: "führt zu" });
+    state.flow.edges = (state.flow.edges || []).filter(edge => edge.from !== source.id || edge.branchField);
+    state.flow.edges.push({ from: source.id, to: target.id, label: portalMessage("portal.routesTo", "routes to") });
   }
+  syncBranchSourceConfig(source);
   const reachable = reachableFlowNodeIds(state.flow);
   source.floating = !reachable.has(source.id);
   target.floating = false;
@@ -6827,6 +7802,7 @@ function removeServiceMemberFlowNode(memberNode) {
     return String(number) !== String(extensionNumber);
   });
   if (nextMembers.length === (entry.members || []).length) return false;
+  const undo = rememberFlowUndo({ service: true });
   rememberServiceDraftChange();
   entry.members = nextMembers;
   const layouts = serviceMemberLayouts(serviceNode);
@@ -6841,33 +7817,35 @@ function removeServiceMemberFlowNode(memberNode) {
   state.selectedBranchField = "";
   state.inspectorOpen = false;
   state.flowFeedback = null;
+  finishFlowMembershipUndo(undo);
   render();
   return true;
 }
 
 function stageFlowPlan(options = {}) {
   const did = selectedDid();
-  const target = (state.flow?.nodes || []).find((node) => node.isTarget) || selectedNode();
-  const before = `${did?.name || "-"} → ${did?.value || "kein Ziel"}`;
+  const target = flowStartNode();
+  const before = `${did?.name || "-"} → ${did?.value || portalMessage("portal.noTarget_1186c", "No target")}`;
   const after = `${did?.name || "-"} → ${currentDraftTarget()}`;
   const validation = validateFlowDetails();
   saveCurrentFlowDraft(false);
   state.actionPlan = {
     ok: validation.ok,
     context: "callflow",
+    writeContext: state.flow?.writeContext,
     dryRun: true,
     title: validation.ok
       ? validation.liveCapable
-        ? (validation.complex ? "Komplexer Callflow geprüft" : "Direktänderung geprüft")
-        : "Entwurf lokal gespeichert"
-      : "Callflow unvollständig",
+        ? (validation.complex ? portalMessage("portal.complexCallflowChecked", "Complex callflow checked") : portalMessage("portal.directChangeChecked", "Direct change checked"))
+        : portalMessage("portal.draftSavedLocally", "Draft saved locally")
+      : portalMessage("portal.callflowIncomplete", "Callflow incomplete"),
     message: validation.ok
       ? (validation.liveCapable
         ? (validation.complex
-          ? "Der Flow kann als Portal-Zielobjekte angelegt und auf die Rufnummer geroutet werden."
-          : "Der direkte Zielwechsel kann live übernommen werden.")
-        : "Der Flow ist lokal gespeichert.")
-      : `Fehlt: ${validation.problems.join(" · ")}`,
+          ? portalMessage("portal.theFlowCanBeCreatedAsPortalTargetObjects", "The flow can be created as Portal target objects and routed to the number.")
+          : portalMessage("portal.theDirectTargetChangeCanBeAppliedLive", "The direct target change can be applied live."))
+        : portalMessage("portal.theFlowIsSavedLocally", "The flow is saved locally."))
+      : validation.ambiguous ? validation.problems.join(" · ") : portalMessage("portal.missingValue", "Missing: {p0}", { p0: validation.problems.join(" · ") }),
     did: did?.name || "",
     before,
     after,
@@ -6908,28 +7886,105 @@ function stageFlowPlan(options = {}) {
 }
 
 async function stageAndApplyFlowPlan() {
+  if (state.flowApplying) return;
   stageFlowPlan({ silent: true });
   const plan = state.actionPlan;
   if (plan) plan.directApply = true;
   if (!plan?.applyPayload || plan.ok === false) {
     if (plan) plan.applyAttempted = true;
     showUiNotice({
-      title: plan?.title || "Callflow nicht übernommen",
-      message: plan?.message || "Der Callflow kann nicht live übernommen werden.",
+      title: plan?.title || portalMessage("portal.callflowNotApplied", "Callflow not applied"),
+      message: plan?.message || portalMessage("portal.theCallflowCannotBeAppliedLive", "The callflow cannot be applied live."),
       type: plan?.ok === false ? "error" : "warning",
     });
     renderFlowFeedback();
     renderFlowPlan();
     return;
   }
-  if (!liveWritesEnabled()) {
+  if (!localApplyPermitted()) {
     plan.applyAttempted = true;
-    showUiNotice({ title: "Live-Schreiben deaktiviert", message: liveWritesDisabledText(), type: "warning" });
+    showUiNotice({ title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"), message: liveWritesDisabledText(), type: "warning" });
     renderFlowFeedback();
     renderFlowPlan();
     return;
   }
   await applyFlowPlan();
+}
+
+function rememberFlowUndo({ editKey = "", service = false } = {}) {
+  if (!state.flow) return null;
+  const key = flowDraftKey();
+  if (editKey && flowTextUndo?.key === editKey && flowTextUndo.entry === flowUndoHistory.at(-1) && flowTextUndo.entry.key === key) return flowTextUndo.entry;
+  const entry = { key, flow: clone(state.flow), expandedServiceNodeIds: [...state.expandedServiceNodeIds] };
+  if (service) {
+    ensureServiceDraft();
+    entry.serviceDraft = cloneServiceDraft();
+    entry.serviceHistoryBefore = [...state.serviceDraftHistory];
+  }
+  flowUndoHistory.push(entry);
+  flowTextUndo = editKey ? { key: editKey, entry } : null;
+  if (flowUndoHistory.length > 20) flowUndoHistory.shift();
+  return entry;
+}
+
+function finishFlowMembershipUndo(entry) {
+  if (!entry?.serviceDraft) return;
+  entry.serviceDraftAfter = cloneServiceDraft();
+  entry.serviceHistoryAdded = state.serviceDraftHistory.filter(snapshot => !entry.serviceHistoryBefore.includes(snapshot));
+}
+
+// Revert only the memberships changed by this canvas action. Independent edits
+// made in the Services view keep their values and their own usable history.
+function reverseFlowMembershipChange(draft, entry) {
+  const result = cloneServiceDraft(draft);
+  if (!result || !entry.serviceDraftAfter) return result;
+  const memberKey = member => String(member.extensionNumber || member.number || member.id || "");
+  for (const collection of ["queues", "skills"]) {
+    for (const [id, before] of Object.entries(entry.serviceDraft[collection] || {})) {
+      const after = entry.serviceDraftAfter[collection]?.[id];
+      const current = result[collection]?.[id];
+      if (!after || !current) continue;
+      const oldMembers = new Map((before.members || []).map(member => [memberKey(member), member]));
+      const newMembers = new Map((after.members || []).map(member => [memberKey(member), member]));
+      const currentMembers = new Map((current.members || []).map(member => [memberKey(member), member]));
+      for (const key of new Set([...oldMembers.keys(), ...newMembers.keys()])) {
+        const oldMember = oldMembers.get(key);
+        const newMember = newMembers.get(key);
+        if (JSON.stringify(oldMember) === JSON.stringify(newMember)) continue;
+        // A later edit to this same membership takes precedence over stale undo.
+        if (JSON.stringify(currentMembers.get(key)) !== JSON.stringify(newMember)) continue;
+        if (oldMember) currentMembers.set(key, clone(oldMember));
+        else currentMembers.delete(key);
+      }
+      current.members = [...currentMembers.values()].sort((a, b) => memberKey(a).localeCompare(memberKey(b), undefined, { numeric: true }));
+    }
+  }
+  return result;
+}
+
+function undoFlowChange() {
+  const index = flowUndoHistory.findLastIndex(entry => entry.key === flowDraftKey());
+  if (index < 0) return;
+  const [previous] = flowUndoHistory.splice(index, 1);
+  flowTextUndo = null;
+  state.flow = clone(previous.flow);
+  state.expandedServiceNodeIds = previous.expandedServiceNodeIds || [];
+  if (previous.serviceDraftAfter) {
+    state.serviceDraft = reverseFlowMembershipChange(state.serviceDraft, previous);
+    state.serviceDraftHistory = state.serviceDraftHistory
+      .filter(snapshot => !previous.serviceHistoryAdded.includes(snapshot))
+      .map(snapshot => previous.serviceHistoryBefore.includes(snapshot) ? snapshot : Object.assign(snapshot, reverseFlowMembershipChange(snapshot, previous)));
+    writeStoredServiceDraft(state.serviceDraft);
+    refreshFlowServiceNodeMeta();
+  }
+  state.selectedNodeId = "";
+  state.selectedNodeIds = [];
+  state.inspectorOpen = false;
+  state.actionPlan = null;
+  state.flowFeedback = null;
+  saveCurrentFlowLayout();
+  saveCurrentFlowDraft(false);
+  render();
 }
 
 function deleteSelectedNode() {
@@ -6939,6 +7994,7 @@ function deleteSelectedNode() {
     removeServiceMemberFlowNode(node);
     return;
   }
+  rememberFlowUndo();
   const incomingBranch = node.branchTarget && node.sourceId && node.branchField
     ? { from: node.sourceId, branchField: node.branchField }
     : (state.flow.edges || []).find((edge) => edge.to === node.id && edge.branchField);
@@ -6966,7 +8022,7 @@ function deleteSelectedNode() {
     state.flow.edges.push({
       from: incoming.from,
       to: outgoing.to,
-      label: incoming.branchField ? incoming.label : outgoing.label || incoming.label || "führt zu",
+      label: incoming.branchField ? incoming.label : outgoing.label || incoming.label || portalMessage("portal.routesTo", "routes to"),
       branchField: incoming.branchField || "",
     });
   }
@@ -6981,6 +8037,7 @@ function deleteSelectedNodes() {
     return;
   }
   if (!state.flow) return;
+  rememberFlowUndo();
   const nodes = (state.flow.nodes || []).filter((node) => ids.has(node.id) && !node.locked);
   const removable = new Set();
   for (const node of nodes) {
@@ -7015,6 +8072,7 @@ function applyTargetSelection(value) {
     ? selected
     : (state.flow?.nodes || []).find((node) => node.isTarget) || selected;
   if (!target) return;
+  rememberFlowUndo();
   applyTargetToNode(target, next);
   syncBranchSourceConfig(target);
   state.selectedNodeId = target.id;
@@ -7038,6 +8096,8 @@ function applyBulkTargetSelection(value) {
   }
   const ids = new Set(state.selectedNodeIds);
   const nodes = (state.flow?.nodes || []).filter((node) => ids.has(node.id) && !node.locked);
+  if (!nodes.length) return;
+  rememberFlowUndo();
   for (const node of nodes) {
     applyTargetToNode(node, next);
     syncBranchSourceConfig(node);
@@ -7056,42 +8116,54 @@ function formPayload(form) {
 }
 
 async function submitAction(form, endpoint, extra = {}, targetView = "changes") {
+  const writeContext = state.overview?.settings?.writeContext;
+  const previousPlan = state.actionPlan;
   const result = await fetchJson(endpoint, {
-    method: "POST",
+    method: "POST", writeContext,
     body: JSON.stringify({ ...formPayload(form), ...extra }),
   });
-  state.actionPlan = { ...result, context: targetView };
+  if (!isCurrentWriteContext(writeContext) || state.actionPlan !== previousPlan) return;
+  state.actionPlan = { ...result, context: targetView, writeContext };
   setView(targetView);
   renderActionPlan();
 }
 
 async function stagePhonebookSync() {
+  const writeContext = state.overview?.settings?.writeContext;
+  const generation = ++phonebookRequestGeneration;
+  const ownsOperation = () => generation === phonebookRequestGeneration && isCurrentWriteContext(writeContext);
   state.phonebookSyncLoading = true;
   const hasManualContacts = collectManualPhonebookRows().length > 0;
   state.actionPlan = {
     ok: true,
     type: "phonebook-sync",
-    title: "Abgleich wird vorbereitet",
+    title: portalMessage("portal.preparingComparison", "Preparing comparison"),
     message: hasManualContacts
-      ? "Manuelle Kontakte werden als lokale Quelle gesetzt und mit dem NFON-Telefonbuch verglichen."
-      : "Kontaktquelle und NFON-Telefonbuch werden verglichen. Es wird nichts gespeichert.",
+      ? portalMessage("portal.settingManualContactsAsTheLocalSourceAndComparing", "Setting manual contacts as the local source and comparing them with the NFON phonebook.")
+      : portalMessage("portal.comparingTheContactSourceWithTheNfonPhonebookNothing", "Comparing the contact source with the NFON phonebook. Nothing is saved."),
     source: {},
     target: {},
     summary: {},
     actions: [],
     createdAt: new Date().toISOString(),
   };
+  let activePlan = state.actionPlan;
+  const current = () => state.actionPlan === activePlan && isCurrentWriteContext(writeContext);
   renderPhonebookSync();
   renderActionPlan();
 
   try {
-    if (hasManualContacts) await persistManualPhonebookContacts();
-    state.actionPlan = await fetchJson("/api/phonebook-sync/preview", { method: "POST" });
+    if (hasManualContacts) await persistManualPhonebookContacts(writeContext);
+    if (!current()) return;
+    const result = await fetchJson("/api/phonebook-sync/preview", { method: "POST", writeContext });
+    if (!current()) return;
+    state.actionPlan = activePlan = { ...result, writeContext };
   } catch (error) {
-    state.actionPlan = {
+    if (!current()) return;
+    state.actionPlan = activePlan = {
       ok: false,
       type: "phonebook-sync",
-      title: "Telefonbuch-Sync fehlgeschlagen",
+      title: portalMessage("portal.phonebookSyncFailed", "Phonebook sync failed"),
       message: error.message,
       source: {},
       target: {},
@@ -7100,43 +8172,58 @@ async function stagePhonebookSync() {
       createdAt: new Date().toISOString(),
     };
   } finally {
-    state.phonebookSyncLoading = false;
-    renderPhonebookSync();
-    renderActionPlan();
+    if (ownsOperation()) {
+      state.phonebookSyncLoading = false;
+      renderPhonebookSync();
+      renderActionPlan();
+    }
   }
 }
 
 async function applyPhonebookSync() {
-  if (state.actionPlan?.type !== "phonebook-sync") return;
+  if (state.phonebookSyncLoading) return;
+  if (state.actionPlan?.type !== "phonebook-sync" || !state.actionPlan.ok || state.actionPlan.applied || state.phonebookManualDirty || !liveApplyPermitted()) return;
+  const writeContext = state.actionPlan.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return;
+  const generation = ++phonebookRequestGeneration;
+  const ownsOperation = () => generation === phonebookRequestGeneration && isCurrentWriteContext(writeContext);
   state.phonebookSyncLoading = true;
   state.actionPlan = {
     ...state.actionPlan,
     ok: true,
-    title: "Änderungen werden übernommen",
-    message: "Portal API speichert die ermittelten Telefonbuch-Änderungen.",
+    title: portalMessage("portal.applyingChanges_84ae9", "Applying changes"),
+    message: portalMessage("portal.thePortalApiIsSavingTheIdentifiedPhonebookChanges", "The Portal API is saving the identified phonebook changes."),
   };
+  let activePlan = state.actionPlan;
+  const current = () => state.actionPlan === activePlan && isCurrentWriteContext(writeContext);
   renderPhonebookSync();
   renderActionPlan();
 
   try {
-    const result = await fetchJson("/api/phonebook-sync/apply", { method: "POST" });
-    state.actionPlan = result;
+    if (!await enableActionWrites(writeContext, current) || !current()) return;
+    const result = await fetchJson("/api/phonebook-sync/apply", { method: "POST", writeContext });
+    if (!current()) return;
+    state.actionPlan = activePlan = { ...result, writeContext };
     await loadOverview();
-    state.actionPlan = result;
+    if (!current()) return;
+    state.actionPlan = activePlan = { ...result, writeContext };
   } catch (error) {
-    state.actionPlan = {
+    if (!current()) return;
+    state.actionPlan = activePlan = {
       ...state.actionPlan,
       ok: false,
       type: "phonebook-sync",
-      title: "Übernahme fehlgeschlagen",
+      title: portalMessage("portal.applyingChangesFailed", "Applying changes failed"),
       message: error.message,
       applied: false,
       createdAt: new Date().toISOString(),
     };
   } finally {
-    state.phonebookSyncLoading = false;
-    renderPhonebookSync();
-    renderActionPlan();
+    if (ownsOperation()) {
+      state.phonebookSyncLoading = false;
+      renderPhonebookSync();
+      renderActionPlan();
+    }
   }
 }
 
@@ -7204,7 +8291,8 @@ function setExtensionBatchField(rowElement, field, value) {
     ...state.extensionBatchRows[index],
     [field]: value,
   };
-  state.extensionBatchPlan = null;
+  invalidateExtensionBatch();
+  $("#apply-extension-batch")?.closest(".batch-result")?.remove();
 }
 
 function emptyExtensionBatchRow() {
@@ -7244,7 +8332,7 @@ function updateExtensionBatchSelectedField(fieldKey, selected) {
       [field.key]: row[field.key] === undefined ? batchDefaultForField(field) : row[field.key],
     }));
   }
-  state.extensionBatchPlan = null;
+  invalidateExtensionBatch();
 }
 
 function focusExtensionBatchRow(index) {
@@ -7256,7 +8344,7 @@ function focusExtensionBatchRow(index) {
 
 function addExtensionBatchRow() {
   state.extensionBatchRows.push(emptyExtensionBatchRow());
-  state.extensionBatchPlan = null;
+  invalidateExtensionBatch();
   renderExtensionBatch();
   focusExtensionBatchRow(state.extensionBatchRows.length - 1);
 }
@@ -7264,7 +8352,7 @@ function addExtensionBatchRow() {
 function insertExtensionBatchRowAfter(index) {
   const nextIndex = Math.min(Math.max(Number(index) + 1, 0), state.extensionBatchRows.length);
   state.extensionBatchRows.splice(nextIndex, 0, emptyExtensionBatchRow());
-  state.extensionBatchPlan = null;
+  invalidateExtensionBatch();
   renderExtensionBatch();
   focusExtensionBatchRow(nextIndex);
 }
@@ -7272,26 +8360,27 @@ function insertExtensionBatchRowAfter(index) {
 function removeExtensionBatchRow(index) {
   state.extensionBatchRows.splice(index, 1);
   if (!state.extensionBatchRows.length) addExtensionBatchRow();
-  state.extensionBatchPlan = null;
+  invalidateExtensionBatch();
   renderExtensionBatch();
 }
 
 async function loadExtensionBatchCsv(file) {
   if (!file) return;
+  invalidateExtensionBatch();
   try {
     const rows = parseExtensionBatchCsv(await file.text());
     state.extensionBatchRows = rows.length ? rows : state.extensionBatchRows;
     state.extensionBatchPlan = rows.length ? null : {
       ok: false,
-      title: "CSV leer",
-      message: "Die Datei enthält keine verwertbaren Nebenstellen.",
+      title: portalMessage("portal.server.csvIsEmpty", "CSV is empty"),
+      message: portalMessage("portal.theFileContainsNoUsableExtensions", "The file contains no usable extensions."),
       summary: { total: 0, valid: 0, invalid: 0, existing: 0 },
       entries: [],
     };
   } catch (error) {
     state.extensionBatchPlan = {
       ok: false,
-      title: "CSV nicht gelesen",
+      title: portalMessage("portal.csvNotRead", "CSV not read"),
       message: error.message,
       summary: { total: 0, valid: 0, invalid: 0, existing: 0 },
       entries: [],
@@ -7301,78 +8390,107 @@ async function loadExtensionBatchCsv(file) {
 }
 
 async function planExtensionBatch() {
+  const generation = ++extensionBatchRequestGeneration;
+  const writeContext = state.overview?.settings?.writeContext;
+  const rows = clone(extensionBatchRows());
+  const current = () => generation === extensionBatchRequestGeneration && isCurrentWriteContext(writeContext);
   state.extensionBatchLoading = true;
   state.extensionBatchPlan = {
     ok: false,
-    title: "Batch wird geprüft",
-    message: "Die Liste wird gegen den aktuellen Nebenstellenbestand geprüft.",
-    summary: { total: extensionBatchRows().length, valid: 0, invalid: 0, existing: 0 },
+    title: portalMessage("portal.checkingBatch", "Checking batch"),
+    message: portalMessage("portal.checkingTheListAgainstTheCurrentExtensionInventory", "Checking the list against the current extension inventory."),
+    summary: { total: rows.length, valid: 0, invalid: 0, existing: 0 },
     entries: [],
   };
   renderExtensionBatch();
   try {
-    state.extensionBatchPlan = await fetchJson("/api/extensions/batch/plan", {
-      method: "POST",
-      body: JSON.stringify({ rows: extensionBatchRows() }),
+    const result = await fetchJson("/api/extensions/batch/plan", {
+      method: "POST", writeContext,
+      body: JSON.stringify({ rows }),
     });
+    if (!current()) return;
+    state.extensionBatchPlan = { ...result, writeContext, batchRows: rows };
   } catch (error) {
+    if (!current()) return;
     state.extensionBatchPlan = {
       ok: false,
-      title: "Batch-Prüfung fehlgeschlagen",
+      title: portalMessage("portal.batchCheckFailed", "Batch check failed"),
       message: error.message,
-      summary: { total: extensionBatchRows().length, valid: 0, invalid: 0, existing: 0 },
+      summary: { total: rows.length, valid: 0, invalid: 0, existing: 0 },
       entries: [],
     };
   } finally {
-    state.extensionBatchLoading = false;
-    renderExtensionBatch();
+    if (current()) {
+      state.extensionBatchLoading = false;
+      renderExtensionBatch();
+    }
   }
 }
 
 async function applyExtensionBatch() {
-  if (!state.extensionBatchPlan?.ok || !liveWritesEnabled()) return;
+  if (state.extensionBatchLoading || !state.extensionBatchPlan?.ok || !liveApplyPermitted()) return;
+  const preparedPlan = state.extensionBatchPlan;
+  const writeContext = preparedPlan.writeContext;
+  const rows = clone(preparedPlan.batchRows || []);
+  if (!isCurrentWriteContext(writeContext) || JSON.stringify(rows) !== JSON.stringify(extensionBatchRows())) {
+    invalidateExtensionBatch();
+    renderExtensionBatch();
+    return;
+  }
   const confirmed = await confirmUi({
-    title: "Batch Import übernehmen",
-    message: "Diese Nebenstellen werden live in der Portal API angelegt. Fortfahren?",
-    confirmLabel: "Übernehmen",
+    title: portalMessage("portal.applyBatchImport", "Apply batch import"),
+    message: portalMessage("portal.theseExtensionsWillBeCreatedInTheLivePortal", "These extensions will be created in the live Portal API. Continue?"),
+    confirmLabel: portalMessage("portal.apply", "Apply"),
   });
-  if (!confirmed) return;
-  const progress = showUiProgress({ title: "Batch Import wird übernommen", message: "Portal API legt die Nebenstellen an." });
+  if (!confirmed || state.extensionBatchPlan !== preparedPlan || !isCurrentWriteContext(writeContext)
+    || JSON.stringify(rows) !== JSON.stringify(extensionBatchRows()) || !liveApplyPermitted()) return;
+  const generation = ++extensionBatchRequestGeneration;
+  const current = () => generation === extensionBatchRequestGeneration && isCurrentWriteContext(writeContext);
+  const progress = showUiProgress({ title: portalMessage("portal.applyingBatchImport", "Applying batch import"), message: portalMessage("portal.thePortalApiIsCreatingTheExtensions", "The Portal API is creating the extensions.") });
   state.extensionBatchLoading = true;
   renderExtensionBatch();
   try {
+    const prepared = () => current() && state.extensionBatchPlan === preparedPlan && JSON.stringify(rows) === JSON.stringify(extensionBatchRows());
+    if (!await enableActionWrites(writeContext, prepared) || !prepared()) { progress.close(); return; }
     const result = await fetchJson("/api/extensions/batch/apply", {
-      method: "POST",
-      body: JSON.stringify({ rows: extensionBatchRows() }),
+      method: "POST", writeContext,
+      body: JSON.stringify({ rows }),
     });
+    if (!current()) return;
     state.extensionBatchPlan = result;
     await loadOverview();
+    if (!current()) return;
     state.extensionBatchPlan = result;
-    progress.success({ title: "Batch Import übernommen", message: result.message || "Die Nebenstellen wurden verarbeitet." });
+    progress.success({ title: portalMessage("portal.batchImportApplied", "Batch import applied"), message: result.message || portalMessage("portal.theExtensionsWereProcessed", "The extensions were processed.") });
   } catch (error) {
+    if (!current()) return;
     state.extensionBatchPlan = {
-      ...state.extensionBatchPlan,
+      ...preparedPlan,
       ok: false,
       applied: false,
-      title: "Batch-Übernahme fehlgeschlagen",
+      title: portalMessage("portal.applyingBatchFailed", "Applying batch failed"),
       message: error.message,
     };
-    progress.error({ title: "Batch-Übernahme fehlgeschlagen", message: error.message });
+    progress.error({ title: portalMessage("portal.applyingBatchFailed", "Applying batch failed"), message: error.message });
   } finally {
-    state.extensionBatchLoading = false;
-    render();
+    if (current()) {
+      state.extensionBatchLoading = false;
+      render();
+    }
   }
 }
 
 async function uploadPhonebookContacts(form) {
   const file = form.querySelector("#phonebook-upload-file")?.files?.[0];
   if (!file) {
-    state.phonebookUploadFeedback = { ok: false, title: "Upload fehlt", message: "Bitte zuerst eine JSON- oder CSV-Datei auswählen." };
+    state.phonebookUploadFeedback = { ok: false, title: portalMessage("portal.uploadMissing", "Upload missing"), message: portalMessage("portal.selectAJsonOrCsvFileFirst", "Select a JSON or CSV file first.") };
     renderPhonebookSync();
     return;
   }
+  const writeContext = state.overview?.settings?.writeContext;
   try {
     const text = await file.text();
+    if (!isCurrentWriteContext(writeContext)) return;
     let contacts;
     if (file.name.toLowerCase().endsWith(".csv")) {
       contacts = contactsFromCsv(text);
@@ -7381,27 +8499,30 @@ async function uploadPhonebookContacts(form) {
       contacts = Array.isArray(parsed) ? parsed : parsed.contacts;
     }
     const result = await fetchJson("/api/phonebook-sync/upload", {
-      method: "POST",
+      method: "POST", writeContext,
       body: JSON.stringify({ contacts, source: file.name, syncedAt: new Date(file.lastModified || Date.now()).toISOString() }),
     });
+    if (!isCurrentWriteContext(writeContext)) return;
     if (state.overview) state.overview.settings = result.settings;
     state.phonebookManualRows = [];
     state.phonebookManualDraft = { firstName: "", name: "", phone: "" };
     state.phonebookManualDirty = false;
     state.phonebookUploadFeedback = {
       ok: true,
-      title: "Upload übernommen",
-      message: `${result.contacts} Kontakt${result.contacts === 1 ? "" : "e"} sind als Kontaktquelle aktiv.`,
+      title: portalMessage("portal.uploadApplied", "Upload applied"),
+      message: portalMessage("portal.valueContactsAreActiveAsTheContactSource", "{p0} contacts are active as the contact source.", { p0: result.contacts, p1: result.contacts === 1 ? "" : "e" }),
     };
     await stagePhonebookSync();
   } catch (error) {
-    state.phonebookUploadFeedback = { ok: false, title: "Upload fehlgeschlagen", message: error.message };
+    if (!isCurrentWriteContext(writeContext)) return;
+    state.phonebookUploadFeedback = { ok: false, title: portalMessage("portal.server.uploadFailed", "Upload failed"), message: error.message };
     renderPhonebookSync();
   }
 }
 
 function selectedProfileTarget(choices = parsedDaynightTargetOptions()) {
-  const selected = choices.find(({ option }) => option.value === state.profileTargetValue) || choices[0];
+  ensureProfileTargetValue(choices);
+  const selected = choices.find(({ option }) => option.value === state.profileTargetValue);
   return selected?.target || null;
 }
 
@@ -7423,7 +8544,7 @@ function presentActionPlan(targetView = "changes") {
 }
 
 function saveStandardProfile(targetView = "changes") {
-  const snapshot = buildProfileSnapshot("Standard");
+  const snapshot = buildProfileSnapshot(portalMessage("portal.default", "Default"));
   writeProfile("standard", snapshot);
   const account = getOverview()?.account || "portal";
   downloadJsonFile(`nfon-standard-${account}-${safeFileTimestamp(new Date(snapshot.createdAt))}.json`, {
@@ -7436,9 +8557,9 @@ function saveStandardProfile(targetView = "changes") {
     ok: true,
     type: "profile",
     context: targetView,
-    title: "Standard-Profil gesichert",
-    message: `${snapshot.dids.length} Rufnummer${snapshot.dids.length === 1 ? "" : "n"} als Wiederherstellungspunkt gespeichert und als JSON heruntergeladen.`,
-    profileName: "Standard",
+    title: portalMessage("portal.defaultProfileSaved", "Default profile saved"),
+    message: portalMessage("portal.valueNumbersSavedAsARestorePointAndDownloaded", "{p0} numbers saved as a restore point and downloaded as JSON.", { p0: snapshot.dids.length, p1: snapshot.dids.length === 1 ? "" : "n" }),
+    profileName: portalMessage("portal.default", "Default"),
     changeCount: 0,
     changes: [],
     createdAt: snapshot.createdAt,
@@ -7455,26 +8576,26 @@ async function importStandardProfileFile(file, targetView = "changes") {
     const currentAccount = profileAccountKey();
     const payloadAccount = payload?.account || profile?.account;
     if (payload?.type && payload.type !== "nfon-portal-standard-profile") {
-      throw new Error("Die Datei ist kein Standardprofil-Backup dieser App.");
+      throw new Error(portalMessage("portal.theFileIsNotADefaultProfileBackupFrom", "The file is not a default-profile backup from this app."));
     }
     if (!profile || !Array.isArray(profile.dids) || !profile.createdAt) {
-      throw new Error("Das Backup enthaelt kein gueltiges Standardprofil.");
+      throw new Error(portalMessage("portal.theBackupContainsNoValidDefaultProfile", "The backup contains no valid default profile."));
     }
     if (payloadAccount && payloadAccount !== currentAccount) {
-      throw new Error(`Das Backup gehoert zu ${payloadAccount}, aktiv ist ${currentAccount}.`);
+      throw new Error(portalMessage("portal.theBackupBelongsToValueValueIsActive", "The backup belongs to {p0}; {p1} is active.", { p0: payloadAccount, p1: currentAccount }));
     }
     writeProfile("standard", {
       ...profile,
-      name: profile.name || "Standard",
+      name: profile.name || portalMessage("portal.default", "Default"),
       account: currentAccount,
     });
     state.actionPlan = {
       ok: true,
       type: "profile",
       context: targetView,
-      title: "Standard-Backup geladen",
-      message: `${profile.dids.length} Rufnummer${profile.dids.length === 1 ? "" : "n"} aus ${file.name} geladen. Der Wiederherstellungsplan wird jetzt geprueft.`,
-      profileName: "Standard",
+      title: portalMessage("portal.defaultBackupLoaded", "Default backup loaded"),
+      message: portalMessage("portal.valueNumbersLoadedFromValueTheRestorationPlanIs", "{p0} numbers loaded from {p2}. The restoration plan is now being checked.", { p0: profile.dids.length, p1: profile.dids.length === 1 ? "" : "n", p2: file.name }),
+      profileName: portalMessage("portal.default", "Default"),
       changeCount: 0,
       changes: [],
       createdAt: new Date().toISOString(),
@@ -7486,9 +8607,9 @@ async function importStandardProfileFile(file, targetView = "changes") {
       ok: false,
       type: "profile",
       context: targetView,
-      title: "Standard-Backup nicht geladen",
+      title: portalMessage("portal.defaultBackupNotLoaded", "Default backup not loaded"),
       message: error.message,
-      profileName: "Standard",
+      profileName: portalMessage("portal.default", "Default"),
       changeCount: 0,
       changes: [],
       createdAt: new Date().toISOString(),
@@ -7498,12 +8619,14 @@ async function importStandardProfileFile(file, targetView = "changes") {
 }
 
 async function stageProfilePlan(profileName, changes, emptyMessage, targetView = "changes") {
+  const writeContext = state.overview?.settings?.writeContext;
+  const payload = clone({ profileName, changes, commit: false });
   if (!changes.length) {
     state.actionPlan = {
       ok: true,
       type: "profile",
       context: targetView,
-      title: "Keine Änderung nötig",
+      title: portalMessage("portal.noChangeNeeded", "No change needed"),
       message: emptyMessage,
       profileName,
       changeCount: 0,
@@ -7518,27 +8641,31 @@ async function stageProfilePlan(profileName, changes, emptyMessage, targetView =
     ok: true,
     type: "profile",
     context: targetView,
-    title: `${profileName} wird geprüft`,
-    message: "Portal API baut die technische Vorschau.",
+    title: portalMessage("portal.checkingValue", "Checking {p0}", { p0: profileName }),
+    message: portalMessage("portal.server.thePortalApiIsPreparingTheTechnicalPreview", "The Portal API is preparing the technical preview."),
     profileName,
     changeCount: changes.length,
     changes: [],
     createdAt: new Date().toISOString(),
   };
+  const pendingPlan = state.actionPlan;
+  const current = () => state.actionPlan === pendingPlan && isCurrentWriteContext(writeContext);
   presentActionPlan(targetView);
 
   try {
     const result = await fetchJson("/api/callflow/bulk-apply", {
-      method: "POST",
-      body: JSON.stringify({ profileName, changes, commit: false }),
+      method: "POST", writeContext,
+      body: JSON.stringify(payload),
     });
-    state.actionPlan = { ...result, context: targetView };
+    if (!current()) return;
+    state.actionPlan = { ...result, context: targetView, writeContext };
   } catch (error) {
+    if (!current()) return;
     state.actionPlan = {
       ok: false,
       type: "profile",
       context: targetView,
-      title: "Profil-Prüfung fehlgeschlagen",
+      title: portalMessage("portal.profileCheckFailed", "Profile check failed"),
       message: error.message,
       profileName,
       changeCount: changes.length,
@@ -7556,9 +8683,9 @@ async function stageNightProfile(targetView = "changes") {
       ok: false,
       type: "profile",
       context: targetView,
-      title: "Kein Nachtziel verfügbar",
-      message: "Es wurde kein vorhandenes Portal-Ziel gefunden.",
-      profileName: "Nachtmodus",
+      title: portalMessage("portal.noNightTargetAvailable", "No night target available"),
+      message: portalMessage("portal.noExistingPortalTargetWasFound", "No existing Portal target was found."),
+      profileName: portalMessage("portal.nightMode", "Night mode"),
       changeCount: 0,
       changes: [],
       createdAt: new Date().toISOString(),
@@ -7568,9 +8695,9 @@ async function stageNightProfile(targetView = "changes") {
   }
 
   await stageProfilePlan(
-    "Nachtmodus",
+    portalMessage("portal.nightMode", "Night mode"),
     buildChangesToTarget(target),
-    "Alle Rufnummern führen bereits zum gewählten Nachtziel.",
+    portalMessage("portal.allNumbersAlreadyRouteToTheSelectedNightTarget", "All numbers already route to the selected night target."),
     targetView,
   );
 }
@@ -7582,9 +8709,9 @@ async function stageStandardProfile(targetView = "changes") {
       ok: false,
       type: "profile",
       context: targetView,
-      title: "Kein Standard-Profil",
-      message: "Speichere zuerst den aktuellen Standard.",
-      profileName: "Standard",
+      title: portalMessage("portal.noDefaultProfile", "No default profile"),
+      message: portalMessage("portal.saveTheCurrentDefaultFirst", "Save the current default first."),
+      profileName: portalMessage("portal.default", "Default"),
       changeCount: 0,
       changes: [],
       createdAt: new Date().toISOString(),
@@ -7594,79 +8721,105 @@ async function stageStandardProfile(targetView = "changes") {
   }
 
   await stageProfilePlan(
-    "Standard",
+    portalMessage("portal.default", "Default"),
     buildChangesFromProfile(profile),
-    "Das aktuelle Routing entspricht bereits dem gespeicherten Standard.",
+    portalMessage("portal.theCurrentRoutingAlreadyMatchesTheSavedDefault", "The current routing already matches the saved default."),
     targetView,
   );
 }
 
 async function previewDaynightGateway(options = {}) {
+  const writeContext = state.overview?.settings?.writeContext;
+  const nightTarget = clone(selectedProfileTarget());
   if (!options.preserveFeedback) {
     state.daynightOperationFeedback = null;
   }
   state.daynightGatewayLoading = true;
   state.daynightGatewayPreview = {
     readOnly: true,
-    title: "Zeitsteuerungs-Plan wird geprüft",
-    message: "Portal API wird nur gelesen. Es werden keine Änderungen geschrieben.",
+    title: portalMessage("portal.checkingTimeControlPlan", "Checking time-control plan"),
+    message: portalMessage("portal.thePortalApiIsReadOnlyNoChangesAre", "The Portal API is read only. No changes are written."),
     summary: { total: 0, ready: 0, blocked: 0, frontdesk: 0 },
     entries: [],
   };
+  let activePreview = state.daynightGatewayPreview;
+  const current = () => state.daynightGatewayPreview === activePreview && isCurrentWriteContext(writeContext);
   renderFlowProfileActions();
   renderDaynightGatewayPreview();
   try {
-    state.daynightGatewayPreview = await fetchJson("/api/daynight/gateway-preview", {
-      method: "POST",
-      body: JSON.stringify({ nightTarget: selectedProfileTarget() }),
+    const result = await fetchJson("/api/daynight/gateway-preview", {
+      method: "POST", writeContext,
+      body: JSON.stringify({ nightTarget }),
     });
+    if (!current()) return;
+    state.daynightGatewayPreview = activePreview = { ...result, writeContext, nightTarget };
   } catch (error) {
-    state.daynightGatewayPreview = {
+    if (!current()) return;
+    state.daynightGatewayPreview = activePreview = {
       ok: false,
       readOnly: true,
-      title: "Zeitsteuerungs-Check fehlgeschlagen",
+      title: portalMessage("portal.timeControlCheckFailed", "Time-control check failed"),
       message: error.message,
       summary: { total: 0, ready: 0, blocked: 0, frontdesk: 0 },
       entries: [],
       blockers: [error.message],
     };
   } finally {
-    state.daynightGatewayLoading = false;
-    renderFlowProfileActions();
-    renderDaynightGatewayPreview();
+    if (current()) {
+      state.daynightGatewayLoading = false;
+      renderFlowProfileActions();
+      renderDaynightGatewayPreview();
+    }
   }
 }
 
-async function applyDaynightGateways() {
+async function applyDaynightGateways(options = {}) {
   if (!state.daynightGatewayPreview?.ok || state.daynightGatewayApplyLoading) return;
-  if (!liveWritesEnabled()) {
+  if (!liveApplyPermitted()) {
     state.daynightGatewayPreview = {
       ...state.daynightGatewayPreview,
       ok: false,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightGatewayPreview();
     return;
   }
+  const writeContext = state.daynightGatewayPreview?.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return false;
+  const preparedPreview = state.daynightGatewayPreview;
+  const preparedNightTarget = clone(preparedPreview.nightTarget);
+  if (!options.skipConfirm && !await confirmUi({
+    title: portalMessage("portal.writingTimeControls_d08ea", "Writing time controls"),
+    message: portalMessage("portal.confirmDaynightCreate", "Apply the planned changes?\n{names}", { names: (state.daynightGatewayPreview.entries.map(entry => entry.gateway.name)).join("\n") }),
+  })) return false;
+  if (state.daynightGatewayPreview !== preparedPreview || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return false;
   state.daynightGatewayApplyLoading = true;
   state.daynightGatewayPreview = {
     ...state.daynightGatewayPreview,
-    title: "Zeitsteuerungen werden geschrieben",
-    message: "Portal API legt fehlende Zeitsteuerungen an und aktualisiert vorhandene Zeitsteuerungen auf das Nachtziel. Rufnummern bleiben unverändert.",
+    title: portalMessage("portal.writingTimeControls_d08ea", "Writing time controls"),
+    message: portalMessage("portal.thePortalApiCreatesMissingTimeControlsAndUpdates", "The Portal API creates missing time controls and updates existing time controls to the night target. Numbers remain unchanged."),
   };
   renderDaynightGatewayPreview();
   try {
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current) || !current()) return false;
     const result = await fetchJson("/api/daynight/gateways/apply", {
-      method: "POST",
-      body: JSON.stringify({ nightTarget: selectedProfileTarget() }),
+      method: "POST", writeContext,
+      body: JSON.stringify({ nightTarget: preparedNightTarget }),
     });
-    state.daynightGatewayPreview = result;
-    setDaynightOperationFeedback(result, "Zeitsteuerungen geschrieben");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    state.daynightGatewayPreview = { ...result, writeContext };
+    setDaynightOperationFeedback(result, portalMessage("portal.timeControlsWritten", "Time controls written"));
+    if (result.ok === false) return false;
     await loadOverview();
+    if (!isCurrentWriteContext(writeContext) || state.error) return false;
     await previewDaynightGateway({ preserveFeedback: true });
+    return isCurrentWriteContext(writeContext) && daynightActivationReady();
   } catch (error) {
-    await refreshDaynightAfterLiveError(error, "Zeitsteuerungs-Anlage fehlgeschlagen");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    await refreshDaynightAfterLiveError(error, portalMessage("portal.creatingTimeControlsFailed", "Creating time controls failed"));
+    return false;
   } finally {
     state.daynightGatewayApplyLoading = false;
     renderFlowProfileActions();
@@ -7677,40 +8830,48 @@ async function applyDaynightGateways() {
 async function cleanupDaynightTimeControls() {
   if (!state.daynightGatewayPreview || state.daynightGatewayCleanupLoading) return;
   const count = state.daynightGatewayPreview?.summary?.cleanupCandidates || state.daynightGatewayPreview?.staleTimeControls?.length || 0;
-  const managedGatewayCount = state.daynightGatewayPreview?.summary?.gatewaysExisting || 0;
-  if (!count && managedGatewayCount > 0) {
-    resetDaynightTimeControls();
-    return;
-  }
   if (!count) return;
-  if (!liveWritesEnabled()) {
+  if (!liveApplyPermitted()) {
     state.daynightGatewayPreview = {
       ...state.daynightGatewayPreview,
       ok: false,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightGatewayPreview();
     return;
   }
+  const writeContext = state.daynightGatewayPreview?.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return false;
+  const preparedPreview = state.daynightGatewayPreview;
+  const preparedNightTarget = clone(preparedPreview.nightTarget);
+  if (!await confirmUi({
+    title: portalMessage("portal.cleaningUpTimeControls", "Cleaning up time controls"),
+    message: portalMessage("portal.confirmDaynightCleanup", "Apply the planned changes?\n{names}", { names: (state.daynightGatewayPreview.staleTimeControls.map(item => item.name)).join("\n") }),
+  })) return false;
+  if (state.daynightGatewayPreview !== preparedPreview || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return false;
   state.daynightGatewayCleanupLoading = true;
   state.daynightGatewayPreview = {
     ...state.daynightGatewayPreview,
-    title: "Zeitsteuerungen werden bereinigt",
-    message: "Portal API löscht nur alte Nachtschaltungs-Zeitsteuerungen nach Namenskonvention.",
+    title: portalMessage("portal.cleaningUpTimeControls", "Cleaning up time controls"),
+    message: portalMessage("portal.thePortalApiDeletesOnlyOldNightRoutingTime", "The Portal API deletes only old night-routing time controls matching the naming convention."),
   };
   renderDaynightGatewayPreview();
   try {
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current) || !current()) return false;
     const result = await fetchJson("/api/daynight/time-controls/cleanup", {
-      method: "POST",
-      body: JSON.stringify({ nightTarget: selectedProfileTarget() }),
+      method: "POST", writeContext,
+      body: JSON.stringify({ nightTarget: preparedNightTarget }),
     });
-    state.daynightGatewayPreview = result;
-    setDaynightOperationFeedback(result, "Zeitsteuerungen bereinigt");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    state.daynightGatewayPreview = { ...result, writeContext };
+    setDaynightOperationFeedback(result, portalMessage("portal.timeControlsCleanedUp", "Time controls cleaned up"));
     await loadOverview();
     await previewDaynightGateway({ preserveFeedback: true });
   } catch (error) {
-    await refreshDaynightAfterLiveError(error, "Cleanup fehlgeschlagen");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    await refreshDaynightAfterLiveError(error, portalMessage("portal.cleanupFailed", "Cleanup failed"));
   } finally {
     state.daynightGatewayCleanupLoading = false;
     renderFlowProfileActions();
@@ -7726,27 +8887,38 @@ async function resetDaynightTimeControls(options = {}) {
   if (!state.daynightGatewayPreview) return false;
   const count = state.daynightGatewayPreview?.summary?.gatewaysExisting || 0;
   if (!count) return false;
-  if (!portalLiveWritesEnabled()) {
+  if (!portalApplyPermitted()) {
     state.daynightGatewayPreview = {
       ...state.daynightGatewayPreview,
       ok: false,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightGatewayPreview();
     return false;
   }
+  const writeContext = state.daynightGatewayPreview?.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return false;
+  const preparedPreview = state.daynightGatewayPreview;
+  if (!await confirmUi({
+    title: portalMessage("portal.resetNightRouting", "Reset night routing"),
+    message: portalMessage("portal.confirmDaynightReset", "Restore day targets and delete these time controls?\n{names}", { names: state.daynightGatewayPreview.entries.map(entry => `${entry.did.name} · ${entry.gateway.name}`).join("\n") }),
+  })) return false;
+  if (state.daynightGatewayPreview !== preparedPreview || !isCurrentWriteContext(writeContext) || !portalApplyPermitted()) return false;
   state.daynightGatewayResetLoading = true;
   state.daynightGatewayPreview = {
     ...state.daynightGatewayPreview,
-    title: "Nachtschaltung wird zurückgesetzt",
-    message: "Portal API stellt betroffene Rufnummern zurück und löscht danach die verwalteten TN-Zeitsteuerungen.",
+    title: portalMessage("portal.resettingNightRouting", "Resetting night routing"),
+    message: portalMessage("portal.thePortalApiRestoresAffectedNumbersAndThenDeletes", "The Portal API restores affected numbers and then deletes the managed TN time controls."),
   };
   renderDaynightGatewayPreview();
   try {
-    const result = await fetchJson("/api/daynight/reset", { method: "POST", body: JSON.stringify({}) });
-    state.daynightGatewayPreview = result;
-    setDaynightOperationFeedback(result, "Nachtschaltung zurückgesetzt");
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current, { allowNightMode: true }) || !current()) return false;
+    const result = await fetchJson("/api/daynight/reset", { method: "POST", writeContext, body: JSON.stringify({}) });
+    if (!isCurrentWriteContext(writeContext)) return false;
+    state.daynightGatewayPreview = { ...result, writeContext };
+    setDaynightOperationFeedback(result, portalMessage("portal.nightRoutingReset", "Night routing reset"));
     if (options.fromHeaderSwitch || state.daynightActive) {
       setDaynightActive(false, "day");
     }
@@ -7754,7 +8926,8 @@ async function resetDaynightTimeControls(options = {}) {
     await previewDaynightGateway({ preserveFeedback: true });
     return true;
   } catch (error) {
-    await refreshDaynightAfterLiveError(error, "Reset fehlgeschlagen");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    await refreshDaynightAfterLiveError(error, portalMessage("portal.resetFailed", "Reset failed"));
     return false;
   } finally {
     state.daynightGatewayResetLoading = false;
@@ -7768,42 +8941,55 @@ async function restoreDaynightRouting(options = {}) {
   if (!state.daynightGatewayPreview && options.fromHeaderSwitch) {
     await previewDaynightGateway({ preserveFeedback: true });
   }
-  if (!portalLiveWritesEnabled()) {
+  if (!portalApplyPermitted()) {
     state.daynightModeModal = {
       mode: "error",
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightModeModal();
     return false;
   }
+  if (!state.daynightGatewayPreview?.entries?.length) return false;
+  const writeContext = state.daynightGatewayPreview?.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return false;
+  const preparedPreview = state.daynightGatewayPreview;
+  if (!options.skipConfirm && !await confirmUi({
+    title: portalMessage("portal.restoreDayMode", "Restore day mode"),
+    message: portalMessage("portal.confirmDaynightRestore", "Apply the planned changes?\n{names}", { names: state.daynightGatewayPreview.entries.filter(entry => entry.routingActive).map(entry => entry.did.name).join("\n") }),
+  })) return false;
+  if (state.daynightGatewayPreview !== preparedPreview || !isCurrentWriteContext(writeContext) || !portalApplyPermitted()) return false;
   state.daynightGatewayResetLoading = true;
   state.daynightModeSwitchLoading = true;
   state.daynightModeModal = {
     mode: "loading",
-    title: "Bitte warten",
-    message: "Der Tagmodus wird wiederhergestellt. Die vorbereiteten Zeitsteuerungen bleiben erhalten.",
+    title: portalMessage("portal.server.pleaseWait", "Please wait"),
+    message: portalMessage("portal.dayModeIsBeingRestoredThePreparedTimeControls", "Day mode is being restored. The prepared time controls are retained."),
     busy: true,
   };
   renderDaynightModeModal();
   updateDaynightHeaderButton();
   try {
-    const result = await fetchJson("/api/daynight/restore", { method: "POST", body: JSON.stringify({}) });
-    state.daynightGatewayPreview = result;
-    setDaynightOperationFeedback(result, "Tagmodus aktiviert");
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current, { allowNightMode: true }) || !current()) return false;
+    const result = await fetchJson("/api/daynight/restore", { method: "POST", writeContext, body: JSON.stringify({}) });
+    if (!isCurrentWriteContext(writeContext)) return false;
+    state.daynightGatewayPreview = { ...result, writeContext };
+    setDaynightOperationFeedback(result, portalMessage("portal.dayModeActivated", "Day mode activated"));
     if (result.ok !== false) {
       state.daynightActive = false;
-      localStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, "0");
-      state.daynightModeModal = "day";
+      portalStorage.setItem(DAYNIGHT_ACTIVE_STORAGE_KEY, "0");
+      state.daynightModeModal = { mode: "day", restoredRoutings: result.restoredRoutings || 0, message: portalMessage("portal.valueNumbersRestored", "Numbers restored: {p0}", { p0: result.restoredRoutings || 0 }) };
     }
     await loadOverview();
     await previewDaynightGateway({ preserveFeedback: true });
     return result.ok !== false;
   } catch (error) {
-    await refreshDaynightAfterLiveError(error, "Tagmodus fehlgeschlagen");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    await refreshDaynightAfterLiveError(error, portalMessage("portal.activatingDayModeFailed", "Activating day mode failed"));
     state.daynightModeModal = {
       mode: "error",
-      message: error.message || "Der Tagmodus konnte nicht wiederhergestellt werden.",
+      message: error.message || portalMessage("portal.dayModeCouldNotBeRestored", "Day mode could not be restored."),
     };
     return false;
   } finally {
@@ -7818,23 +9004,32 @@ async function restoreDaynightRouting(options = {}) {
 
 async function applyDaynightGatewayRouting(options = {}) {
   if (!state.daynightGatewayPreview?.ok || state.daynightGatewayRoutingLoading || state.daynightActive) return false;
-  if (!portalLiveWritesEnabled()) {
+  if (!liveApplyPermitted()) {
     state.daynightGatewayPreview = {
       ...state.daynightGatewayPreview,
       ok: false,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightGatewayPreview();
     return false;
   }
+  const writeContext = state.daynightGatewayPreview?.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return false;
+  const preparedPreview = state.daynightGatewayPreview;
+  const preparedNightTarget = clone(preparedPreview.nightTarget);
+  if (!options.skipConfirm && !await confirmUi({
+    title: portalMessage("portal.activateNightMode_5e185", "Activate night mode"),
+    message: portalMessage("portal.confirmNightDestination", "Route these numbers to {target}?\n{names}", { target: selectedProfileTarget()?.title || selectedProfileTarget()?.href || "—", names: state.daynightGatewayPreview.entries.map(entry => entry.did.name).join("\n") }),
+  })) return false;
+  if (state.daynightGatewayPreview !== preparedPreview || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return false;
   state.daynightGatewayRoutingLoading = true;
   if (options.fromHeaderSwitch) {
     state.daynightModeSwitchLoading = true;
     state.daynightModeModal = {
       mode: "loading",
-      title: "Bitte warten",
-      message: "Der Nachtmodus wird aktiviert. Die Portal API hängt Rufnummern auf die vorbereiteten Zeitsteuerungen.",
+      title: portalMessage("portal.server.pleaseWait", "Please wait"),
+      message: portalMessage("portal.nightModeIsBeingActivatedThePortalApiReassigns", "Night mode is being activated. The Portal API reassigns numbers to the prepared time controls."),
       busy: true,
     };
     renderDaynightModeModal();
@@ -7842,24 +9037,28 @@ async function applyDaynightGatewayRouting(options = {}) {
   }
   state.daynightGatewayPreview = {
     ...state.daynightGatewayPreview,
-    title: "Rufnummern werden umgehängt",
-    message: "Portal API entfernt die bisherigen DID-Zuordnungen und hängt sie an die vorbereiteten Zeitsteuerungen. Bei Fehlern wird ein Rollback versucht.",
+    title: portalMessage("portal.reassigningNumbers_6e7b0", "Reassigning numbers"),
+    message: portalMessage("portal.thePortalApiRemovesThePreviousDidAssignmentsAnd", "The Portal API removes the previous DID assignments and reassigns them to the prepared time controls. A rollback is attempted if an error occurs."),
   };
   renderDaynightGatewayPreview();
   try {
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current) || !current()) return false;
     const result = await fetchJson("/api/daynight/gateway-routing/apply", {
-      method: "POST",
-      body: JSON.stringify({ nightTarget: selectedProfileTarget() }),
+      method: "POST", writeContext,
+      body: JSON.stringify({ nightTarget: preparedNightTarget }),
     });
-    state.daynightGatewayPreview = result;
-    setDaynightOperationFeedback(result, "Rufnummern umgehängt");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    state.daynightGatewayPreview = { ...result, writeContext };
+    setDaynightOperationFeedback(result, portalMessage("portal.numbersReassigned", "Numbers reassigned"));
     if (result.ok !== false) {
       setDaynightActive(true, "night");
     }
     await loadOverview();
     return result.ok !== false;
   } catch (error) {
-    await refreshDaynightAfterLiveError(error, "Rufnummern-Migration fehlgeschlagen");
+    if (!isCurrentWriteContext(writeContext)) return false;
+    await refreshDaynightAfterLiveError(error, portalMessage("portal.numberMigrationFailed", "Number migration failed"));
     return false;
   } finally {
     state.daynightGatewayRoutingLoading = false;
@@ -7871,16 +9070,111 @@ async function applyDaynightGatewayRouting(options = {}) {
   }
 }
 
+async function prepareAndActivateNightMode() {
+  if (state.daynightSetupLoading || state.daynightModeSwitchLoading || state.daynightGatewayApplyLoading || state.daynightGatewayRoutingLoading || state.daynightGatewayResetLoading) return false;
+  if (state.daynightActive) return true;
+  const writeContext = state.overview?.settings?.writeContext;
+  const target = clone(selectedProfileTarget());
+  let selectedValue = state.profileTargetValue;
+  // Reloaded options include hydrated labels/config; only the destination identity
+  // determines whether this is still the selection that started the operation.
+  const targetIdentity = (value) => {
+    try {
+      const item = JSON.parse(value);
+      return JSON.stringify([normalizeTargetType(item.type), String(item.routeNumber || item.targetNumber || item.number || item.href || "")]);
+    } catch { return value; }
+  };
+  const current = () => Boolean(writeContext) && isCurrentWriteContext(writeContext) && targetIdentity(state.profileTargetValue) === targetIdentity(selectedValue);
+  const fail = () => { throw new Error(state.daynightOperationFeedback?.ok === false
+    ? state.daynightOperationFeedback.message
+    : state.daynightGatewayPreview?.message || portalMessage("portal.nightSetupFailed", "Night mode setup failed")); };
+  state.daynightSetupLoading = true;
+  state.daynightModeSwitchLoading = true;
+  state.daynightOperationFeedback = null;
+  state.daynightModeModal = {
+    mode: "loading", busy: true,
+    title: portalMessage("portal.settingUpNightMode", "Setting up night mode"),
+    message: portalMessage("portal.nightSetupDescription", "Save day routing, prepare time controls and activate night mode."),
+  };
+  renderDaynightModeModal();
+  renderDaynightGatewayPreview();
+  try {
+    if (!daynightSetupPermitted()) throw new Error(liveWritesDisabledText());
+    if (!target) throw new Error(portalMessage("portal.noTargetSelected", "No target selected"));
+    if (!current()) return false;
+    await loadOverview();
+    if (!current()) return false;
+    if (state.error) throw new Error(state.error);
+    if (state.daynightActive) { state.daynightModeModal = "night"; return true; }
+    if (!daynightSetupPermitted()) throw new Error(liveWritesDisabledText());
+    if (!portalLiveWritesEnabled()) {
+      // The explicit setup click opts this session into its requested live changes.
+      const result = await fetchJson("/api/settings/live-writes", { method: "POST", writeContext, body: JSON.stringify({ enabled: true }) });
+      if (!current()) return false;
+      if (result.ok === false || result.settings?.writeContext !== writeContext) throw new Error(result.message || liveWritesDisabledText());
+      state.overview.settings = result.settings;
+      if (!portalLiveWritesEnabled()) throw new Error(liveWritesDisabledText());
+    }
+    if (!readProfile("standard")) writeProfile("standard", buildProfileSnapshot(portalMessage("portal.default", "Default")));
+
+    // A new announcement target is part of the same explicit setup action.
+    if (normalizeTargetType(target.type) === "NEW_NIGHT_TARGET") {
+      if (state.daynightAnnouncementSource !== "existing") throw new Error(portalMessage("portal.useAnExistingAnnouncementUntilThen", "Use an existing announcement until then."));
+      const payload = clone(daynightAnnouncementPayload());
+      const plan = await fetchJson("/api/daynight/announcement-target/plan", { method: "POST", writeContext, body: JSON.stringify(payload) });
+      if (!current()) return false;
+      if (!plan.ok) throw new Error(plan.message || portalMessage("portal.announcementTargetCannotBeChecked", "Announcement target cannot be checked"));
+      const result = await fetchJson("/api/daynight/announcement-target/apply", { method: "POST", writeContext, body: JSON.stringify(payload) });
+      if (!current()) return false;
+      if (result.ok === false || !result.option?.value) throw new Error(result.message || portalMessage("portal.announcementTargetNotCreated", "Announcement target not created"));
+      state.profileTargetValue = selectedValue = result.option.value;
+      state.daynightUseAnnouncement = false;
+      await loadOverview();
+      if (!current()) return false;
+      if (state.error) throw new Error(state.error);
+    }
+
+    await previewDaynightGateway();
+    if (!current()) return false;
+    if (!state.daynightGatewayPreview?.ok) fail();
+    const summary = state.daynightGatewayPreview.summary || {};
+    if (summary.gatewaysToCreate || summary.gatewaysToUpdate) {
+      const prepared = await applyDaynightGateways({ skipConfirm: true });
+      if (!current()) return false;
+      if (!prepared) fail();
+    }
+    if (!daynightActivationReady()) fail();
+    const activated = await applyDaynightGatewayRouting({ skipConfirm: true });
+    if (!current()) return false;
+    if (!activated) fail();
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    state.daynightModeModal = {
+      mode: "error", title: portalMessage("portal.nightSetupFailed", "Night mode setup failed"), message: error.message,
+    };
+    return false;
+  } finally {
+    state.daynightSetupLoading = false;
+    state.daynightModeSwitchLoading = false;
+    if (!current() && state.daynightModeModal?.busy) state.daynightModeModal = null;
+    renderFlowProfileActions();
+    renderDaynightGatewayPreview();
+    renderDaynightModeModal();
+    updateDaynightHeaderButton();
+  }
+}
+
 async function toggleDaynightMode(nextActive) {
-  if (state.daynightModeSwitchLoading) return;
+  if (state.daynightSetupLoading || state.daynightModeSwitchLoading) return;
   if (nextActive === state.daynightActive) {
     updateDaynightHeaderButton();
     return;
   }
-  if (!portalLiveWritesEnabled()) {
+  if (!portalApplyPermitted()) {
     state.daynightModeModal = {
       mode: "setup",
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
     };
     renderDaynightModeModal();
@@ -7892,8 +9186,8 @@ async function toggleDaynightMode(nextActive) {
       state.daynightModeSwitchLoading = true;
       state.daynightModeModal = {
         mode: "loading",
-        title: "Bitte warten",
-        message: "Ich prüfe, ob die Nachtschaltung vollständig vorbereitet ist.",
+        title: portalMessage("portal.server.pleaseWait", "Please wait"),
+        message: portalMessage("portal.checkingWhetherNightRoutingIsFullyPrepared", "Checking whether night routing is fully prepared."),
         busy: true,
       };
       renderDaynightModeModal();
@@ -7907,7 +9201,11 @@ async function toggleDaynightMode(nextActive) {
     if (!daynightActivationReady()) {
       state.daynightModeModal = {
         mode: "setup",
-        message: "Die Nachtschaltung ist noch nicht vollständig vorbereitet. Bitte in Setup Standard sichern und den Zeitsteuerungs-Plan abschließen.",
+        message: portalMessage("portal.nightSetupDescription", "Save day routing, prepare time controls and activate night mode."),
+        actions: [
+          { action: "close", label: portalMessage("portal.cancel", "Cancel") },
+          { action: "prepare-night", label: portalMessage("portal.setUpAndActivateNightMode", "Set up and activate night mode"), kind: "primary" },
+        ],
       };
       renderDaynightModeModal();
       updateDaynightHeaderButton();
@@ -7916,11 +9214,11 @@ async function toggleDaynightMode(nextActive) {
     state.daynightModeModal = {
       mode: "confirm-night",
       symbol: "N",
-      title: "Nachtmodus aktivieren?",
-      message: "Rufnummern werden auf die vorbereiteten Zeitsteuerungen umgehängt. Danach sind Live-Änderungen in der App gesperrt.",
+      title: portalMessage("portal.activateNightMode", "Activate night mode?"),
+      message: portalMessage("portal.numbersWillBeReassignedToThePreparedTimeControls", "Numbers will be reassigned to the prepared time controls. Live changes in the app will then be locked."),
       actions: [
-        { action: "close", label: "Abbrechen" },
-        { action: "activate-night", label: "Nachtmodus aktivieren", kind: "primary" },
+        { action: "close", label: portalMessage("portal.cancel", "Cancel") },
+        { action: "activate-night", label: portalMessage("portal.activateNightMode_5e185", "Activate night mode"), kind: "primary" },
       ],
     };
     renderDaynightModeModal();
@@ -7928,11 +9226,11 @@ async function toggleDaynightMode(nextActive) {
     state.daynightModeModal = {
       mode: "confirm-day",
       symbol: "T",
-      title: "Tagmodus aktivieren?",
-      message: "Rufnummern werden auf die gespeicherten Tagesziele zurückgestellt. Die vorbereiteten Zeitsteuerungen bleiben für den nächsten Nachtmodus erhalten.",
+      title: portalMessage("portal.activateDayMode", "Activate day mode?"),
+      message: portalMessage("portal.numbersWillBeRestoredToTheirSavedDayTargets", "Numbers will be restored to their saved day targets. Prepared time controls remain available for the next night mode."),
       actions: [
-        { action: "close", label: "Abbrechen" },
-        { action: "activate-day", label: "Tagmodus aktivieren", kind: "primary" },
+        { action: "close", label: portalMessage("portal.cancel", "Cancel") },
+        { action: "activate-day", label: portalMessage("portal.activateDayMode_b0e48", "Activate day mode"), kind: "primary" },
       ],
     };
     renderDaynightModeModal();
@@ -7944,7 +9242,7 @@ function daynightAnnouncementPayload() {
   return {
     announcementName: state.daynightAnnouncementName || selectedAnnouncementName(),
     afterTarget: parseTargetField(state.daynightAnnouncementAfterValue || selectedAnnouncementAfterValue()),
-    displayName: state.daynightAnnouncementDisplayName || `Nachtansage ${state.daynightAnnouncementName || selectedAnnouncementName()}`,
+    displayName: daynightAnnouncementDisplayName(state.daynightAnnouncementName || selectedAnnouncementName()),
   };
 }
 
@@ -7968,7 +9266,7 @@ async function planDaynightAnnouncementTarget() {
     state.daynightGatewayPreview = {
       ...(state.daynightGatewayPreview || {}),
       ok: false,
-      title: "Ansage-Ziel nicht prüfbar",
+      title: portalMessage("portal.announcementTargetCannotBeChecked", "Announcement target cannot be checked"),
       message: error.message,
       blockers: [error.message],
     };
@@ -7979,55 +9277,68 @@ async function planDaynightAnnouncementTarget() {
 }
 
 async function applyDaynightAnnouncementTarget() {
-  if (!liveWritesEnabled()) return;
+  if (!liveApplyPermitted()) return;
   const payload = daynightAnnouncementPayload();
+  const writeContext = state.overview?.settings?.writeContext;
   const confirmed = await confirmUi({
-    title: "Ansage-Ziel anlegen",
-    message: `Ansage-Ziel "${payload.displayName}" live als Sprachdialog anlegen? Rufnummern und Zeitsteuerungen werden dabei nicht verändert.`,
-    confirmLabel: "Anlegen",
+    title: portalMessage("portal.createAnnouncementTarget", "Create announcement target"),
+    message: portalMessage("portal.createAnnouncementTargetValueAsALiveVoiceDialog", "Create announcement target \"{p0}\" as a live voice dialog? Numbers and time controls remain unchanged.", { p0: payload.displayName }),
+    confirmLabel: portalMessage("portal.create", "Create"),
   });
-  if (!confirmed) return;
-  const progress = showUiProgress({ title: "Ansage-Ziel wird angelegt", message: "Portal API erstellt den Sprachdialog." });
+  if (!confirmed || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return;
+  const progress = showUiProgress({ title: portalMessage("portal.creatingAnnouncementTarget", "Creating announcement target"), message: portalMessage("portal.server.thePortalApiIsCreatingTheVoiceDialog", "The Portal API is creating the voice dialog.") });
   state.daynightAnnouncementLoading = true;
   renderDaynightGatewayPreview();
   try {
+    const current = () => isCurrentWriteContext(writeContext);
+    if (!await enableActionWrites(writeContext, current) || !current()) { progress.close(); return; }
     const result = await fetchJson("/api/daynight/announcement-target/apply", {
-      method: "POST",
+      method: "POST", writeContext,
       body: JSON.stringify(payload),
     });
+    if (!isCurrentWriteContext(writeContext)) return;
     if (result.option?.value) {
       state.profileTargetValue = result.option.value;
       state.daynightGatewayPreview = null;
       state.daynightUseAnnouncement = false;
     }
     await loadOverview();
-    progress.success({ title: "Ansage-Ziel angelegt", message: "Das neue Nachtziel wurde live erstellt." });
+    if (!isCurrentWriteContext(writeContext)) return;
+    progress.success({ title: portalMessage("portal.announcementTargetCreated", "Announcement target created"), message: portalMessage("portal.theNewNightTargetWasCreatedLive", "The new night target was created live.") });
   } catch (error) {
+    if (!isCurrentWriteContext(writeContext)) return;
     state.daynightGatewayPreview = {
       ...(state.daynightGatewayPreview || {}),
       ok: false,
-      title: "Ansage-Ziel nicht angelegt",
+      title: portalMessage("portal.announcementTargetNotCreated", "Announcement target not created"),
       message: error.message,
       blockers: [error.message],
     };
-    progress.error({ title: "Ansage-Ziel nicht angelegt", message: error.message });
+    progress.error({ title: portalMessage("portal.announcementTargetNotCreated", "Announcement target not created"), message: error.message });
   } finally {
-    state.daynightAnnouncementLoading = false;
-    renderFlowProfileActions();
-    renderDaynightGatewayPreview();
+    if (isCurrentWriteContext(writeContext)) {
+      state.daynightAnnouncementLoading = false;
+      renderFlowProfileActions();
+      renderDaynightGatewayPreview();
+    }
   }
 }
 
 async function applyFlowPlan() {
-  if (!state.actionPlan?.applyPayload) return;
+  if (state.flowApplying || !state.actionPlan?.applyPayload) return;
+  const preparedPlan = state.actionPlan;
+  const preparedPayload = clone(preparedPlan.applyPayload);
+  const preparedMemberships = clone(flowMembershipChanges(preparedPayload.flow));
+  const preparedWriteContext = preparedPlan.writeContext ?? state.overview?.settings?.writeContext;
+  const current = () => state.actionPlan === preparedPlan && isCurrentWriteContext(preparedWriteContext);
   state.actionPlan.applyAttempted = true;
-  if (!liveWritesEnabled()) {
+  if (!localApplyPermitted()) {
     const context = state.actionPlan.context || state.view;
     state.actionPlan = {
       ...state.actionPlan,
       ok: false,
       blocked: true,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
       applied: false,
       applyAttempted: true,
@@ -8040,24 +9351,36 @@ async function applyFlowPlan() {
     }
     return;
   }
+  state.flowApplying = true;
   const confirmed = await confirmUi({
-    title: "Callflow übernehmen",
-    message: "Diese Änderung wird live an die Portal API gesendet. Fortfahren?",
+    title: portalMessage("portal.applyCallflow", "Apply callflow"),
+    message: STATIC_DEMO_MODE ? portalMessage("portal.demo.localApplyAvailable", "Changes can be applied locally in the demo PBX.") : portalMessage("portal.thisChangeWillBeSentToTheLivePortal", "This change will be sent to the live Portal API. Continue?"),
     confirmLabel: "OK",
   });
-  if (!confirmed) return;
-  const progress = showUiProgress({ title: "Callflow wird übernommen", message: "Portal API schreibt die Änderung." });
+  if (!confirmed || !current() || !localApplyPermitted()) { state.flowApplying = false; return; }
+  const progress = showUiProgress({ title: portalMessage("portal.applyingCallflow", "Applying callflow"), message: (STATIC_DEMO_MODE ? portalMessage("portal.demo.applyingFlow", "Applying callflow locally.") : portalMessage("portal.thePortalApiIsWritingTheChange", "The Portal API is writing the change.")) });
   const context = state.actionPlan.context || state.view;
   const directApply = Boolean(state.actionPlan.directApply);
   const applyAttempted = Boolean(state.actionPlan.applyAttempted);
   const pendingFlow = clone(state.actionPlan.applyPayload?.flow || state.actionPlan.flow || state.flow || {});
   const pendingDid = selectedDid();
+  let membershipsApplied = false;
 
   try {
+    if (!localWritesEnabled()) {
+      // The existing Apply confirmation also authorizes this session's live writes.
+      const result = await fetchJson("/api/settings/live-writes", {
+        method: "POST", writeContext: preparedWriteContext, body: JSON.stringify({ enabled: true }),
+      });
+      if (!current() || !localApplyPermitted()) { progress.close(); return; }
+      if (result.ok === false || result.settings?.writeContext !== preparedWriteContext) throw new Error(result.message || liveWritesDisabledText());
+      state.overview.settings = result.settings;
+      if (!localWritesEnabled()) throw new Error(liveWritesDisabledText());
+    }
     state.actionPlan = {
       ...state.actionPlan,
-      title: "Callflow wird übernommen",
-      message: "Portal API schreibt die Änderung.",
+      title: portalMessage("portal.applyingCallflow", "Applying callflow"),
+      message: (STATIC_DEMO_MODE ? portalMessage("portal.demo.applyingFlow", "Applying callflow locally.") : portalMessage("portal.thePortalApiIsWritingTheChange", "The Portal API is writing the change.")),
       applyAttempted: true,
     };
     if (context === "callflow") {
@@ -8067,52 +9390,80 @@ async function applyFlowPlan() {
       renderActionPlan();
     }
 
+    if (preparedMemberships.services.length) {
+      try {
+        const membershipResult = await fetchJson("/api/service-groups/apply", {
+          method: "POST", writeContext: preparedWriteContext, body: JSON.stringify(preparedMemberships),
+        });
+        if (!isCurrentWriteContext(preparedWriteContext)) { progress.close(); return; }
+        if (membershipResult.ok === false) throw new Error(membershipResult.error || membershipResult.message);
+        recordFlowMembershipReadback(membershipResult.serviceGroups, preparedMemberships.services);
+        membershipsApplied = true;
+      } catch (error) {
+        if (error.body?.completed?.length && isCurrentWriteContext(preparedWriteContext)) {
+          error.message = `${error.message} ${portalMessage("portal.partialMembership", "Completed: {done}. Failed: {failed}. Not attempted: {pending}.", { done: error.body.completed.length, failed: 1, pending: error.body.notAttempted?.length || 0 })}`;
+          try {
+            const groups = await fetchJson("/api/service-groups");
+            if (isCurrentWriteContext(preparedWriteContext)) recordFlowMembershipReadback(groups, preparedMemberships.services);
+          } catch (readbackError) {
+            error.message = `${error.message} ${readbackError.message}`;
+          }
+        }
+        throw error;
+      }
+    }
     const result = await fetchJson("/api/callflow/apply", {
       method: "POST",
-      body: JSON.stringify({ ...state.actionPlan.applyPayload, commit: true }),
+      writeContext: preparedWriteContext,
+      body: JSON.stringify({ ...preparedPayload, commit: true }),
     });
     if (result.ok === false || result.applied === false) {
+      if (membershipsApplied) result.message = `${portalMessage("portal.server.membershipsApplied", "Memberships applied")}. ${result.message || ""}`;
       state.actionPlan = { ...result, context, directApply, applyAttempted };
       if (context === "callflow") {
         state.flowFeedback = {
           ok: false,
-          title: result.title || "Übernahme fehlgeschlagen",
-          message: result.message || "Die Portal API hat die Änderung nicht angenommen.",
+          title: result.title || portalMessage("portal.applyingChangesFailed", "Applying changes failed"),
+          message: result.message || portalMessage("portal.thePortalApiDidNotAcceptTheChange", "The Portal API did not accept the change."),
         };
         renderFlowFeedback();
         renderFlowPlan();
       } else {
         renderActionPlan();
       }
-      progress.error({ title: result.title || "Übernahme fehlgeschlagen", message: result.message || "Die Portal API hat die Änderung nicht angenommen." });
+      progress.error({ title: result.title || portalMessage("portal.applyingChangesFailed", "Applying changes failed"), message: result.message || portalMessage("portal.thePortalApiDidNotAcceptTheChange", "The Portal API did not accept the change.") });
       return;
     }
     saveAppliedFlowSnapshot(result.flow || pendingFlow, result, pendingDid);
     clearCurrentFlowDraft();
     state.actionPlan = { ...result, context, directApply, applyAttempted };
     await loadOverview();
+    if ((pendingFlow.nodes || []).some(node => ["QUEUE", "GROUP", "SKILL"].includes(normalizeTargetType(node.type)) && node.config?.portalMode === "new")) {
+      await loadServiceGroups({ quiet: true });
+    }
     const expectedNoop = isExpectedNoopFlowResult(result);
     state.actionPlan = context === "callflow" && (expectedNoop || directApply) ? null : { ...result, context };
     if (context === "callflow") {
       state.view = "callflow";
       state.flowFeedback = expectedNoop ? null : {
         ok: result.ok !== false,
-        title: "Callflow übernommen",
-        message: result.message || "Die Änderung wurde an die Portal API gesendet.",
+        title: portalMessage("portal.callflowApplied", "Callflow applied"),
+        message: result.message || portalMessage("portal.theChangeWasSentToThePortalApi", "The change was sent to the Portal API."),
       };
       render();
     } else {
       setView("changes");
       renderActionPlan();
     }
-    progress.success({ title: "Callflow übernommen", message: result.message || "Die Änderung wurde an die Portal API gesendet." });
+    progress.success({ title: portalMessage("portal.callflowApplied", "Callflow applied"), message: result.message || portalMessage("portal.theChangeWasSentToThePortalApi", "The change was sent to the Portal API.") });
   } catch (error) {
     state.actionPlan = {
       ...state.actionPlan,
       ok: false,
       context,
-      title: "Übernahme fehlgeschlagen",
-      message: error.message,
+      title: portalMessage("portal.applyingChangesFailed", "Applying changes failed"),
+      message: membershipsApplied ? `${portalMessage("portal.server.membershipsApplied", "Memberships applied")}. ${error.message}` : error.message,
+      membershipOperations: error.body?.completed ? error.body : undefined,
       applied: false,
     };
     if (context === "callflow") {
@@ -8121,7 +9472,9 @@ async function applyFlowPlan() {
     } else {
       renderActionPlan();
     }
-    progress.error({ title: "Übernahme fehlgeschlagen", message: error.message });
+    progress.error({ title: portalMessage("portal.applyingChangesFailed", "Applying changes failed"), message: state.actionPlan.message });
+  } finally {
+    state.flowApplying = false;
   }
 }
 
@@ -8135,13 +9488,17 @@ function isExpectedNoopFlowResult(result) {
 
 async function applyProfilePlan() {
   if (!state.actionPlan?.applyPayload?.changes?.length) return;
-  if (!liveWritesEnabled()) {
+  const preparedPlan = state.actionPlan;
+  const preparedPayload = clone(preparedPlan.applyPayload);
+  const writeContext = preparedPlan.writeContext;
+  if (!isCurrentWriteContext(writeContext)) return;
+  if (!liveApplyPermitted()) {
     const context = state.actionPlan.context || state.view;
     state.actionPlan = {
       ...state.actionPlan,
       ok: false,
       blocked: true,
-      title: "Live-Schreiben deaktiviert",
+      title: portalMessage("portal.liveWritesDisabled", "Live writes disabled"),
       message: liveWritesDisabledText(),
       applied: false,
     };
@@ -8154,20 +9511,23 @@ async function applyProfilePlan() {
     return;
   }
   const confirmed = await confirmUi({
-    title: "Profil übernehmen",
-    message: "Dieses Profil wird live auf mehrere Rufnummern angewendet. Fortfahren?",
-    confirmLabel: "Übernehmen",
+    title: portalMessage("portal.applyProfile", "Apply profile"),
+    message: portalMessage("portal.thisProfileWillBeAppliedLiveToMultipleNumbers", "This profile will be applied live to multiple numbers. Continue?"),
+    confirmLabel: portalMessage("portal.apply", "Apply"),
   });
-  if (!confirmed) return;
-  const progress = showUiProgress({ title: "Profil wird übernommen", message: "Portal API schreibt die Routing-Änderungen nacheinander." });
-  const context = state.actionPlan.context || state.view;
+  if (!confirmed || state.actionPlan !== preparedPlan || !isCurrentWriteContext(writeContext) || !liveApplyPermitted()) return;
+  const progress = showUiProgress({ title: portalMessage("portal.applyingProfile", "Applying profile"), message: portalMessage("portal.thePortalApiIsWritingTheRoutingChangesOne", "The Portal API is writing the routing changes one by one.") });
+  const context = preparedPlan.context || state.view;
+  let activePlan = preparedPlan;
+  const current = () => state.actionPlan === activePlan && isCurrentWriteContext(writeContext);
 
   try {
+    if (!await enableActionWrites(writeContext, current) || !current()) { progress.close(); return; }
     const pendingPlan = state.actionPlan;
-    state.actionPlan = {
+    state.actionPlan = activePlan = {
       ...state.actionPlan,
-      title: `${pendingPlan.profileName || "Profil"} wird übernommen`,
-      message: "Portal API schreibt die Routing-Änderungen nacheinander.",
+      title: portalMessage("portal.applyingValue", "Applying {p0}", { p0: pendingPlan.profileName || "Profil" }),
+      message: portalMessage("portal.thePortalApiIsWritingTheRoutingChangesOne", "The Portal API is writing the routing changes one by one."),
     };
     if (context === "callflow") {
       renderFlowFeedback();
@@ -8177,12 +9537,14 @@ async function applyProfilePlan() {
     }
 
     const result = await fetchJson("/api/callflow/bulk-apply", {
-      method: "POST",
-      body: JSON.stringify({ ...pendingPlan.applyPayload, commit: true }),
+      method: "POST", writeContext,
+      body: JSON.stringify({ ...preparedPayload, commit: true }),
     });
-    state.actionPlan = { ...result, context };
+    if (!current()) return;
+    state.actionPlan = activePlan = { ...result, context };
     await loadOverview();
-    state.actionPlan = { ...result, context };
+    if (!current()) return;
+    state.actionPlan = activePlan = { ...result, context };
     if (context === "callflow") {
       state.view = "callflow";
       render();
@@ -8190,13 +9552,18 @@ async function applyProfilePlan() {
       setView("changes");
       renderActionPlan();
     }
-    progress.success({ title: result.title || "Profil übernommen", message: result.message || "Die Änderungen wurden verarbeitet." });
+    if (result.ok === false || result.applied === false) {
+      progress.error({ title: result.title || portalMessage("portal.applyingProfileFailed", "Applying profile failed"), message: result.message });
+      return;
+    }
+    progress.success({ title: result.title || portalMessage("portal.profileApplied", "Profile applied"), message: result.message || portalMessage("portal.theChangesWereProcessed", "The changes were processed.") });
   } catch (error) {
+    if (!current()) return;
     state.actionPlan = {
       ...state.actionPlan,
       ok: false,
       context,
-      title: "Profil-Übernahme fehlgeschlagen",
+      title: portalMessage("portal.applyingProfileFailed", "Applying profile failed"),
       message: error.message,
       applied: false,
     };
@@ -8206,7 +9573,7 @@ async function applyProfilePlan() {
     } else {
       renderActionPlan();
     }
-    progress.error({ title: "Profil-Übernahme fehlgeschlagen", message: error.message });
+    progress.error({ title: portalMessage("portal.applyingProfileFailed", "Applying profile failed"), message: error.message });
   }
 }
 
@@ -8237,11 +9604,12 @@ function bindStaticNavigation() {
       setView(button.dataset.view);
     };
     button.addEventListener("click", navigate);
-    button.addEventListener("pointerup", navigate);
+
   });
 }
 
 document.addEventListener("click", (event) => {
+  if (event.target.closest?.("#undo-flow-change")) { undoFlowChange(); return; }
   if (handleViewNavigation(event.target)) {
     event.preventDefault();
     event.stopPropagation();
@@ -8393,6 +9761,7 @@ document.addEventListener("click", (event) => {
       const nextHidden = !menu.hidden;
       menu.hidden = nextHidden;
       didSelector.setAttribute("aria-expanded", String(!nextHidden));
+      if (!nextHidden) fitFlowDidMenu();
     }
     return;
   }
@@ -8401,6 +9770,7 @@ document.addEventListener("click", (event) => {
   if (didButton) {
     state.selectedDidId = didButton.dataset.didId;
     const baseFlow = applyStoredFlowLayout(buildFlowForDid(selectedDid(), getOverview()), selectedDid());
+    flowTextUndo = null;
     state.flow = applyStoredFlowDraft(applyStoredAppliedFlow(baseFlow, selectedDid()), selectedDid());
     state.selectedNodeId = "";
     state.selectedNodeIds = [];
@@ -8486,6 +9856,13 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const dockButton = event.target.closest("[data-node-dock]");
+  if (dockButton && event.detail === 0) {
+    event.preventDefault();
+    openNodeConnectionSelector(dockButton.dataset.nodeDock);
+    return;
+  }
+
   const nodeButton = event.target.closest("[data-node-id]");
   if (nodeButton) {
     state.selectedNodeId = nodeButton.dataset.nodeId;
@@ -8530,6 +9907,9 @@ document.addEventListener("click", (event) => {
     state.activeFlowMenu = flowMenuButton.dataset.flowMenu || "dids";
     state.railOpen = true;
     renderView();
+    window.requestAnimationFrame(() => {
+      $('[data-flow-menu-content="' + state.activeFlowMenu + '"] input, [data-flow-menu-content="' + state.activeFlowMenu + '"] button')?.focus();
+    });
     return;
   }
 
@@ -8572,6 +9952,13 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (event.target.closest("#restore-previous-flow-draft")) {
+    restorePreviousFlowDraft();
+    renderCallflow();
+    renderView();
+    return;
+  }
+
   if (event.target.closest("#close-flow-plan")) {
     state.actionPlan = null;
     renderFlowPlan();
@@ -8609,7 +9996,7 @@ document.addEventListener("click", (event) => {
   }
 
   if (event.target.closest("#save-standard-flow-profile")) {
-    saveStandardProfile("callflow");
+    saveStandardProfile(state.view === "callflow" ? "callflow" : "changes");
     return;
   }
 
@@ -8650,7 +10037,11 @@ document.addEventListener("click", (event) => {
       return;
     }
     if (daynightModalAction === "activate-day") {
-      restoreDaynightRouting({ fromHeaderSwitch: true });
+      restoreDaynightRouting({ fromHeaderSwitch: true, skipConfirm: true });
+      return;
+    }
+    if (daynightModalAction === "prepare-night") {
+      prepareAndActivateNightMode();
       return;
     }
   }
@@ -8659,6 +10050,11 @@ document.addEventListener("click", (event) => {
     if (typeof state.daynightModeModal === "object" && state.daynightModeModal?.busy) return;
     closeDaynightModeModal();
     updateDaynightHeaderButton();
+    return;
+  }
+
+  if (event.target.closest("#prepare-and-activate-night-mode")) {
+    prepareAndActivateNightMode();
     return;
   }
 
@@ -8722,6 +10118,14 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const serviceSelect = event.target.closest("[data-select-service]");
+  if (serviceSelect) {
+    state.selectedServiceKey = serviceSelect.dataset.selectService;
+    state.serviceInspectorOpen = false;
+    renderServices();
+    return;
+  }
+
   const serviceEdit = event.target.closest("[data-edit-service]");
   if (serviceEdit) {
     state.selectedServiceKey = serviceEdit.dataset.editService;
@@ -8768,48 +10172,155 @@ function toggleServiceNodeMembers(nodeId) {
   requestCallflowRender();
 }
 
-function exportFlowPdf() {
+async function exportFlowPdf() {
+  const button = $("#export-flow-pdf");
+  if (button?.disabled) return;
   const canvas = $("#callflow-canvas");
-  const world = canvas?.querySelector(".flow-world");
-  if (!canvas || !world) {
-    window.print();
-    return;
+  if (!canvas?.querySelector(".flow-node")) return;
+  if (button) button.disabled = true;
+  try {
+    const model = captureFlowPdfModel(canvas);
+    // Let the disabled state paint before building a large document.
+    await new Promise(resolve => window.requestAnimationFrame(resolve));
+    const bytes = window.NfonCallflowPdf.create(model);
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `callflow-${model.number.replace(/[^a-zA-Z0-9+-]/g, "").slice(0, 48) || "routing"}-${safeFileTimestamp()}.pdf`;
+    document.body.appendChild(link);
+    try { link.click(); } finally {
+      link.remove();
+      // Download consumers (including WebKit) may still need the blob after click.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+  } catch (error) {
+    showUiNotice({
+      title: portalMessage("portal.pdfExportFailed", "PDF could not be created"),
+      message: error.code === "PDF_FONT_CHARACTER"
+        ? portalMessage("portal.pdfUnsupportedCharacters", "Some characters are not supported by the PDF font.")
+        : portalMessage("portal.pdfExportRetry", "Please reload the page and try again."),
+    });
+  } finally {
+    if (button) button.disabled = false;
   }
-  document.querySelector(".flow-print-export")?.remove();
-  const contentBounds = flowPrintContentBounds(canvas);
-  const pageWidthPx = 281 * 3.7795275591;
-  const pageHeightPx = 194 * 3.7795275591;
-  const scale = Math.min(
-    pageWidthPx / Math.max(contentBounds.width, 1),
-    pageHeightPx / Math.max(contentBounds.height, 1),
-    1
-  );
-  const root = document.createElement("div");
-  root.className = "flow-print-export";
-  const stage = document.createElement("div");
-  stage.className = "flow-print-stage";
-  stage.style.width = `${Math.round(contentBounds.width * scale)}px`;
-  stage.style.height = `${Math.round(contentBounds.height * scale)}px`;
-  const viewport = document.createElement("div");
-  viewport.className = "flow-print-viewport";
-  viewport.style.width = `${Math.round(contentBounds.width)}px`;
-  viewport.style.height = `${Math.round(contentBounds.height)}px`;
-  viewport.style.transform = `scale(${scale})`;
-  const clone = world.cloneNode(true);
-  clone.style.position = "absolute";
-  clone.style.left = `${-contentBounds.left}px`;
-  clone.style.top = `${-contentBounds.top}px`;
-  clone.style.margin = "0";
-  clone.style.transform = "none";
-  viewport.appendChild(clone);
-  stage.appendChild(viewport);
-  root.appendChild(stage);
-  document.body.appendChild(root);
-  document.body.classList.add("is-printing-flow");
-  window.setTimeout(() => window.print(), 80);
 }
 
-function flowPrintContentBounds(canvas) {
+function captureFlowPdfModel(canvas) {
+  // Measure the existing target cards on a cloned flow, then restore the visible
+  // canvas before yielding to the browser. Export never changes the user's draft.
+  const originalFlow = state.flow, originalExpanded = state.expandedServiceNodeIds;
+  const markup = canvas.innerHTML, scrollLeft = canvas.scrollLeft, scrollTop = canvas.scrollTop;
+  const initialDid = canvas.dataset.initialDid;
+  try {
+    state.flow = clone(originalFlow);
+    state.expandedServiceNodeIds = (state.flow?.nodes || [])
+      .filter(node => ["QUEUE", "GROUP", "SKILL"].includes(normalizeTargetType(node.type)))
+      .map(node => node.id);
+    renderCallflow();
+    return flowPdfModel(canvas);
+  } finally {
+    state.flow = originalFlow;
+    state.expandedServiceNodeIds = originalExpanded;
+    canvas.innerHTML = markup;
+    canvas.scrollLeft = scrollLeft;
+    canvas.scrollTop = scrollTop;
+    if (initialDid === undefined) delete canvas.dataset.initialDid;
+    else canvas.dataset.initialDid = initialDid;
+  }
+}
+
+function flowPdfModel(canvas) {
+  const graph = buildVisibleFlowGraph(state.flow);
+  const themeStyle = getComputedStyle(document.documentElement);
+  const canvasStyle = getComputedStyle(canvas);
+  const gridElement = canvas.querySelector(".flow-world-wrap");
+  const gridStyle = gridElement ? getComputedStyle(gridElement, "::before") : null;
+  const dot = gridStyle?.backgroundImage?.match(/(rgba?\([^)]*\))\s+([\d.]+)px/);
+  const spacing = gridStyle?.backgroundSize?.split(/\s+/).map(parseFloat);
+  const zoom = state.flowZoom || 1;
+  const grid = dot && spacing?.every(value => Number.isFinite(value) && value > 0) ? {
+    color: dot[1], radius: Number(dot[2]) / zoom,
+    stepX: spacing[0] / zoom, stepY: (spacing[1] || spacing[0]) / zoom,
+    originX: ((parseFloat(gridStyle.backgroundPositionX) || 0) + spacing[0] / 2) / zoom,
+    originY: ((parseFloat(gridStyle.backgroundPositionY) || 0) + (spacing[1] || spacing[0]) / 2) / zoom,
+  } : null;
+  // These are the same visible markers used by the designer; branches retain their labels.
+  const arrows = [...canvas.querySelectorAll(".flow-insert.is-arrow")].map(element => {
+    const style = getComputedStyle(element);
+    return { x: parseFloat(element.style.left), y: parseFloat(element.style.top),
+      width: element.offsetWidth, height: element.offsetHeight,
+      angle: parseFloat(element.style.getPropertyValue("--flow-angle")) || 0,
+      background: style.backgroundColor, borderColor: style.borderColor, color: style.color,
+      borderWidth: parseFloat(style.borderTopWidth) || 1 };
+  });
+  const nodes = [...canvas.querySelectorAll(".flow-node")].map((element, index) => {
+    const style = getComputedStyle(element);
+    const type = element.querySelector(".node-type"), title = element.querySelector(".node-title");
+    const metadata = [...element.querySelectorAll(".node-subtitle, .node-number-meta, .node-detail-summary, .node-detail:not(.service-node-detail), .node-warning")]
+      .filter(item => item.textContent.trim());
+    return {
+      id: element.dataset.nodeId || graph.nodes[index]?.id,
+      x: parseFloat(element.style.left), y: parseFloat(element.style.top),
+      width: element.offsetWidth, height: element.offsetHeight,
+      type: type?.textContent.trim() || "", title: title?.textContent.trim() || "",
+      metadata: metadata.map(item => item.textContent.trim()),
+      metadataColors: metadata.map(item => getComputedStyle(item).color),
+      accent: style.borderTopColor, background: style.backgroundColor, borderColor: style.borderLeftColor,
+      typeColor: type ? getComputedStyle(type).color : style.color,
+      titleColor: title ? getComputedStyle(title).color : style.color,
+    };
+  });
+  const measured = new Map(nodes.map(node => [node.id, { ...node, centerX: node.x + node.width / 2, centerY: node.y + node.height / 2 }]));
+  const edges = [], labels = [];
+  for (const edge of graph.edges) {
+    const from = measured.get(edge.from), to = measured.get(edge.to);
+    if (!from || !to) continue;
+    const { fromPoint, c1, c2, toPoint } = flowConnectionCurve(from, to, edge.virtual && edge.memberSidePorts);
+    edges.push({ points: [fromPoint.x, fromPoint.y, c1.x, c1.y, c2.x, c2.y, toPoint.x, toPoint.y] });
+    if (edge.branchField && edge.label) labels.push({ ...cubicPointOnPath(fromPoint, c1, c2, toPoint, 0.62), text: edge.label });
+  }
+  const realNodes = graph.nodes.filter(node => !node.virtual);
+  const byId = new Map(realNodes.map(node => [node.id, node]));
+  return {
+    overviewTitle: portalMessage("portal.flowPdfOverview", "Flow overview"),
+    detailsTitle: portalMessage("portal.flowPdfDetails", "Routing details"),
+    continued: portalMessage("portal.flowPdfContinued", "Continued"),
+    number: selectedDid()?.name || selectedDid()?.id || "",
+    accent: themeStyle.getPropertyValue(document.documentElement.dataset.nfonTheme === "admin-portal" ? "--nfon-blue" : "--accent").trim(),
+    textColor: themeStyle.getPropertyValue("--text").trim(),
+    mutedColor: themeStyle.getPropertyValue("--muted").trim(),
+    borderColor: themeStyle.getPropertyValue("--line").trim(),
+    canvas: { background: canvasStyle.backgroundColor, grid }, arrows,
+    bounds: flowPrintContentBounds(canvas, edges), nodes, edges, labels,
+    details: realNodes.map(node => {
+      const members = flowPrintMembers(node);
+      const rows = graph.edges.filter(edge => !edge.virtual && edge.from === node.id && byId.has(edge.to)).map(edge => {
+        const target = byId.get(edge.to);
+        const number = target.targetNumber || target.routeNumber || "";
+        return `${edge.label || portalMessage("portal.nextStep", "Next step")} → ${target.title}${number ? ` (${number})` : ""}`;
+      });
+      rows.push(...members.map(member => `${portalMessage("portal.member", "member")} · ${member.name || ""}${member.number ? ` (${member.number})` : ""}`));
+      return {
+        type: readableNodeType(node.type), title: node.title, rows, hasMembers: members.length > 0,
+        accent: measured.get(node.id)?.accent,
+        typeColor: measured.get(node.id)?.typeColor, titleColor: measured.get(node.id)?.titleColor,
+        metadata: [flowNodeSubtitle(node), flowNodeNumberMeta(node), members.length
+          ? portalMessage("portal.valueMembers", "{p0} members", { p0: members.length, p1: "" })
+          : flowNodeDetail(node)].filter(Boolean),
+      };
+    }),
+  };
+}
+
+function flowPrintMembers(node) {
+  if (!["QUEUE", "SKILL", "GROUP"].includes(normalizeTargetType(node.type))) return [];
+  const meta = nodeServiceMeta(node);
+  if (Array.isArray(meta.memberTargets) && meta.memberTargets.length) return meta.memberTargets;
+  return (meta.memberNames || []).map(name => ({ name, number: "" }));
+}
+
+function flowPrintContentBounds(canvas, edges = []) {
   const nodes = [...canvas.querySelectorAll(".flow-node")];
   const fallbackWidth = 1120;
   const fallbackHeight = 760;
@@ -8829,6 +10340,14 @@ function flowPrintContentBounds(canvas) {
       bottom: Math.max(acc.bottom, top + height),
     };
   }, { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+  for (const edge of edges) {
+    for (let index = 0; index < edge.points.length; index += 2) {
+      bounds.left = Math.min(bounds.left, edge.points[index]);
+      bounds.right = Math.max(bounds.right, edge.points[index]);
+      bounds.top = Math.min(bounds.top, edge.points[index + 1]);
+      bounds.bottom = Math.max(bounds.bottom, edge.points[index + 1]);
+    }
+  }
   const left = Math.max(0, Math.floor(bounds.left - padding));
   const top = Math.max(0, Math.floor(bounds.top - padding));
   const right = Math.ceil(bounds.right + padding);
@@ -8840,11 +10359,6 @@ function flowPrintContentBounds(canvas) {
     height: Math.max(300, bottom - top),
   };
 }
-
-window.addEventListener("afterprint", () => {
-  document.body.classList.remove("is-printing-flow");
-  document.querySelector(".flow-print-export")?.remove();
-});
 
 document.addEventListener("pointerdown", (event) => {
   const serviceList = event.target.closest("#service-extension-list");
@@ -9057,6 +10571,9 @@ document.addEventListener("pointermove", (event) => {
     ((pointer.y - dragState.offsetY) / FLOW_POSITION_HEIGHT) * 100,
   );
   const node = (state.flow?.nodes || []).find((item) => item.id === dragState.id);
+  const currentPosition = node || (dragState.memberNode ? visibleFlowNodeById(dragState.id) : null);
+  if (currentPosition && Number(currentPosition.x) === nextPosition.x && Number(currentPosition.y) === nextPosition.y) return;
+  if (!dragState.moved) rememberFlowUndo();
   if (node) {
     Object.assign(node, nextPosition);
   } else if (dragState.memberNode) {
@@ -9193,9 +10710,33 @@ document.addEventListener("pointercancel", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && uiDialog.open && !uiDialog.pending) {
-    event.preventDefault();
-    closeUiDialog(false);
+  if (uiDialog.open) {
+    if (event.key === "Escape" && !uiDialog.pending) {
+      event.preventDefault();
+      closeUiDialog(false);
+    } else if (event.key === "Tab") {
+      trapModalTab(event, $("#app-dialog-modal"));
+    }
+    return;
+  }
+
+  if (state.daynightModeModal && !$("#daynight-mode-modal")?.hidden) {
+    if (event.key === "Escape" && !state.daynightModeModal?.busy) {
+      event.preventDefault();
+      closeDaynightModeModal();
+    } else if (event.key === "Tab") {
+      const modal = $("#daynight-mode-modal");
+      trapModalTab(event, modal, modal?.querySelector(".daynight-mode-dialog"));
+    }
+    return;
+  }
+
+  if (state.resourceCreateKind || state.resourceModalKind) {
+    const creating = Boolean(state.resourceCreateKind);
+    if (event.key === "Escape" && !state.resourceCreating && !state.resourceDeleting) {
+      event.preventDefault();
+      creating ? closeResourceCreateModal() : closeResourceModal();
+    } else if (event.key === "Tab") trapModalTab(event, $(creating ? "#resource-create-modal" : "#resource-modal"));
     return;
   }
 
@@ -9207,7 +10748,25 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
+  const editable = event.target?.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (!editable && ["Enter", " "].includes(event.key)) {
+    const extension = event.target?.closest?.("[data-service-extension-id]");
+    if (state.view === "services" && extension) {
+      const service = selectedService();
+      if (service) { event.preventDefault(); addServiceMember(serviceTypeFromMode(), serviceId(service), extension.dataset.serviceExtensionId); }
+      return;
+    }
+    const palette = event.target?.closest?.("[data-flow-palette-target], [data-flow-empty-step]");
+    if (state.view === "callflow" && palette) {
+      event.preventDefault();
+      const target = palette.hasAttribute("data-flow-empty-step") ? emptyFlowStepTarget() : JSON.parse(palette.dataset.flowPaletteTarget);
+      const canvas = $("#callflow-canvas");
+      addPaletteNodeToCanvas(target, { x: (canvas?.scrollLeft || 0) + 160, y: (canvas?.scrollTop || 0) + 160 });
+      return;
+    }
+  }
   if (state.view !== "callflow") return;
+  if (!editable && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") { event.preventDefault(); undoFlowChange(); return; }
   if (!["Backspace", "Delete"].includes(event.key)) return;
   const target = event.target;
   if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=\"true\"]")) return;
@@ -9363,6 +10922,12 @@ function zoomCanvasByWheel(event) {
 
 document.addEventListener("wheel", zoomCanvasByWheel, { passive: false });
 
+window.addEventListener("resize", fitFlowDidMenu);
+window.visualViewport?.addEventListener("resize", fitFlowDidMenu);
+window.visualViewport?.addEventListener("scroll", fitFlowDidMenu);
+document.addEventListener("scroll", fitFlowDidMenu, true);
+document.addEventListener("nfon:theme-change", fitFlowDidMenu);
+
 document.addEventListener("scroll", (event) => {
   const canvas = event.target?.closest?.("#callflow-canvas");
   if (!canvas) return;
@@ -9396,6 +10961,7 @@ document.addEventListener("input", (event) => {
 
   if (event.target.id === "daynight-announcement-display-name") {
     state.daynightAnnouncementDisplayName = event.target.value;
+    state.daynightAnnouncementDisplayNameEdited = true;
     resetDaynightAnnouncementPlan();
     const canPlan = Boolean(event.target.value.trim() && (state.daynightAnnouncementSource || "existing") === "existing" && daynightAnnouncementOptions().length);
     const planButton = $("#plan-daynight-announcement-target");
@@ -9450,7 +11016,7 @@ document.addEventListener("input", (event) => {
 
   if (event.target.id === "flow-extension-filter") {
     state.flowExtensionFilter = event.target.value;
-    renderFlowResourcePalette();
+    renderFlowResourcePalette({ preserveSearch: true });
     renderView();
     return;
   }
@@ -9460,6 +11026,7 @@ document.addEventListener("input", (event) => {
     const firstDid = getOverview()?.inventory?.dids?.[0];
     state.selectedDidId = firstDid?.id || "";
     const baseFlow = applyStoredFlowLayout(buildFlowForDid(selectedDid(), getOverview()), selectedDid());
+    flowUndoHistory.length = 0;
     state.flow = applyStoredFlowDraft(applyStoredAppliedFlow(baseFlow, selectedDid()), selectedDid());
     state.selectedNodeId = "";
     state.selectedNodeIds = [];
@@ -9483,6 +11050,10 @@ document.addEventListener("input", (event) => {
   }
 });
 
+document.addEventListener("focusout", (event) => {
+  if (event.target.dataset?.nodeField || event.target.dataset?.nodeConfigField) flowTextUndo = null;
+});
+
 document.addEventListener("change", (event) => {
   if (event.target.id === "daynight-mode-toggle") {
     const nextActive = event.target.checked;
@@ -9492,15 +11063,11 @@ document.addEventListener("change", (event) => {
   }
 
   if (event.target.id === "standard-flow-import-file") {
-    importStandardProfileFile(event.target.files?.[0], "callflow");
+    importStandardProfileFile(event.target.files?.[0], state.view === "callflow" ? "callflow" : "changes");
     event.target.value = "";
     return;
   }
 
-  if (event.target.id === "customer-switcher") {
-    switchCustomer(event.target.value);
-    return;
-  }
 
   if (event.target.id === "target-select") {
     applyTargetSelection(event.target.value);
@@ -9586,10 +11153,16 @@ document.addEventListener("change", (event) => {
   }
 
   const nodeField = event.target.dataset.nodeField;
-  if (nodeField) updateNodeField(nodeField, event.target.value);
+  if (nodeField) {
+    if (event.target.tagName === "SELECT") updateNodeField(nodeField, event.target.value);
+    else flowTextUndo = null;
+  }
 
   const configField = event.target.dataset.nodeConfigField;
-  if (configField) updateNodeConfig(configField, event.target.value);
+  if (configField) {
+    if (event.target.tagName === "SELECT") updateNodeConfig(configField, event.target.value);
+    else flowTextUndo = null;
+  }
 
   const targetConfig = event.target.dataset.nodeTargetConfig;
   if (targetConfig) updateNodeTargetConfig(targetConfig, event.target.value);
@@ -9680,13 +11253,6 @@ document.addEventListener("submit", (event) => {
     return;
   }
 
-  if (event.target.id === "manual-customer-form") {
-    event.preventDefault();
-    const account = new FormData(event.target).get("account");
-    switchCustomer(String(account || "").trim().toUpperCase());
-    return;
-  }
-
   if (event.target.id === "browser-login-form") {
     event.preventDefault();
     applyBrowserLogin(event.target);
@@ -9705,6 +11271,49 @@ document.addEventListener("submit", (event) => {
   }
 });
 
+document.addEventListener("nfon:language-change", refreshPortalDefaults);
+document.addEventListener("nfon:demo-pause", event => {
+  state.staticPaused = Boolean(event.detail?.paused);
+  renderStatus();
+});
+window.addEventListener("hashchange", () => {
+  const view = initialView();
+  if (view !== state.view) setView(view);
+});
+document.addEventListener("input", (event) => {
+  if (event.target?.hasAttribute?.("data-portal-default-key")) event.target.removeAttribute("data-portal-default-key");
+});
+
+
+// An outdated membership intent is never silently discarded or silently rebased.
+async function reviewServiceDraftConflicts() {
+  const preparedDraft = state.serviceDraft;
+  const conflicts = state.serviceDraftConflicts;
+  const writeContext = state.overview?.settings?.writeContext;
+  const review = (state.serviceDraftConflicts || []).map(({previous}) => {const delta=membershipDelta(previous);return `${previous.name || previous.serviceNumber}\n${portalMessage("portal.add", "Add")}: ${delta.add.map(m=>m.extensionNumber).join(", ") || "—"}\n${portalMessage("portal.remove", "Remove")}: ${delta.remove.join(", ") || "—"}\n${portalMessage("portal.edit", "Edit")}: ${delta.update.map(m=>m.extensionNumber).join(", ") || "—"}`;}).join("\n\n");
+  const confirmed = await confirmUi({
+    title: portalMessage("portal.reviewChanges", "Review saved changes"),
+    message: portalMessage("portal.staleDraft", "Memberships changed. Saved changes need review.") + "\n\n" + review,
+    confirmLabel: portalMessage("portal.applyChanges", "Apply changes"),
+  });
+  if (!confirmed || state.serviceDraft !== preparedDraft || state.serviceDraftConflicts !== conflicts || !isCurrentWriteContext(writeContext)) return;
+  const unresolved=[];
+  for (const {collection,id,previous} of state.serviceDraftConflicts || []) {
+    const current=state.serviceDraft?.[collection]?.[id];
+    if (!current?.baseRevision) { unresolved.push({collection,id,previous}); continue; }
+    const delta=membershipDelta(previous);
+    const members=new Map(current.members.map(member=>[String(member.extensionNumber),member]));
+    delta.remove.forEach(id=>members.delete(String(id)));
+    delta.add.forEach(member=>{if(!members.has(String(member.extensionNumber)))members.set(String(member.extensionNumber),member);});
+    delta.update.forEach(member=>{if(members.has(String(member.extensionNumber)))members.set(String(member.extensionNumber),member);});
+    current.members=[...members.values()];
+  }
+  state.serviceDraftConflicts=unresolved; state.serviceDraft.conflicts=unresolved;
+  writeStoredServiceDraft(state.serviceDraft); renderServices();
+}
+document.addEventListener("click", event => {
+  if (event.target.closest("#review-service-conflicts")) reviewServiceDraftConflicts();
+});
+
 bindStaticNavigation();
 loadOverview();
-loadCustomers();

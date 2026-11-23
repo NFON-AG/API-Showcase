@@ -10,16 +10,32 @@ A standalone demo of the **NFON Portal (admin) API**: service inventory, a visua
 day/night readiness checks, phonebook sync, and admin-flow previews. Most actions are previews/dry-run
 plans; live writes are disabled by default for safety. It runs without the other showcase apps.
 
+## v1.2 appearance and language contract
+
+Admin Portal is the default theme. The older visual rules below apply to Classic only.
+Shared tokens and shell behavior live in `../shared/appearance.css` and `../shared/appearance.js`;
+app-specific Admin Portal adapters must be scoped to `html[data-nfon-theme="admin-portal"]`.
+Both themes share the same controls, application state and security guards. The switch above
+the header changes only appearance; it must preserve drafts, filters, selections and authentication.
+
+Use explicit keys in `i18n-messages.json` for complete messages in all twelve selectable languages.
+First visits use English; only an explicit saved language choice overrides it. Protect real names,
+API data and edited values from translation; keep generated defaults distinguishable.
+Run `npm run sync:shared` at the repository root after catalog/shared changes, then `npm test`.
+Do not edit generated `public/messages.js` or the copied shared appearance files.
+
 ## Tech & conventions (do not break)
 
 - **Vanilla HTML/CSS/JS only.** No frameworks, no build step, **zero runtime dependencies** —
-  just Node's built-in `http`. Do not introduce React/Tailwind/bundlers or copy component code.
+  just Node's built-in `http` on the server. The narrow exception is the pinned, locally vendored jsPDF browser exporter under `public/pdf/`; see its `THIRD_PARTY.md`. Do not introduce React/Tailwind/bundlers or copy component code.
 - **Design tokens** live in `public/styles.css` (`:root`): background `#f5f7f8`, surface `#ffffff`,
   text `#202426`, one accent green `#00d981`. Sharp corners (no `border-radius` on panels/cards/buttons),
   8px spacing rhythm, Inter font, black header with a 4px green bottom border.
-- **Live-write safety (critical):** live writes are off unless `PORTAL_ENABLE_LIVE_WRITES=true`, and
-  `PORTAL_DISABLE_LIVE_WRITES=true` is a hard read-only override that always wins. `apply` routes must
-  stay dry-run/plan unless live writes are explicitly enabled. Do not weaken this default.
+- **Live-write safety (critical):** every process starts with live writes off. `PORTAL_ENABLE_LIVE_WRITES=true`
+  permits session opt-in through Setup or an explicit Create/Apply/Delete action, including one-click day-night setup. `PORTAL_DISABLE_LIVE_WRITES=true`
+  is a hard read-only override that always wins. Account changes and browser login reset session writes off.
+  Mutation routes require an enabled session; a permitted action may enable it as part of the action or its existing confirmation. Keep one existing confirmation for batch/profile/deletion; Create and phonebook Apply need no extra dialog. Do not add a separate Setup detour.
+  Day-mode restore and night-routing reset may enable that permitted session while night mode is active; other writes keep the existing night-mode restriction.
 - **Security:** state-changing POST routes require a same-origin CSRF token from `/api/status`
   (header `X-CSRF-Token`). Never convert a live API failure into a silent demo response.
 - **No secrets in the repo.** Only `.env.example` with placeholders; real config stays local

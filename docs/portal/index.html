@@ -1,18 +1,20 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
+    <script src="../appearance.js?v=b2ba19b928750eb3"></script>
     <title>NFON Portal API Demo</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="./styles.css?v=web-demo-20260622l">
+    <link rel="stylesheet" href="./styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="../appearance.css?v=b2ba19b928750eb3">
   </head>
-  <body>
+  <body data-nfon-app="portal">
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="../index.html?v=web-demo-20260622l" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="../index.html" aria-label="Back to overview" title="Back to overview">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -21,7 +23,7 @@
         </a>
         <div>
           <h1>NFON Portal API Demo</h1>
-          <p id="account-label">Verbinde</p>
+          <p id="account-label">Connecting</p>
         </div>
       </div>
       <div class="header-actions">
@@ -31,8 +33,8 @@
         <button class="nav-button" data-view="services" type="button">Warteschlangen</button>
         <button class="nav-button" data-view="callflow" type="button">Callflow</button>
         <button class="nav-button" data-view="changes" type="button">Setup</button>
-        <button class="icon-button" id="refresh-button" type="button" title="Aktualisieren" aria-label="Aktualisieren">↻</button>
-        <span class="connection" id="connection-state">Verbinde</span>
+        <button class="icon-button" id="refresh-button" type="button" title="Aktualisieren" aria-label="Aktualisieren"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2.34 6.66M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span class="connection" id="connection-state">Connecting</span>
         <label class="demo-switch daynight-header-switch" id="daynight-mode-switch" title="Tag- und Nachtmodus umschalten" hidden>
           <input id="daynight-mode-toggle" type="checkbox" disabled>
           <span id="daynight-mode-label">Tag/Nacht</span>
@@ -58,7 +60,7 @@
       <section class="view is-active" id="view-overview" aria-label="Übersicht">
         <section class="panel">
           <div class="panel-header">
-            <h2>Rufnummern-Routing aus der Portal API</h2>
+            <h2 data-i18n="portal.numberRouting">Number routing</h2>
           </div>
           <div id="routing-preview" class="routing-grid"></div>
         </section>
@@ -85,7 +87,7 @@
             <div>
               <h2>Nebenstellen</h2>
             </div>
-            <input id="extension-filter" type="search" placeholder="Name oder Nummer suchen">
+            <input id="extension-filter" type="search" placeholder="Search name or number" data-i18n-placeholder="portal.searchNameOrNumber">
           </div>
           <nav class="extension-section-tabs" aria-label="Nebenstellenbereiche">
             <button class="extension-section-tab is-active" data-extension-section="overview" type="button">Bestand</button>
@@ -141,8 +143,9 @@
               <p class="panel-subtitle">Visuelle Einrichtung der Anlage.</p>
             </div>
             <div class="toolbar">
+              <button class="secondary-button" id="undo-flow-change" type="button" data-i18n-key="portal.undo">Undo</button>
               <button class="secondary-button" id="clear-flow-draft" type="button" hidden>Lokalen Entwurf löschen</button>
-              <button class="secondary-button" id="export-flow-pdf" type="button">Callflow als PDF</button>
+              <button class="secondary-button" id="export-flow-pdf" type="button" data-i18n-key="portal.callflowAsPdf">Download PDF</button>
               <button class="primary-button" id="stage-flow" type="button">Übernehmen</button>
             </div>
           </div>
@@ -170,7 +173,7 @@
                 <button class="flow-menu-tab is-muted" data-flow-empty-step type="button">Leerer Schritt</button>
               </div>
               <div id="callflow-canvas" class="flow-canvas" aria-live="polite"></div>
-              <div class="canvas-controls" aria-label="Canvas Zoom">
+              <div class="canvas-controls" aria-label="Zoom controls" data-i18n-aria-label="portal.zoomControls">
                 <button class="icon-button is-light" id="zoom-out" type="button" aria-label="Zoom verkleinern">−</button>
                 <span id="zoom-label">100%</span>
                 <button class="icon-button is-light" id="zoom-in" type="button" aria-label="Zoom vergrößern">+</button>
@@ -204,7 +207,7 @@
             <aside class="service-extension-pool">
               <div class="panel-header is-compact">
                 <h3>Nebenstellen</h3>
-                <input id="service-extension-filter" type="search" placeholder="Name oder Nummer suchen">
+                <input id="service-extension-filter" type="search" placeholder="Search name or number" data-i18n-placeholder="portal.searchNameOrNumber">
               </div>
               <div id="service-extension-list" class="service-extension-list"></div>
             </aside>
@@ -215,6 +218,7 @@
       </section>
 
       <section class="view" id="view-changes" aria-label="Änderungen">
+        <div data-appearance-settings></div>
         <section class="panel settings-panel is-wide">
           <div class="panel-header">
             <div>
@@ -240,7 +244,7 @@
               <h3>Schaltung vorbereiten</h3>
               <div class="daynight-risk-warning" role="alert">
                 <span aria-hidden="true">!</span>
-                <strong>Diese Funktion kann die Zuordnung aller Rufnummern zu Warteschlangen, Sprachdialogen und Nebenstellen verändern. Bitte vorab unbedingt sichern.</strong>
+                <strong data-i18n-key="portal.thisFunctionCanChangeTheAssignmentOfAllNumbers">This function changes number routing. Day routing is backed up automatically during setup.</strong>
               </div>
               <div class="flow-profile-actions" aria-label="Tag/Nacht Profile">
                 <button class="secondary-button" id="save-standard-flow-profile" type="button">Standard sichern</button>
@@ -253,6 +257,7 @@
               <div id="daynight-summary" class="daynight-summary"></div>
             </aside>
           </div>
+          <div id="action-plan" class="action-plan" hidden aria-live="polite"></div>
           <div id="daynight-gateway-preview" class="daynight-gateway-preview"></div>
           </div>
         </section>
@@ -261,7 +266,7 @@
       <section class="panel endpoint-panel">
         <div class="panel-header">
           <div>
-            <h2>API - Details</h2>
+            <h2 data-i18n-key="portal.technicalDetails">Technical details</h2>
             <p class="panel-subtitle">Diagnose der Portal-Endpunkte.</p>
           </div>
           <button class="text-button" id="toggle-technical" type="button">Details anzeigen</button>
@@ -298,6 +303,7 @@
       </section>
     </div>
 
+    <div class="action-notice" id="action-notice" role="status" aria-live="polite" hidden></div>
     <div class="app-dialog-modal" id="app-dialog-modal" aria-hidden="true">
       <div class="app-dialog-backdrop" data-app-dialog-cancel></div>
       <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">
@@ -313,8 +319,12 @@
       </section>
     </div>
 
-    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
-    <script src="../i18n.js?v=v1.0.1-i18n"></script>
-    <script src="./app.js?v=web-demo-20260622l"></script>
+    <script src="./messages.js?v=b2ba19b928750eb3"></script>
+    <script src="../i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="./pdf/jspdf.umd.min.js?v=b2ba19b928750eb3"></script>
+    <script src="./pdf/pangram-font.js?v=b2ba19b928750eb3"></script>
+    <script src="./pdf/callflow-pdf.js?v=b2ba19b928750eb3"></script>
+    <script src="../demo-runtime.js?v=b2ba19b928750eb3"></script>
+    <script src="./app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

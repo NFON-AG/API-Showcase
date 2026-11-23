@@ -1,17 +1,19 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <title>NFON CTI API Demo</title>
-    <link rel="stylesheet" href="/styles.css">
+    <script src="/appearance.js?v=b2ba19b928750eb3"></script>
+    <link rel="stylesheet" href="/styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="/appearance.css?v=b2ba19b928750eb3">
   </head>
   <body>
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" data-i18n-aria-label="cti.back" title="Back to overview" data-i18n-title="cti.back">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -20,15 +22,15 @@
         </a>
         <div>
         <h1>NFON CTI API Demo</h1>
-        <p id="account-label">Nicht verbunden</p>
+        <p id="account-label">Not connected</p>
         </div>
       </div>
       <div class="header-actions">
-        <a class="nav-button" href="/">Übersicht</a>
-        <a class="nav-button" href="/analytics.html">Auswertungen</a>
-        <a class="nav-button is-active" href="/setup.html" aria-current="page">Setup</a>
-        <span class="connection" id="connection-state">Verbinde</span>
-        <label class="demo-switch" title="Demo-Daten zuschalten">
+        <a class="nav-button" href="/" data-i18n-key="cti.nav.overview">Overview</a>
+        <a class="nav-button" href="/analytics.html" data-i18n-key="cti.nav.analytics">Analytics</a>
+        <a class="nav-button is-active" href="/setup.html" aria-current="page" data-i18n-key="cti.nav.setup">Setup</a>
+        <span class="connection" id="connection-state">Connecting</span>
+        <label id="demo-control" class="demo-switch">
           <input id="demo-toggle" type="checkbox">
           <span>Demo</span>
         </label>
@@ -36,19 +38,20 @@
     </header>
 
     <main class="app-shell">
-      <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Anmeldung"></section>
+      <div data-appearance-settings></div>
+      <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Sign in" data-i18n-aria-label="cti.login"></section>
 
       <section class="setup-layout">
         <div class="panel setup-storage-panel">
           <div class="panel-header">
-            <h2>Lokale Speicherung & Sicherung</h2>
-            <button class="secondary-button" id="storage-refresh" type="button">Aktualisieren</button>
+            <h2 data-i18n-key="cti.storage.title">Local storage & backup</h2>
+            <button class="secondary-button" id="storage-refresh" type="button" data-i18n-key="cti.refresh">Refresh</button>
           </div>
           <div class="storage-backup-grid">
             <div id="storage-summary" class="setup-summary"></div>
             <div class="backup-actions">
-              <a class="primary-button link-button" id="backup-download" href="/api/storage/backup">Backup erstellen</a>
-              <label class="secondary-button file-button" for="backup-import">Backup laden</label>
+              <a class="primary-button link-button" id="backup-download" href="/api/storage/backup" data-i18n-key="cti.backup.create">Create backup</a>
+              <label class="secondary-button file-button" for="backup-import" data-i18n-key="cti.backup.load">Load backup</label>
               <input id="backup-import" class="file-input" type="file" accept="application/json,.json">
               <div id="backup-message" class="backup-message"></div>
             </div>
@@ -59,14 +62,14 @@
       <section class="contacts-layout setup-contacts-layout">
         <div class="panel contacts-panel">
           <div class="panel-header">
-            <h2 id="contacts-list-title">Google Kontakte</h2>
-            <input id="contact-filter" type="search" placeholder="Suchen">
+            <h2 id="contacts-list-title">Google Contacts</h2>
+            <input id="contact-filter" type="search" placeholder="Search" data-i18n-placeholder="cti.search">
           </div>
           <div class="contacts-source-grid">
             <div id="contacts-list" class="contacts-list"></div>
             <aside class="contacts-source-panel" id="contacts-module-panel">
               <div class="contacts-source-header">
-                <h3>Kontaktquelle</h3>
+                <h3 data-i18n-key="cti.contacts.source">Contact source</h3>
               </div>
               <div id="contacts-status" class="contacts-status"></div>
             </aside>
@@ -75,9 +78,12 @@
       </section>
     </main>
 
-    <div id="call-popup" class="call-popup" hidden></div>
+    <div id="call-popup" class="call-popup" role="region" aria-live="polite" aria-atomic="true" hidden></div>
 
-    <script src="/i18n.js?v=v1.0.1-i18n"></script>
-    <script src="/app.js"></script>
+    <script src="/messages.js?v=b2ba19b928750eb3"></script>
+    <script src="/i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="/phone-number.js?v=b2ba19b928750eb3"></script>
+    <script src="/demo-runtime.js?v=b2ba19b928750eb3" data-nfon-optional-demo="cti"></script>
+    <script src="/app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

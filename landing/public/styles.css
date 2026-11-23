@@ -205,8 +205,8 @@ a {
   --state-soft: rgba(122, 133, 130, 0.09);
   --state-line: rgba(122, 133, 130, 0.22);
   min-width: 0;
-  flex: 1;
-  height: 100%;
+  flex: 1 0 auto;
+  height: auto;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
@@ -306,11 +306,12 @@ a {
 
 .status-chip {
   min-height: 34px;
-  min-width: 132px;
+  min-width: 0;
+  max-width: 100%;
   padding: 0 8px 0 10px;
   border: 1px solid color-mix(in srgb, var(--state) 62%, var(--line));
   background: var(--state-soft);
-  color: color-mix(in srgb, var(--state) 72%, var(--text));
+  color: var(--text);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -318,14 +319,16 @@ a {
   font-size: 11px;
   font-weight: 850;
   text-transform: uppercase;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .status-label {
-  min-width: 42px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-dot {
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 999px;
@@ -598,8 +601,9 @@ a {
 }
 
 .card-flip {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  display: grid;
+  height: 100%;
   transform-style: preserve-3d;
   -webkit-transform-style: preserve-3d;
 }
@@ -612,8 +616,9 @@ a {
 /* Both faces are absolutely stacked in the same 3D box. Each hides its own
    backside, so the rotated-away face disappears (reliable in WebKit/Safari). */
 .card-face {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  grid-area: 1 / 1;
+  min-width: 0;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
 }
@@ -632,6 +637,14 @@ a {
   transform: rotateY(180deg);
   -webkit-transform: rotateY(180deg);
 }
+
+.service-start[hidden] { display: none; }
+.connection { width: auto; height: auto; min-height: 28px; font-size: 12px; padding: 4px 8px; color: #202426; background: #f3f5f6; border: 1px solid #d6dadd; box-shadow: none; }
+.connection.is-online { color: #007a53; background: #e7f8ef; border-color: #a5dcc5; }
+.connection.is-warning { color: #945100; background: #fff4dd; border-color: #f0c27b; }
+.connection.is-offline { color: #bf3140; background: #ffecef; border-color: #e7a8af; }
+.app-header.nfon-cockpit-header .connection[data-status-mode="demo"] { color: #202426; }
+.api-card-shell > .editor-error { margin: 0; min-height: 42px; }
 
 .card-edit {
   position: absolute;
@@ -862,3 +875,146 @@ a {
   }
 
 }
+
+.landing-setup { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 24px; }
+html[data-nfon-theme="admin-portal"] .welcome-board { padding-top: 0; }
+html[data-nfon-theme="admin-portal"] .api-grid { gap: 24px; }
+html[data-nfon-theme="admin-portal"] .api-card-shell { min-height: 460px; --tone: #3200c8; }
+html[data-nfon-theme="admin-portal"] .api-card { border: 1px solid #e6e9eb; box-shadow: none; }
+html[data-nfon-theme="admin-portal"] .api-card::before,
+html[data-nfon-theme="admin-portal"] .api-card::after { display: none; }
+html[data-nfon-theme="admin-portal"] .api-card-shell:hover .api-card { background: #fff; transform: none; border-color: #afb1b3; box-shadow: none; }
+html[data-nfon-theme="admin-portal"] .card-link { padding: 24px; }
+html[data-nfon-theme="admin-portal"] .api-card h2 { min-height: 52px; font-size: 24px; line-height: 28px; margin-top: 8px; }
+html[data-nfon-theme="admin-portal"] .card-body { min-height: 170px; margin-top: 24px; }
+html[data-nfon-theme="admin-portal"] .api-card p { display: block; overflow: visible; min-height: 0; font-size: 14px; }
+html[data-nfon-theme="admin-portal"] .panel-kicker { font-size: 14px; text-transform: none; font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .status-chip { min-width: 72px; min-height: 28px; border: 0; background: transparent; font-size: 12px; color: #525354; text-transform: none; padding: 0; }
+html[data-nfon-theme="admin-portal"] .mini-ekg { display: none; }
+html[data-nfon-theme="admin-portal"] .core-list { padding-top: 16px; font-size: 14px; }
+html[data-nfon-theme="admin-portal"] .card-footer { margin-top: 16px; font-size: 12px; flex-wrap: wrap; }
+html[data-nfon-theme="admin-portal"] .service-start { min-height: 40px; background: #fff; color: #000; border: 1px solid #afb1b3; border-radius: 0; }
+html[data-nfon-theme="admin-portal"] .service-start:hover { background: #f5f6f7; }
+html[data-nfon-theme="admin-portal"] .editor-save { background: #00e682; color: #000; border: 0; min-height: 40px; }
+html[data-nfon-theme="admin-portal"] .editor-reset { min-height: 40px; border-color: #afb1b3; }
+@media (max-width: 1250px) and (min-width: 1001px) {
+  html[data-nfon-theme="admin-portal"] .api-grid { grid-template-columns: 1fr; }
+  html[data-nfon-theme="admin-portal"] .api-card-shell { min-height: 420px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-flip, .api-card { transition: none; }
+  .ekg-mask-window { animation: none; }
+}
+html[data-nfon-theme="admin-portal"] .card-flip { position: relative; display: grid; height: 100%; }
+html[data-nfon-theme="admin-portal"] .card-face { position: relative; inset: auto; grid-area: 1 / 1; min-width: 0; }
+html[data-nfon-theme="admin-portal"] .card-link { min-height: 430px; }
+html[data-nfon-theme="admin-portal"] .core-list > div { background: transparent; border: 0; border-bottom: 1px solid #e6e9eb; padding: 12px 0; min-height: 44px; }
+html[data-nfon-theme="admin-portal"] .core-list dt { font-size: 12px; text-transform: none; font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .core-list dd { font-weight: 400; }
+
+/* Admin Portal content hierarchy: section bar, open sections, thin row dividers. */
+html[data-nfon-theme="admin-portal"] .welcome-board > #page-title {
+  position: static; width: auto; height: 56px; margin: 0; padding: 16px 24px;
+  overflow: visible; clip: auto; clip-path: none; white-space: normal;
+  background: #f5f6f7; border-bottom: 1px solid #d7d9db; font-size: 16px; font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .api-grid { padding: 24px; gap: 24px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+html[data-nfon-theme="admin-portal"] .api-card-shell { min-height: 0; }
+html[data-nfon-theme="admin-portal"] .api-card,
+html[data-nfon-theme="admin-portal"] .api-card-shell:hover .api-card {
+  border: 0; box-shadow: 0 2px 2px rgba(37,38,38,.1); background: #fff;
+}
+html[data-nfon-theme="admin-portal"] .card-link { padding: 16px; min-height: 420px; }
+html[data-nfon-theme="admin-portal"] .api-card h2 { font-weight: 400; letter-spacing: normal; }
+html[data-nfon-theme="admin-portal"] .card-body { min-height: 170px; }
+html[data-nfon-theme="admin-portal"] .api-card p { font-weight: 300; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] .status-chip { border: 1px solid #525354; border-radius: 16px; min-height: 26px; padding: 0 12px; font-weight: 300; }
+html[data-nfon-theme="admin-portal"] .service-index { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .card-footer,
+html[data-nfon-theme="admin-portal"] .card-footer span { font-size: 12px; font-weight: 400; text-transform: none; }
+html[data-nfon-theme="admin-portal"] .card-edit { border: 0; border-radius: 50%; background: transparent; color: #525354; width: 40px; height: 40px; top: 8px; right: 4px; }
+html[data-nfon-theme="admin-portal"] .card-edit:hover { background: #f5f6f7; }
+html[data-nfon-theme="admin-portal"] .service-start { align-self: flex-start; width: auto; padding: 0 16px; font-weight: 400; }
+@container nfon-content (max-width: 850px) {
+  html[data-nfon-theme="admin-portal"] .api-grid { grid-template-columns: 1fr; }
+  html[data-nfon-theme="admin-portal"] .card-link { min-height: 320px; }
+  html[data-nfon-theme="admin-portal"] .card-body { min-height: 130px; }
+}
+@media (max-width: 620px) {
+  html[data-nfon-theme="admin-portal"] .api-grid { padding: 16px; }
+}
+
+/* A permanent call to action and visible edit controls identify the card as a link. */
+.card-open { display: none; }
+html[data-nfon-theme="admin-portal"] .card-link { border: 1px solid #b4a5d5; }
+html[data-nfon-theme="admin-portal"] .card-link:is(:hover, :focus-visible) {
+  border-color: #3200c8;
+  background: #f7f5ff;
+}
+html[data-nfon-theme="admin-portal"] .card-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 8px 16px;
+  background: #3200c8;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .card-open span { color: inherit; font: inherit; text-transform: none; }
+html[data-nfon-theme="admin-portal"] .card-link:is(:hover, :focus-visible) .card-open { background: #240090; }
+html[data-nfon-theme="admin-portal"] .card-route-hint { display: none; }
+html[data-nfon-theme="admin-portal"] .card-edit { opacity: 1; }
+/* Show the action at rest too, including on touch screens. */
+html[data-nfon-theme="admin-portal"] .service-start:not(:disabled) .button-label-rest { display: none; }
+html[data-nfon-theme="admin-portal"] .service-start:not(:disabled) .button-label-hover {
+  position: static;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+html[data-nfon-theme="admin-portal"] .service-start:disabled .button-label-hover { display: none; }
+
+/* Cockpit audit: shared type roles, aligned card insets and equal visual status/action size. */
+html[data-nfon-theme="admin-portal"] .api-grid { --card-inset: 24px; }
+html[data-nfon-theme="admin-portal"] .api-card-shell { min-width: 0; gap: 8px; }
+html[data-nfon-theme="admin-portal"] .card-link { padding: var(--card-inset); }
+html[data-nfon-theme="admin-portal"] .api-card-header { min-height: 40px; padding-right: 48px; gap: 8px; flex-direction: row; align-items: center; }
+html[data-nfon-theme="admin-portal"] .card-front .card-edit,
+html[data-nfon-theme="admin-portal"] .card-front .card-edit:not(:disabled):is(:hover,:focus-visible) {
+  top: calc(var(--card-inset) + 1px); right: calc(var(--card-inset) + 1px); width: 40px; height: 40px;
+  border: 0; background: transparent; transform: none; color: #3200c8;
+}
+html[data-nfon-theme="admin-portal"] .card-front .card-edit::before {
+  content: ""; position: absolute; inset: 6px; box-sizing: border-box; border: 1px solid var(--nfon-control-border);
+  border-radius: 50%; background: var(--nfon-control-bg); z-index: -1;
+}
+html[data-nfon-theme="admin-portal"] .card-front .card-edit:is(:hover,:focus-visible)::before { border-color: #3200c8; background: var(--nfon-control-hover); }
+html[data-nfon-theme="admin-portal"] .card-edit svg { width: 16px; height: 16px; }
+html[data-nfon-theme="admin-portal"] .api-card h2 { font-size: var(--nfon-type-display); line-height: 1.25; min-height: 60px; }
+html[data-nfon-theme="admin-portal"] :is(.api-card p,.panel-kicker,.core-list dd,.service-start,.editor-input,.editor-reset,.editor-save) { font-size: var(--nfon-type-body); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] :is(.service-index,.core-list dt,.card-footer,.card-footer span,.editor-meta,.editor-error) { font-size: var(--nfon-type-caption); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] .card-footer .card-open,
+html[data-nfon-theme="admin-portal"] .card-footer .card-open span { font-size: var(--nfon-type-body); }
+html[data-nfon-theme="admin-portal"] .api-card :is(p,dt,dd,.editor-label,.editor-meta,.editor-error) { min-width: 0; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .core-list div { gap: 16px; }
+html[data-nfon-theme="admin-portal"] .card-footer { gap: 8px; align-items: center; }
+html[data-nfon-theme="admin-portal"] .card-back { padding: var(--card-inset); border: 1px solid #b4a5d5; }
+html[data-nfon-theme="admin-portal"] .editor-top { gap: 16px; min-height: 56px; }
+html[data-nfon-theme="admin-portal"] .editor-label { font-size: var(--nfon-type-section); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] .editor-body { gap: 16px; padding-block: 24px; min-width: 0; }
+html[data-nfon-theme="admin-portal"] :is(.editor-input,.editor-reset,.editor-save) { min-height: 40px; }
+html[data-nfon-theme="admin-portal"] .editor-close { width: 40px; height: 40px; flex: 0 0 40px; }
+html[data-nfon-theme="admin-portal"] .editor-actions { gap: 8px; margin-top: 0; flex-wrap: wrap; }
+@container nfon-content (max-width: 1050px) {
+  html[data-nfon-theme="admin-portal"] .api-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@container nfon-content (max-width: 700px) {
+  html[data-nfon-theme="admin-portal"] .api-grid { grid-template-columns: minmax(0,1fr); --card-inset: 16px; }
+}
+
+
+.connection { display: inline-flex; align-items: center; gap: 8px; }
+.connection::before { content: ""; display: inline-block; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: currentColor; }

@@ -1,3 +1,4 @@
+const { responseMessages, serverMessage, messageDescriptor } = require("./messages.cjs");
 const http = require("http");
 const fs = require("fs");
 const fsp = require("fs/promises");
@@ -5,6 +6,14 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 const { URL } = require("url");
+const { loadEnvFile, parseEnvFlag, guardRequest, requestUrl, staticCacheControl, readPublicFile } = require("./server-safety.cjs");
+const { AsyncLocalStorage } = require("async_hooks");
+const requestContext = new AsyncLocalStorage();
+let accountGeneration = 0;
+// Bound to the displayed account/login session, not just to a CSRF/browser session.
+// A fresh process and every credential/account change invalidate prepared writes.
+let writeContext = crypto.randomBytes(32).toString("hex");
+let mutationInFlight = false;
 
 const ROOT = process.cwd();
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -27,24 +36,6 @@ function configuredLocalConfigDir() {
   return fs.existsSync(fallback) ? fallback : "";
 }
 
-function loadEnvFile(envFile) {
-  if (!envFile || !fs.existsSync(envFile)) return false;
-  const text = fs.readFileSync(envFile, "utf8");
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const separator = trimmed.indexOf("=");
-    if (separator === -1) continue;
-    const key = trimmed.slice(0, separator).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || Object.hasOwn(process.env, key)) continue;
-    let value = trimmed.slice(separator + 1).trim();
-    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    process.env[key] = value;
-  }
-  return true;
-}
 
 function loadLocalEnv(appName) {
   const configDir = configuredLocalConfigDir();
@@ -53,7 +44,7 @@ function loadLocalEnv(appName) {
     path.join(ROOT, ".env"),
     configDir ? path.join(configDir, "env", `${appName}.env`) : "",
   ];
-  candidates.find(loadEnvFile);
+  candidates.find(file => loadEnvFile(file));
 }
 
 function dataDirForApp(appName, envName) {
@@ -63,7 +54,12 @@ function dataDirForApp(appName, envName) {
   return configDir ? path.join(configDir, "data", appName) : path.join(ROOT, "data");
 }
 
-loadLocalEnv(APP_CONFIG_NAME);
+try {
+  loadLocalEnv(APP_CONFIG_NAME);
+} catch (error) {
+  console.error(`Portal configuration error: ${error.message}`);
+  process.exit(1);
+}
 
 const DATA_DIR = dataDirForApp(APP_CONFIG_NAME, "PORTAL_DATA_DIR");
 const DAYNIGHT_GATEWAY_SNAPSHOT = path.join(DATA_DIR, "daynight-gateway-migration.json");
@@ -71,8 +67,11 @@ const DEFAULT_PORT = 3001;
 const DEFAULT_JSON_LIMIT = 1024 * 1024;
 const UPLOAD_JSON_LIMIT = 5 * 1024 * 1024;
 const csrfToken = crypto.randomBytes(32).toString("base64url");
+const REQUIRED_ENDPOINT_KEYS = ["extensions", "devices", "trunks", "dids", "phoneBooks", "groups", "ivrs", "timeControls", "announcements"];
+const OPTIONAL_ENDPOINT_KEYS = new Set(["version", "basicData", "contract", "featureStatus", "queues", "skills", "voicemails", "frontdesks"]);
 
 const MIME_TYPES = {
+  ".woff2": "font/woff2",
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
@@ -97,9 +96,7 @@ function resolveLocalFile(file) {
 }
 
 function envFlag(name, fallback = false) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+  return parseEnvFlag(name, process.env[name], fallback);
 }
 
 function splitOrigins(value) {
@@ -128,6 +125,7 @@ function localhostOriginVariants(origin) {
 
 function httpError(status, message) {
   const error = new Error(message);
+  if (message?.messageKey) error.localizedMessage = message;
   error.status = status;
   return error;
 }
@@ -228,15 +226,16 @@ function readConfig() {
 
   const portalSecret = parseKeyValueSecret(readTextFile(portalSecretFile));
   const customerFromCti = parseCtiAccount(readTextFile(ctiSecretFile));
-  const liveWritesEnabled = envFlag("PORTAL_ENABLE_LIVE_WRITES", false)
-    && !envFlag("PORTAL_DISABLE_LIVE_WRITES", false);
+  const liveWritesLocked = envFlag("PORTAL_DISABLE_LIVE_WRITES", false);
+  // Server permission unlocks the Setup switch; each process still starts read-only.
+  const liveWritesEnabled = false;
   const config = {
     baseUrl: process.env.PORTAL_BASE_URL || "https://portal-api.nfon.net:8090",
     apiKeyId: process.env.PORTAL_API_KEY_ID || portalSecret.apiKeyId,
     apiKeySecret: process.env.PORTAL_API_KEY_SECRET || portalSecret.apiKeySecret,
     customerAccount: process.env.PORTAL_CUSTOMER_ACCOUNT || portalSecret.customerAccount || customerFromCti,
     appName: process.env.APP_NAME || "nfon-portal-api-showcase",
-    appVersion: process.env.APP_VERSION || "0.1.0",
+    appVersion: process.env.APP_VERSION || "1.2.0",
     port: Number(process.env.PORT || DEFAULT_PORT),
     host: process.env.HOST || "127.0.0.1",
     allowedOrigin: process.env.PORTAL_ALLOWED_ORIGIN || process.env.ALLOWED_ORIGIN || `http://localhost:${process.env.PORT || DEFAULT_PORT}`,
@@ -249,13 +248,21 @@ function readConfig() {
         path.join(ROOT, "data", "google-contacts.json"),
       ]),
     liveWritesEnabled,
+    liveWritesPermitted: envFlag("PORTAL_ENABLE_LIVE_WRITES", false),
+    liveWritesLocked,
   };
 
   config.configured = Boolean(config.apiKeyId && config.apiKeySecret && config.customerAccount);
   return config;
 }
 
-const config = readConfig();
+let config;
+try {
+  config = readConfig();
+} catch (error) {
+  console.error(`Portal configuration error: ${error.message}`);
+  process.exit(1);
+}
 const allowedOrigins = new Set([
   ...localhostOriginVariants(`http://localhost:${config.port}`),
   ...localhostOriginVariants(`http://127.0.0.1:${config.port}`),
@@ -280,26 +287,39 @@ function currentUserAgent() {
 }
 
 function liveWritesDisabledMessage() {
+  if (config.liveWritesLocked) return "Live writes are locked by the server configuration (PORTAL_DISABLE_LIVE_WRITES).";
   return "Live-Schreiben ist fuer diese Sitzung deaktiviert. Aktiviere es bewusst im Setup, wenn Confirmations, Audit-Log und Rollback fuer die Aktion freigegeben sind.";
+}
+
+function areLiveWritesEnabled() {
+  return config.configured && config.liveWritesPermitted && runtimeSettings.liveWritesEnabled && !config.liveWritesLocked;
 }
 
 function liveWritesDisabledError() {
   const error = new Error(liveWritesDisabledMessage());
   error.status = 423;
-  error.code = "LIVE_WRITES_DISABLED";
+  error.code = config.liveWritesLocked ? "LIVE_WRITES_LOCKED" : "LIVE_WRITES_DISABLED";
   return error;
 }
 
 function assertLiveWritesEnabled() {
-  if (runtimeSettings.liveWritesEnabled) return;
+  if (areLiveWritesEnabled()) return;
+  if (config.liveWritesPermitted && !config.liveWritesLocked && !config.configured) throw httpError(409, serverMessage("portal.error.notConfigured"));
   throw liveWritesDisabledError();
 }
 
 function clearPortalCache() {
+  accountGeneration += 1;
+  writeContext = crypto.randomBytes(32).toString("hex");
+  const scope = requestContext.getStore();
+  if (scope?.changesAccount) scope.generation = accountGeneration;
   cache.overview = null;
   cache.callflow = null;
   cache.syncedAt = null;
   cache.errors = {};
+  cache.managedTimeControls = [];
+  discoveryCache.clear();
+  upstreamRetryAfter = 0;
 }
 
 function liveWritesDisabledResult(base = {}) {
@@ -310,10 +330,10 @@ function liveWritesDisabledResult(base = {}) {
     dryRun: false,
     applied: false,
     blocked: true,
-    code: "LIVE_WRITES_DISABLED",
+    code: config.liveWritesLocked ? "LIVE_WRITES_LOCKED" : "LIVE_WRITES_DISABLED",
     title: "Live-Schreiben deaktiviert",
     message: liveWritesDisabledMessage(),
-    liveWritesEnabled: runtimeSettings.liveWritesEnabled,
+    liveWritesEnabled: areLiveWritesEnabled(),
     createdAt: base.createdAt || new Date().toISOString(),
   };
 }
@@ -347,7 +367,7 @@ function sendJson(req, res, status, body, headers = {}) {
     "Cache-Control": "no-store",
     ...headers,
   }));
-  res.end(JSON.stringify(body, null, 2));
+  res.end(JSON.stringify(responseMessages(body, status), null, 2));
 }
 
 function sendError(req, res, status, message, details = {}) {
@@ -355,6 +375,7 @@ function sendError(req, res, status, message, details = {}) {
 }
 
 function portalErrorMessage(error) {
+  if (error?.localizedMessage) return error.localizedMessage;
   if (!(error instanceof PortalApiError)) return error?.message || "Portal API Fehler";
   const body = error?.body;
   const bodyText = typeof body === "string"
@@ -421,8 +442,11 @@ async function readRequestJson(req, options = {}) {
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text.trim()) return {};
   try {
-    return JSON.parse(text);
-  } catch {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw httpError(400, "JSON request body must be an object.");
+    return value;
+  } catch (error) {
+    if (error.status) throw error;
     throw httpError(400, "Malformed JSON request body");
   }
 }
@@ -442,7 +466,9 @@ async function repairPrivateFileMode(file) {
 
 async function writePrivateJson(file, body) {
   await ensureDataDir();
-  await fsp.writeFile(file, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
+  const temporary = file + "." + crypto.randomUUID() + ".tmp";
+  await fsp.writeFile(temporary, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
+  await fsp.rename(temporary, file);
   await repairPrivateFileMode(file);
 }
 
@@ -464,7 +490,7 @@ async function readResponseBody(response) {
   }
 }
 
-function makePortalHeaders(method, requestPath, bodyText = "") {
+function makePortalHeaders(method, requestPath, bodyText = "", credentials = config) {
   const upperMethod = method.toUpperCase();
   const date = new Date().toUTCString();
   const headers = {
@@ -483,11 +509,11 @@ function makePortalHeaders(method, requestPath, bodyText = "") {
   }
 
   const signature = crypto
-    .createHmac("sha1", config.apiKeySecret)
+    .createHmac("sha1", credentials.apiKeySecret)
     .update(stringToSign, "utf8")
     .digest("base64");
 
-  headers.Authorization = `NFON-API ${config.apiKeyId}:${signature}`;
+  headers.Authorization = `NFON-API ${credentials.apiKeyId}:${signature}`;
   return headers;
 }
 
@@ -495,30 +521,91 @@ class PortalApiError extends Error {
   constructor(message, response, body) {
     super(message);
     this.name = "PortalApiError";
+    if (message?.messageKey) this.localizedMessage = message;
     this.status = response?.status || 0;
     this.body = body;
   }
 }
 
+function portalTransportError(cause) {
+  // Native fetch nests transport diagnostics in cause/AggregateError. Only expose
+  // known codes and fixed messages, never raw connection details or credentials.
+  const categories = [
+    { kind: "dns", codes: ["ENOTFOUND", "EAI_AGAIN"], message: "Portal API hostname could not be resolved" },
+    { kind: "timeout", codes: ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"], message: "Portal API connection timed out" },
+    { kind: "tls", codes: ["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID"], message: "Portal API TLS certificate could not be verified" },
+    { kind: "connection", codes: ["ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_SOCKET"], message: "Portal API connection could not be established" },
+  ];
+  const pending = [cause];
+  const seen = new Set();
+  let diagnostic;
+  while (pending.length && seen.size < 16 && !diagnostic) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const category = categories.find((entry) => entry.codes.includes(current.code));
+    if (category) diagnostic = { ...category, code: current.code };
+    else if (current.name === "TimeoutError") diagnostic = { kind: "timeout", code: "TIMEOUT", message: "Portal API connection timed out" };
+    if (current.cause) pending.push(current.cause);
+    if (Array.isArray(current.errors)) pending.push(...current.errors);
+  }
+  const error = new Error(diagnostic ? `${diagnostic.message} (${diagnostic.code}).` : "Portal API network request failed.");
+  error.code = diagnostic?.code || "PORTAL_NETWORK_ERROR";
+  error.kind = diagnostic?.kind || "network";
+  return error;
+}
+
+let upstreamRetryAfter = 0;
+const discoveryCache = new Map();
+
 async function portalFetch(apiPath, options = {}) {
-  if (!config.configured) {
-    throw new Error("Portal API credentials or customer account are missing");
+  const credentials = options.credentials || config;
+  if (!credentials.configured) {
+    throw httpError(409, serverMessage("portal.error.notConfigured"));
   }
 
+  const scope = requestContext.getStore();
+  if (scope && scope.generation !== accountGeneration) throw httpError(409, "Account changed. Reload before continuing.");
+  const generation = accountGeneration;
   const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    assertLiveWritesEnabled();
+    if (cache.overview?.endpoints) requireCompleteInventory(cache.overview);
+    assertCustomerPath(apiPath);
+    for (const link of options.body?.links || []) {
+      if (link.href && String(link.href).includes("/customers/")) assertCustomerPath(link.href);
+    }
+  }
+  if (Date.now() < upstreamRetryAfter) throw httpError(429, "Portal API rate limit reached. Retry later.");
   const bodyText = options.body ? JSON.stringify(options.body) : "";
-  const url = new URL(apiPath, config.baseUrl);
+  const url = new URL(apiPath, credentials.baseUrl);
+  if (url.origin !== new URL(credentials.baseUrl).origin) throw httpError(400, "Portal URL must use the configured origin.");
   const requestPath = `${url.pathname}${url.search}`;
-  const response = await fetch(url, {
-    method,
-    headers: makePortalHeaders(method, requestPath, bodyText),
-    body: bodyText || undefined,
-  });
-  const body = await readResponseBody(response);
+  let response;
+  let body;
+  try {
+    response = await fetch(url, {
+      method,
+      redirect: "error",
+      signal: AbortSignal.timeout(15000),
+      headers: makePortalHeaders(method, requestPath, bodyText, credentials),
+      body: bodyText || undefined,
+    });
+    body = await readResponseBody(response);
+  } catch (error) {
+    throw portalTransportError(error);
+  }
 
+  if (generation !== accountGeneration) throw httpError(409, "Account changed. Reload before continuing.");
   if (!response.ok) {
-    const hint = typeof body === "string" ? body : body?.message || body?.error || "";
-    throw new PortalApiError(`HTTP ${response.status}${hint ? `: ${hint}` : ""}`, response, body);
+    if (response.status === 429) {
+      const retry = response.headers.get("retry-after");
+      const seconds = /^\d+$/.test(retry || "") ? Number(retry) : Math.ceil((Date.parse(retry) - Date.now()) / 1000);
+      upstreamRetryAfter = Date.now() + Math.max(1, Math.min(300, Number.isFinite(seconds) ? seconds : 30)) * 1000;
+    }
+    // Do not reflect arbitrary upstream bodies or secrets into the browser.
+    const message = response.status === 429 ? serverMessage("portal.error.rateLimit") : serverMessage("portal.requestFailed", {status:response.status});
+    throw new PortalApiError(message, response, null);
   }
 
   return {
@@ -546,7 +633,7 @@ function flattenData(data) {
 
 function normalizeItem(item) {
   if (!item || typeof item !== "object") return {};
-  const links = {};
+  const links = item.links && typeof item.links === "object" && !Array.isArray(item.links) ? { ...item.links } : {};
   if (Array.isArray(item.links)) {
     for (const link of item.links) {
       const key = link.rel || link.name || link.prompt || link.href;
@@ -622,52 +709,177 @@ function stringFromMappedField(item, pathName, fallbackKeys = []) {
   return pickField(item, fallbackKeys, "");
 }
 
+function assertCustomerPath(value) {
+  const url = new URL(value, config.baseUrl);
+  const expected = "/api/customers/" + encodeURIComponent(config.customerAccount) + "/";
+  if (url.origin !== new URL(config.baseUrl).origin || !url.pathname.startsWith(expected)) {
+    throw httpError(403, "Write target does not belong to the active account.");
+  }
+  return url.pathname + url.search;
+}
+
+async function fetchAllPages(apiPath) {
+  const deadline = Date.now() + 60000;
+  const initial = await portalFetch(apiPath);
+  let current = validatedPortalCollection(initial.body, apiPath);
+  const items = [...current.items];
+  let total = current.total;
+  const identities = new Set(current.identities);
+  if (identities.size !== items.length) throw httpError(502, "Repeated Portal page; operation blocked.");
+  for (let pages=1;;pages++) {
+    const next = current.next;
+    if (total !== null && items.length === total && !next) break;
+    if (total !== null && items.length > total) throw httpError(502, "Portal collection changed while loading; retry.");
+    if (pages >= 100 || items.length >= 50000 || Date.now() > deadline) throw httpError(502, "Portal pagination limit reached; operation blocked.");
+    const url = new URL(apiPath, config.baseUrl);
+    url.searchParams.set("_offset", String(items.length)); url.searchParams.set("_pagesize", "100");
+    current = validatedPortalCollection((await portalFetch(url.pathname + url.search)).body, apiPath);
+    const page = current.items;
+    if (current.total !== null) {
+      if (total !== null && current.total !== total) throw httpError(502, "Portal collection changed while loading; retry.");
+      total = current.total;
+    }
+    if (!page.length) {
+      if ((total === null || items.length === total) && !current.next) break;
+      throw httpError(502, "Incomplete Portal collection; operation blocked.");
+    }
+    for (const identity of current.identities) { if(identities.has(identity)) throw httpError(502, "Repeated Portal page; operation blocked."); identities.add(identity); }
+    items.push(...page);
+  }
+  return {...initial,body:{...initial.body,items},items,complete:true,total:items.length};
+}
+
+function validatedPortalCollection(body, apiPath) {
+  const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const collection = record(body) && hasOwn(body, "collection") ? body.collection : body;
+  if (!record(collection)) throw httpError(502, "Incomplete Portal collection; operation blocked.");
+  const rawItems = Array.isArray(collection.items) ? collection.items : collection.entries;
+  if (!Array.isArray(rawItems)) throw httpError(502, "Incomplete Portal collection; operation blocked.");
+
+  // Absence means unknown. Explicit null, booleans and strings are not counts.
+  const totals = [collection, ...(collection === body ? [] : [body])]
+    .filter(value => hasOwn(value, "total")).map(value => value.total);
+  if (totals.some(value => typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) throw httpError(502, "Invalid Portal collection total.");
+  if (totals.length > 1 && totals.some(value => value !== totals[0])) throw httpError(502, "Portal collection changed while loading; retry.");
+
+  const scalarIdentity = value => (typeof value === "string" && value.trim() !== "") || (typeof value === "number" && Number.isFinite(value));
+  const collectionUrl = new URL(apiPath, config.baseUrl);
+  const prefix = collectionUrl.pathname.replace(/\/+$/, "") + "/";
+  const resourceUrl = value => {
+    const url = new URL(value, collectionUrl.origin + prefix);
+    // Fragments and a terminal slash do not distinguish Portal resources.
+    // Normalize each segment separately so encoded separators keep their scope.
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "").split("/").map(segment => encodeURIComponent(decodeURIComponent(segment))).join("/");
+    return url;
+  };
+  const extensions = /\/targets\/phone-extensions\/?$/.test(collectionUrl.pathname);
+  const identityKeys = extensions ? ["extensionNumber", "extension", "number", "id"]
+    : ["id", "number", "extensionNumber", "extension", "serviceNumber", "didNumber", "trunkNumber", "deviceId", "uniqueIdentifier", "externalIdentifier"];
+  const identities = [];
+  const items = rawItems.map(raw => {
+    if (!record(raw)) throw httpError(502, "Invalid Portal collection item; operation blocked.");
+    if (hasOwn(raw, "href") && typeof raw.href !== "string") throw httpError(502, "Invalid Portal resource identity; operation blocked.");
+    const item = normalizeItem(raw);
+    const fields = lowerFieldMap(item);
+    const values = identityKeys.map(key => fields.get(key.toLowerCase())).filter(value => value !== undefined && value !== null && value !== "");
+    if (values.some(value => !scalarIdentity(value))) throw httpError(502, "Invalid Portal resource identity; operation blocked.");
+    let route = "";
+    let href;
+    if (item.href) {
+      href = resourceUrl(item.href);
+      const suffix = href.pathname.replace(/\/+$/, "").slice(prefix.length);
+      if (href.origin !== collectionUrl.origin || href.pathname === "/") throw httpError(502, "Invalid Portal resource identity; operation blocked.");
+      // A DID collection may link to an inbound-trunk-number resource. Only
+      // extension-number inference needs the collection's direct child route.
+      if (extensions && (!href.pathname.startsWith(prefix) || !suffix || suffix.includes("/"))) throw httpError(502, "Invalid Portal resource identity; operation blocked.");
+      route = extensions ? decodeURIComponent(suffix) : href.pathname;
+    }
+    // Collection+JSON identifies a resource by href; flat representations use
+    // the existing identity fields. Display labels alone cannot prove inventory.
+    if (!route && !values.length) throw httpError(502, "Missing Portal resource identity; operation blocked.");
+    // Never let compactExtension invent an index as an extension number.
+    if (extensions) {
+      if (route && values.length && String(values[0]) !== route) throw httpError(502, "Conflicting Portal resource identity; operation blocked.");
+      item.extensionNumber = String(values[0] ?? route);
+    }
+    identities.push(extensions ? `extension:${item.extensionNumber}`
+      : `resource:${(href || resourceUrl(encodeURIComponent(String(values[0])))).href}`);
+    return item;
+  });
+  const next = (collection.links || []).some(link => /^(next|next-page)$/i.test(link.rel));
+  return { items, identities, total: totals[0] ?? null, next };
+}
+
+function requireCompleteInventory(overview, keys = REQUIRED_ENDPOINT_KEYS) {
+  if (!overview || overview.demo || keys.some(key => !overview.endpoints?.[key]?.ok || overview.endpoints[key].complete !== true)) {
+    throw httpError(409, "Complete live inventory is required. Reload before applying changes.");
+  }
+}
+
 function summarizeEndpoint(result) {
   if (!result.ok) return result;
-  const items = extractItems(result.body);
+  // Collection items already carry validated identities; flattening raw data
+  // again could erase an extension number inferred from its resource href.
+  const items = result.items || extractItems(result.body);
   return {
     ok: true,
     status: result.status,
     path: result.path,
     count: items.length,
     item: items[0] || objectFromBody(result.body),
-    items: items.slice(0, 250),
+    items,
+    complete: result.complete === true,
+    total: result.total ?? items.length,
     data: objectFromBody(result.body),
   };
 }
 
-async function safePortalCall(key, apiPath) {
+async function safePortalCall(key, apiPath, { collection = true } = {}) {
   try {
-    return summarizeEndpoint(await portalFetch(apiPath));
+    return summarizeEndpoint(await (collection ? fetchAllPages(apiPath) : portalFetch(apiPath)));
   } catch (error) {
     return {
       ok: false,
       path: apiPath,
       status: error.status || 0,
       error: error.message,
+      errorCode: error.code || "",
+      errorKind: error.kind || (error.status ? "http" : "unknown"),
     };
   }
 }
 
 async function firstAvailablePortalCall(key, apiPaths) {
+  const cacheKey = `${accountGeneration}:${key}`;
+  const known = discoveryCache.get(cacheKey);
+  if (known?.unavailable && known.expires > Date.now()) return known.result;
+  const paths = known?.path ? [known.path, ...apiPaths.filter(path => path !== known.path)] : apiPaths;
   const attempts = [];
 
-  for (const apiPath of apiPaths) {
+  for (const apiPath of paths) {
     const result = await safePortalCall(key, apiPath);
     attempts.push(result);
-    if (result.ok) return result;
+    if (result.ok) { discoveryCache.set(cacheKey, { path: apiPath }); return result; }
+    // Only a missing route justifies discovery. Do not multiply auth/rate-limit/outage failures.
+    if (![404, 405].includes(result.status)) return { ...result, optional: true, count: 0, items: [], data: {} };
   }
 
-  return {
+  const unavailable = {
     ok: false,
     optional: true,
     path: apiPaths.join(" | "),
     status: attempts.find((attempt) => attempt.status)?.status || 0,
-    error: attempts.map((attempt) => `${attempt.path}: ${attempt.status || attempt.error}`).join("; "),
+    error: attempts.find(attempt => attempt.status)?.error || "Optional Portal feature unavailable.",
+    attempts,
+    errorCode: attempts.find((attempt) => attempt.errorCode)?.errorCode || "",
+    errorKind: attempts.find((attempt) => attempt.errorKind)?.errorKind || "unknown",
     count: 0,
     items: [],
     data: {},
   };
+  discoveryCache.set(cacheKey, { unavailable: true, result: unavailable, expires: Date.now() + 300000 });
+  return unavailable;
 }
 
 function extensionLabel(extension) {
@@ -751,12 +963,13 @@ function normalizeDisplayName(value) {
 }
 
 function validatePortalDisplayName(value, label = "Name") {
+  if (typeof value !== "string") throw httpError(400, serverMessage("portal.error.invalidJson"));
   const name = normalizeDisplayName(value);
   if (!name || name.length > 50) {
-    throw new Error(`${label} muss 1 bis 50 Zeichen lang sein.`);
+    throw httpError(400, serverMessage("portal.server.valueMustContainBetween1And50Characters", {p0: label}));
   }
-  if (/[&$!?=|"{}]/.test(name)) {
-    throw new Error(`${label} enthaelt nicht erlaubte Zeichen: & $ ! ? = | " { }`);
+  if (/[&$!?=|"{}<>]/.test(name)) {
+    throw httpError(400, serverMessage("portal.server.valueContainsUnsupportedCharacters", {p0: label}));
   }
   return name;
 }
@@ -786,7 +999,7 @@ function compactDid(item, index) {
     id: didNumber,
     name: didNumber,
     href: item.href || "",
-    value: destinationName || destinationExtension || "kein Ziel erkannt",
+    value: destinationName || destinationExtension || "",
     trunkNumber: pickField(item, ["trunkNumber"], ""),
     didExtension: pickField(item, ["didExtension"], ""),
     destinationName,
@@ -816,10 +1029,21 @@ function targetFromHref(href, inventory) {
     const queue = matchByHrefOrRoute(inventory.queues);
     return {
       type: "QUEUE",
-      title: queue?.name || `Warteschlange ${routeNumber}`,
-      subtitle: queue?.extensionNumber ? `Warteschlange ${queue.extensionNumber}` : "Warteschlange",
+      title: queue?.name || serverMessage("portal.queueValue", {p0: routeNumber}),
+      subtitle: queue?.extensionNumber ? serverMessage("portal.queueValue", {p0: queue.extensionNumber}) : "Warteschlange",
       targetNumber: queue?.extensionNumber || "",
       routeNumber: queue?.serviceNumber || routeNumber,
+      href: value,
+    };
+  }
+  if (value.includes("/skill-services/")) {
+    const skill = matchByHrefOrRoute(inventory.skills);
+    return {
+      type: "SKILL",
+      title: skill?.name || serverMessage("portal.skillGroupValue", {p0: routeNumber}),
+      subtitle: skill?.extensionNumber ? serverMessage("portal.skillGroupValue", {p0: skill.extensionNumber}) : serverMessage("portal.skillGroup"),
+      targetNumber: skill?.extensionNumber || "",
+      routeNumber: skill?.serviceNumber || routeNumber,
       href: value,
     };
   }
@@ -827,8 +1051,8 @@ function targetFromHref(href, inventory) {
     const extension = (inventory.extensions || []).find((item) => item.id === routeNumber || item.number === routeNumber);
     return {
       type: "PHONEEXTENSION",
-      title: extension?.name || `Nebenstelle ${routeNumber}`,
-      subtitle: `Nebenstelle ${extension?.number || routeNumber}`,
+      title: extension?.name || serverMessage("portal.extensionValue", {p0: routeNumber}),
+      subtitle: serverMessage("portal.extensionValue", {p0: extension?.number || routeNumber}),
       targetNumber: extension?.number || routeNumber,
       routeNumber: extension?.number || routeNumber,
       href: value,
@@ -839,8 +1063,8 @@ function targetFromHref(href, inventory) {
     const extension = (inventory.extensions || []).find((item) => item.voicemailHref === value || item.voicemailNumber === routeNumber || item.number === routeNumber);
     return {
       type: "VOICEMAIL",
-      title: voicemail?.name || extension?.name || `AB ${routeNumber}`,
-      subtitle: extension?.number ? `Anrufbeantworter ${extension.number}` : "Anrufbeantworter",
+      title: voicemail?.name || extension?.name || serverMessage("portal.server.voicemailValue", {p0: routeNumber}),
+      subtitle: extension?.number ? serverMessage("portal.voicemailValue", {p0: extension.number}) : "Anrufbeantworter",
       targetNumber: extension?.number || voicemail?.extensionNumber || "",
       routeNumber: voicemail?.serviceNumber || extension?.voicemailNumber || routeNumber,
       href: value,
@@ -861,8 +1085,8 @@ function targetFromHref(href, inventory) {
     const ivr = matchByHrefOrRoute(inventory.ivrs);
     return {
       type: "IVR",
-      title: ivr?.name || `Sprachdialog ${routeNumber}`,
-      subtitle: ivr?.extensionNumber ? `Sprachdialog ${ivr.extensionNumber}` : "Sprachdialog",
+      title: ivr?.name || serverMessage("portal.voiceDialogValue", {p0: routeNumber}),
+      subtitle: ivr?.extensionNumber ? serverMessage("portal.voiceDialogValue", {p0: ivr.extensionNumber}) : "Sprachdialog",
       targetNumber: ivr?.extensionNumber || "",
       routeNumber: ivr?.serviceNumber || routeNumber,
       href: value,
@@ -872,15 +1096,15 @@ function targetFromHref(href, inventory) {
     const timeControl = matchByHrefOrRoute(inventory.timeControls);
     return {
       type: "TIMECONTROL",
-      title: timeControl?.name || `Zeitsteuerung ${routeNumber}`,
-      subtitle: timeControl?.extensionNumber ? `Zeitsteuerung ${timeControl.extensionNumber}` : "Zeitsteuerung",
+      title: timeControl?.name || serverMessage("portal.timeControlValue", {p0: routeNumber}),
+      subtitle: timeControl?.extensionNumber ? serverMessage("portal.timeControlValue", {p0: timeControl.extensionNumber}) : "Zeitsteuerung",
       targetNumber: timeControl?.extensionNumber || "",
       routeNumber: timeControl?.serviceNumber || routeNumber,
       href: value,
     };
   }
   if (value.toUpperCase().includes("HANGUP")) {
-    return { type: "HANGUP", title: "Auflegen", subtitle: "Anruf beenden", targetNumber: "HANGUP", routeNumber: "HANGUP", href: value };
+    return { type: "HANGUP", title: serverMessage("portal.hangUp"), subtitle: serverMessage("portal.endCall"), targetNumber: "HANGUP", routeNumber: "HANGUP", href: value };
   }
   return null;
 }
@@ -889,9 +1113,9 @@ async function hydrateIvrDetails(ivrs, inventory) {
   return Promise.all((ivrs || []).map(async (ivr) => {
     if (!ivr.href) return ivr;
     const [detail, keys, timeout] = await Promise.all([
-      safePortalCall(`ivr-detail-${ivr.serviceNumber || ivr.value}`, ivr.href),
+      safePortalCall(`ivr-detail-${ivr.serviceNumber || ivr.value}`, ivr.href, { collection: false }),
       safePortalCall(`ivr-keys-${ivr.serviceNumber || ivr.value}`, `${ivr.href}/key-assignments`),
-      safePortalCall(`ivr-timeout-${ivr.serviceNumber || ivr.value}`, `${ivr.href}/timeout`),
+      safePortalCall(`ivr-timeout-${ivr.serviceNumber || ivr.value}`, `${ivr.href}/timeout`, { collection: false }),
     ]);
     const detailItem = detail.item || {};
     const announcementHref = linkHref(detailItem, ["announcement"]);
@@ -909,6 +1133,7 @@ async function hydrateIvrDetails(ivrs, inventory) {
     const detailExtension = pickField(detailItem, ["extensionNumber"], "");
     return {
       ...ivr,
+      detailError: [detail, keys, timeout].find(result => !result.ok)?.error || "",
       name: detailName || ivr.name,
       extensionNumber: detailExtension || ivr.extensionNumber,
       announcement: announcement?.name || pickField(detailItem, ["announcementName", "announcement"], ""),
@@ -919,17 +1144,35 @@ async function hydrateIvrDetails(ivrs, inventory) {
   }));
 }
 
+function timeWindowFromDetails(detail) {
+  const days = { MONDAY: "Mon", TUESDAY: "Tue", WEDNESDAY: "Wed", THURSDAY: "Thu", FRIDAY: "Fri", SATURDAY: "Sat", SUNDAY: "Sun" };
+  const fromDay = days[String(detail.fromDay || "").toUpperCase()];
+  const toDay = days[String(detail.toDay || "").toUpperCase()];
+  const clock = value => {
+    const match = String(value || "").trim().match(/^(\d{1,2}):([0-5]\d)(?:\s*(AM|PM))?$/i);
+    if (!match) return "";
+    const hour = Number(match[1]), period = match[3]?.toUpperCase();
+    if (hour > (period ? 12 : 23) || (period && hour < 1)) return "";
+    return `${String(period ? hour % 12 + (period === "PM" ? 12 : 0) : hour).padStart(2, "0")}:${match[2]}`;
+  };
+  const fromTime = clock(detail.fromTimeOfDay), toTime = clock(detail.toTimeOfDay);
+  return fromDay && toDay && fromTime && toTime ? `${fromDay}${fromDay === toDay ? "" : `-${toDay}`} ${fromTime}-${toTime}` : "";
+}
+
 async function hydrateTimeControlDetails(timeControls) {
   return Promise.all((timeControls || []).map(async (timeControl) => {
     if (!timeControl.href) return timeControl;
-    const detail = await safePortalCall(`time-control-detail-${timeControl.serviceNumber || timeControl.value}`, timeControl.href);
+    const detail = await safePortalCall(`time-control-detail-${timeControl.serviceNumber || timeControl.value}`, timeControl.href, { collection: false });
     const detailItem = detail.item || {};
     return {
       ...timeControl,
+      detailError: detail.ok ? "" : detail.error,
       dayTargetHref: apiPathFromHref(linkHref(detailItem, ["destinationIfAllowed", "allowedDestination", "targetIfAllowed"])),
       nightTargetHref: apiPathFromHref(linkHref(detailItem, ["destinationIfDenied", "deniedDestination", "targetIfDenied"])),
-      timezoneHref: apiPathFromHref(linkHref(detailItem, ["timezone", "timeZone"])) || "/api/time-zones/Europe.Berlin",
+      timezoneHref: timeZoneHref(linkHref(detailItem, ["timezone", "timeZone"])),
       evaluationStrategy: pickField(detailItem, ["evaluationStrategy"], ""),
+      hours: timeWindowFromDetails(detailItem),
+      routingBody: { links: Array.isArray(detailItem.links) ? detailItem.links : Object.entries(detailItem.links || {}).map(([rel,href]) => ({rel,href})), data: Object.entries(detailItem).filter(([key,value]) => !["href","links"].includes(key) && value !== undefined && typeof value !== "object").map(([name,value])=>({name,value})) },
     };
   }));
 }
@@ -1016,27 +1259,22 @@ function apiPathFromHref(value) {
   }
 }
 
-function trunkHrefForDid(did) {
-  if (did.trunkHref) return did.trunkHref;
-  const customer = encodeURIComponent(config.customerAccount || "{customer}");
-  const didId = lastPathSegment(did.href);
-  const trunkId = didId.includes("-") ? didId.replace(/-\d+$/, ".0-9") : "";
-  return trunkId ? `/api/customers/${customer}/trunks/${encodeURIComponent(trunkId)}` : "";
+function didDestinationOperation(did, targetHref, action = "set-destination") {
+  const id = inboundNumberIdForDid(did);
+  if (!id) throw httpError(400, "DID identifier missing.");
+  const customer = encodeURIComponent(config.customerAccount);
+  const destination = targetHref || "/api/customers/" + customer + "/targets/NO_ACTION";
+  assertCustomerPath(destination);
+  if (did.href) assertCustomerPath(did.href);
+  return { action, method: "PUT", endpoint: "/api/customers/" + customer + "/dids/" + encodeURIComponent(id) + "/destination", body: { links: [{ rel: "destination", href: destination }] } };
 }
 
 function inboundNumberIdForDid(did) {
   return lastPathSegment(did.href) || String(did.name || did.id || "").replace(/^\+/, "00").replace(/[ ()]/g, "").replace(/-/g, "-");
 }
 
-function buildInboundAssignmentBody(did) {
-  const trunkHref = trunkHrefForDid(did);
-  return {
-    links: trunkHref ? [{ rel: "trunk", href: trunkHref }] : [],
-    data: [{ name: "didExtension", value: String(did.didExtension || numberFromText(did.name)) }],
-  };
-}
-
 function buildCallflowUpdate(payload) {
+  assertUnambiguousFlow(payload.flow);
   const did = payload.did || {};
   const target = payload.target || {};
   const destinationType = normalizeDestinationType(target.type);
@@ -1046,29 +1284,10 @@ function buildCallflowUpdate(payload) {
     ? explicitTargetHref.replace(/\/inbound-trunk-numbers(?:\/.*)?$/, "").replace(/\/+$/, "")
     : "";
   const destinationRouteNumber = target.routeNumber || target.serviceNumber || lastPathSegment(explicitTargetBase) || destinationExtensionNumber;
-  const sourceRouteNumber = normalizeDestinationType(did.destinationType) === "QUEUE"
-    ? did.destinationServiceNumber || did.destinationExtension
-    : did.destinationExtension;
+  const sourceRouteNumber = didDestinationRoute(did);
   const customer = encodeURIComponent(config.customerAccount || "{customer}");
   const oldTargetPath = inboundTargetPath(did.destinationType);
   const newTargetPath = inboundTargetPath(destinationType);
-  const inboundNumberId = inboundNumberIdForDid(did);
-  const oldEndpoint = oldTargetPath && sourceRouteNumber && inboundNumberId
-    ? `/api/customers/${customer}/targets/${oldTargetPath}/${encodeURIComponent(sourceRouteNumber)}/inbound-trunk-numbers/${encodeURIComponent(inboundNumberId)}`
-    : "";
-  const newEndpoint = explicitTargetBase
-    ? `${explicitTargetBase}/inbound-trunk-numbers`
-    : newTargetPath && destinationRouteNumber
-      ? `/api/customers/${customer}/targets/${newTargetPath}/${encodeURIComponent(destinationRouteNumber)}/inbound-trunk-numbers`
-      : "";
-  const newDeleteEndpoint = newEndpoint && inboundNumberId
-    ? `${newEndpoint}/${encodeURIComponent(inboundNumberId)}`
-    : "";
-  const newBody = buildInboundAssignmentBody(did);
-  const oldBody = buildInboundAssignmentBody({
-    ...did,
-    didExtension: did.didExtension || numberFromText(did.name),
-  });
   const fields = {
     destinationType,
     destinationExtensionNumber,
@@ -1076,53 +1295,34 @@ function buildCallflowUpdate(payload) {
     destinationRouteNumber,
   };
 
-  return {
-    endpoint: newEndpoint,
-    method: "DELETE+POST",
-    fields,
-    body: newBody,
-    operations: [
-      oldEndpoint ? { action: "delete-old-routing", method: "DELETE", endpoint: oldEndpoint } : null,
-      newEndpoint ? { action: "create-new-routing", method: "POST", endpoint: newEndpoint, body: newBody } : null,
-    ].filter(Boolean),
-    rollback: oldEndpoint
-      ? {
-        action: "restore-old-routing",
-        method: "POST",
-        endpoint: oldEndpoint.replace(/\/inbound-trunk-numbers\/[^/]+$/, "/inbound-trunk-numbers"),
-        body: oldBody,
-      }
-      : null,
-    rollbackOperations: [
-      newDeleteEndpoint ? { action: "delete-new-routing", method: "DELETE", endpoint: newDeleteEndpoint } : null,
-      oldEndpoint ? {
-        action: "restore-old-routing",
-        method: "POST",
-        endpoint: oldEndpoint.replace(/\/inbound-trunk-numbers\/[^/]+$/, "/inbound-trunk-numbers"),
-        body: oldBody,
-      } : null,
-    ].filter(Boolean),
-  };
+  const destination = explicitTargetBase || (newTargetPath && destinationRouteNumber ? "/api/customers/" + customer + "/targets/" + newTargetPath + "/" + encodeURIComponent(destinationRouteNumber) : "");
+  if (!destination) throw httpError(400, "Routing target missing.");
+  const operation = didDestinationOperation(did, destination);
+  const previousTarget = oldTargetPath && sourceRouteNumber ? "/api/customers/" + customer + "/targets/" + oldTargetPath + "/" + encodeURIComponent(sourceRouteNumber) : "";
+  const rollback = didDestinationOperation(did, previousTarget, "restore-original-routing");
+  return { endpoint: operation.endpoint, method: "PUT", fields, body: operation.body, operations: [operation], rollback, rollbackOperations: [rollback] };
+
 }
 
 function validateCallflowUpdate(payload, update) {
   const didName = payload.did?.name || payload.did?.id || "";
 
   if (!didName) {
-    throw new Error("Keine Rufnummer für die Übernahme gefunden.");
+    throw httpError(400, "Keine Rufnummer für die Übernahme gefunden.");
   }
   if (!update.fields.destinationType) {
-    throw new Error("Kein Zieltyp für die Übernahme gefunden.");
+    throw httpError(400, "Kein Zieltyp für die Übernahme gefunden.");
   }
   if (!update.fields.destinationRouteNumber) {
-    throw new Error("Keine Zielroute gefunden. Bitte ein bestehendes Ziel aus der Liste wählen.");
+    throw httpError(400, "Keine Zielroute gefunden. Bitte ein bestehendes Ziel aus der Liste wählen.");
   }
   if (!update.operations.length || update.operations.some((operation) => !operation.endpoint)) {
-    throw new Error("Die Portal-API-Zielroute konnte nicht eindeutig gebildet werden.");
+    throw httpError(400, "Die Portal-API-Zielroute konnte nicht eindeutig gebildet werden.");
   }
 }
 
 function flowHasComplexPayload(payload = {}) {
+  validateFlowShape(payload.flow);
   return (payload.flow?.nodes || []).some((node) => {
     const kind = normalizeDestinationType(node.type);
     if (node.locked) return false;
@@ -1143,6 +1343,9 @@ function targetHrefForRoute(type, routeNumber) {
 }
 
 function targetRouteFromNode(node) {
+  // New resources have no Portal identity. Descriptive text can contain numbers
+  // (for example an announcement name), but it must never identify a live target.
+  if (node?.config?.portalMode === "new" && ["QUEUE", "GROUP", "SKILL", "IVR", "TIMECONTROL"].includes(normalizeDestinationType(node.type))) return "";
   return node?.routeNumber || node?.targetNumber || numberFromText(node?.subtitle) || "";
 }
 
@@ -1157,6 +1360,73 @@ function nodeToPortalTarget(node) {
     routeNumber,
     href: node?.href || "",
   };
+}
+
+function flowRoutingConflicts(flow) {
+  const nodes = flow?.nodes || [];
+  const outputs = new Map();
+  for (const edge of flow?.edges || []) {
+    if (edge.virtual) continue;
+    const source = nodes.find(node => node.id === edge.from);
+    const isStart = source?.id === "inbound" || ["DID", "TRUNK"].includes(normalizeDestinationType(source?.type));
+    const field = isStart ? "" : edge.branchField || "";
+    const key = JSON.stringify([edge.from, field]);
+    const output = outputs.get(key) || { count: 0, kind: isStart ? "start" : field ? "branch" : "direct" };
+    output.count += 1;
+    outputs.set(key, output);
+  }
+  const conflicts = new Set([...outputs.values()].filter(output => output.count > 1).map(output => output.kind));
+  // Stable priority makes old drafts fail the same way regardless of edge order.
+  return ["start", "branch", "direct"].filter(kind => conflicts.has(kind));
+}
+
+function validateFlowShape(flow) {
+  if (flow == null) return;
+  if (typeof flow !== "object" || Array.isArray(flow) || !Array.isArray(flow.nodes) || !Array.isArray(flow.edges)
+      || flow.nodes.some(node => !node || typeof node !== "object" || Array.isArray(node) || typeof node.id !== "string")
+      || flow.edges.some(edge => !edge || typeof edge !== "object" || Array.isArray(edge) || typeof edge.from !== "string" || typeof edge.to !== "string")) {
+    throw httpError(400, "Callflow nodes and connections must be valid lists.");
+  }
+  if (flow.nodes.length > 256 || flow.edges.length > 1024) throw httpError(400, serverMessage("portal.error.flowTooLarge", { max: 256 }));
+  for (const node of flow.nodes) {
+    if (["type", "title", "href", "subtitle"].some(key => node[key] != null && typeof node[key] !== "string")
+        || ["routeNumber", "targetNumber"].some(key => node[key] != null && !["string", "number"].includes(typeof node[key]))
+        || (node.config != null && (typeof node.config !== "object" || Array.isArray(node.config)))) throw httpError(400, serverMessage("portal.error.invalidJson"));
+    const timeout = node.config?.timeoutSeconds;
+    if (timeout != null && timeout !== "" && (!["string", "number"].includes(typeof timeout) || !Number.isInteger(Number(timeout)) || Number(timeout) < 1)) throw httpError(400, serverMessage("portal.error.invalidFlow"));
+  }
+  const ids = new Set(flow.nodes.map(node => node.id));
+  if (ids.size !== flow.nodes.length || flow.edges.some(edge => !ids.has(edge.from) || !ids.has(edge.to))) throw httpError(400, "Callflow connections must reference unique existing nodes.");
+}
+
+function assertUnambiguousFlow(flow) {
+  validateFlowShape(flow);
+  const conflict = flowRoutingConflicts(flow)[0];
+  if (!conflict) return;
+  const messages = {
+    start: "Der Callflow hat mehrere Startverbindungen. Vom eingehenden Anruf darf genau eine Verbindung ausgehen.",
+    branch: "Ein Callflow-Ausgang hat mehrere Ziele. Pro Taste oder Ausgang ist genau ein Ziel erlaubt.",
+    direct: "Ein Callflow-Schritt hat mehrere direkte Ziele. Von diesem Schritt darf genau eine Verbindung ausgehen.",
+  };
+  throw httpError(400, messages[conflict]);
+}
+
+function getFlowStartNode(flow) {
+  assertUnambiguousFlow(flow);
+  const nodes = flow?.nodes || [];
+  const edges = flow?.edges || [];
+  let node = nodes.find(item => item.id === "inbound")
+    || nodes.find(item => item.locked && normalizeDestinationType(item.type) === "DID")
+    || nodes.find(item => item.locked);
+  if (!node) return nodes.find(item => !item.floating && !item.branchTarget && !edges.some(edge => edge.to === item.id)) || null;
+  const visited = new Set();
+  while (node?.locked || normalizeDestinationType(node?.type) === "TRUNK") {
+    if (visited.has(node.id)) return null;
+    visited.add(node.id);
+    const edge = edges.find(item => item.from === node.id && !item.virtual && !item.branchField);
+    node = nodes.find(item => item.id === edge?.to);
+  }
+  return node || null;
 }
 
 function getFlowNode(flow, id) {
@@ -1174,7 +1444,7 @@ function getTargetNode(flow, from, branchField = "") {
 
 function createdTargetFromResult(type, result, fallbackRouteNumber = "") {
   const item = extractItems(result.body)[0] || objectFromBody(result.body);
-  const href = apiPathFromHref(result.location || item.href || "");
+  const href = canonicalResourceHref(result.location || item.href || "");
   const hrefId = lastPathSegment(href);
   const serviceNumber = pickField(item, ["serviceNumber"], "");
   const extensionNumber = pickField(item, ["extensionNumber"], "");
@@ -1193,13 +1463,14 @@ function existingAnnouncementHref(name, overview) {
     return [announcement.name, announcement.id, announcement.value]
       .filter(Boolean)
       .some((value) => String(value).trim().toLowerCase() === needle);
-  }) || announcements.find((announcement) => announcement.href);
+  });
   return match?.href || "";
 }
 
 function targetSignature(target) {
   if (!target) return "";
   const type = normalizeDestinationType(target.type);
+  if (type === "HANGUP") return "HANGUP:HANGUP";
   const route = target.routeNumber || target.serviceNumber || target.targetNumber || target.number || target.extensionNumber || numberFromText(target.subtitle);
   return `${type}:${route || ""}`;
 }
@@ -1220,7 +1491,7 @@ function didAlreadyTargetsTarget(did, target) {
 }
 
 function findInventoryIvrForNode(node, overview) {
-  if (normalizeDestinationType(node?.type) !== "IVR") return null;
+  if (normalizeDestinationType(node?.type) !== "IVR" || node?.config?.portalMode === "new") return null;
   const route = String(node?.routeNumber || "").trim();
   const extension = String(node?.targetNumber || numberFromText(node?.subtitle) || "").trim();
   return (overview?.inventory?.ivrs || []).find((ivr) => {
@@ -1316,7 +1587,7 @@ function findReusableIvrForNode(node, overview, flow) {
 function ivrBaseBody(node, liveIvr, overview) {
   const displayName = validatePortalDisplayName(node?.title || liveIvr?.name || "Sprachdialog", "Sprachdialog-Name");
   const announcementHref = existingAnnouncementHref(node?.config?.announcement || liveIvr?.announcement, overview);
-  if (!announcementHref) throw new Error(`Sprachdialog "${displayName}" braucht eine vorhandene Ansage.`);
+  if (!announcementHref) throw httpError(400, serverMessage("portal.server.voiceDialogValueRequiresAnExistingAnnouncement", {p0: displayName}));
   const keys = Array.isArray(node?.config?.ivrKeys) && node.config.ivrKeys.length ? node.config.ivrKeys : ["1"];
   const extensionNumber = liveIvr?.extensionNumber || node?.targetNumber || numberFromText(node?.subtitle);
   const data = [
@@ -1369,46 +1640,16 @@ function nextServiceNumber(overview, type, allocated) {
 }
 
 function nfonDay(day) {
-  const map = {
-    MO: "MONDAY",
-    MON: "MONDAY",
-    MONDAY: "MONDAY",
-    MONTAG: "MONDAY",
-    DI: "TUESDAY",
-    TU: "TUESDAY",
-    TUE: "TUESDAY",
-    TUESDAY: "TUESDAY",
-    DIENSTAG: "TUESDAY",
-    MI: "WEDNESDAY",
-    WE: "WEDNESDAY",
-    WED: "WEDNESDAY",
-    WEDNESDAY: "WEDNESDAY",
-    MITTWOCH: "WEDNESDAY",
-    DO: "THURSDAY",
-    TH: "THURSDAY",
-    THU: "THURSDAY",
-    THURSDAY: "THURSDAY",
-    DONNERSTAG: "THURSDAY",
-    FR: "FRIDAY",
-    FRI: "FRIDAY",
-    FRIDAY: "FRIDAY",
-    FREITAG: "FRIDAY",
-    SA: "SATURDAY",
-    SAT: "SATURDAY",
-    SATURDAY: "SATURDAY",
-    SAMSTAG: "SATURDAY",
-    SO: "SUNDAY",
-    SU: "SUNDAY",
-    SUN: "SUNDAY",
-    SUNDAY: "SUNDAY",
-    SONNTAG: "SUNDAY",
-  };
-  return map[String(day || "").trim().toUpperCase()] || "MONDAY";
+  // English three-letter or full day names are an unambiguous, locale-independent input format.
+  const map = { MON:"MONDAY", MONDAY:"MONDAY", TUE:"TUESDAY", TUESDAY:"TUESDAY", WED:"WEDNESDAY", WEDNESDAY:"WEDNESDAY", THU:"THURSDAY", THURSDAY:"THURSDAY", FRI:"FRIDAY", FRIDAY:"FRIDAY", SAT:"SATURDAY", SATURDAY:"SATURDAY", SUN:"SUNDAY", SUNDAY:"SUNDAY" };
+  const result = map[String(day || "").trim().toUpperCase()];
+  if (!result) throw httpError(400, "Invalid day. Use Mon-Fri 08:00-17:00.");
+  return result;
 }
 
 function nfonTime(value) {
-  const match = String(value || "").match(/(\d{1,2}):(\d{2})/);
-  if (!match) return "09:00 AM";
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) throw httpError(400, "Invalid time. Use 00:00 through 23:59.");
   let hours = Number(match[1]);
   const minutes = match[2];
   const suffix = hours >= 12 ? "PM" : "AM";
@@ -1422,14 +1663,16 @@ function nfonInteger(value) {
 }
 
 function parseTimeWindow(value) {
-  const text = String(value || "Mo-Fr 08:00-17:00");
-  const match = text.match(/([A-Za-zÄÖÜäöü]{2,})(?:\s*-\s*([A-Za-zÄÖÜäöü]{2,}))?.*?(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
-  return {
-    fromDay: nfonDay(match?.[1] || "MO"),
-    toDay: nfonDay(match?.[2] || match?.[1] || "FR"),
-    fromTimeOfDay: nfonTime(match?.[3] || "08:00"),
-    toTimeOfDay: nfonTime(match?.[4] || "17:00"),
-  };
+  const match = String(value || "").trim().match(/^([A-Za-zÄÖÜäöü]+)(?:\s*-\s*([A-Za-zÄÖÜäöü]+))?\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/);
+  if (!match) throw httpError(400, "Invalid time window. Use Mon-Fri 08:00-17:00.");
+  return { fromDay: nfonDay(match[1]), toDay: nfonDay(match[2] || match[1]), fromTimeOfDay: nfonTime(match[3]), toTimeOfDay: nfonTime(match[4]) };
+}
+
+function timeZoneHref(value = "INHERIT") {
+  if (value === "INHERIT" || !value) return "INHERIT";
+  const normalized = apiPathFromHref(value);
+  if (!/^\/api\/time-zones\/[A-Za-z0-9._/-]+$/.test(normalized)) throw httpError(400, "Invalid time zone.");
+  return normalized;
 }
 
 function targetSummary(target) {
@@ -1438,18 +1681,70 @@ function targetSummary(target) {
 }
 
 async function applyComplexCallflowChange(payload) {
+  assertUnambiguousFlow(payload.flow);
   const overview = cache.overview || await loadOverview();
   const flow = payload.flow || {};
   const didName = payload.did?.name || payload.did?.id || "";
   const customer = encodeURIComponent(config.customerAccount || "{customer}");
   const attempts = [];
   const createdTargets = [];
+  const restoredResources = [];
+  const priorTimeouts = new Map();
   const allocatedExtensions = new Set();
   const allocatedServiceNumbers = new Set();
-  const root = getTargetNode(flow, "trunk") || (flow.nodes || []).find((node) => !node.locked);
+  const root = getFlowStartNode(flow);
+  const routedNodeIds = new Set();
+  const visit = (nodeId) => {
+    if (!nodeId || routedNodeIds.has(nodeId)) return;
+    routedNodeIds.add(nodeId);
+    for (const edge of flow.edges || []) if (edge.from === nodeId) visit(edge.to);
+  };
+  visit(root?.id);
+  // Old drafts may still carry an identity from a previous step type. New mode
+  // must never silently reuse that object, even when its number happens to exist.
+  for (const node of flow.nodes || []) {
+    if (routedNodeIds.has(node.id) && node.config?.portalMode === "new"
+      && ["QUEUE", "GROUP", "SKILL", "IVR", "TIMECONTROL"].includes(normalizeDestinationType(node.type))
+      && [node.routeNumber, node.targetNumber, node.serviceNumber, node.extensionNumber, node.href].some(value => value !== undefined && value !== null && String(value).trim() !== "")) {
+      throw httpError(400, serverMessage("portal.chooseWhetherThisStepCreatesANewPortalObject"));
+    }
+  }
+  for (const node of flow.nodes || []) {
+    if (routedNodeIds.has(node.id) && normalizeDestinationType(node.type) === "PLACEHOLDER") throw httpError(400, serverMessage("portal.server.pathValueIsStillEmpty", {p0: node.title || "Neuer Schritt"}));
+  }
+  const visiting = new Set(), visited = new Set();
+  const validateAcyclic = id => {
+    if (visiting.has(id)) throw httpError(400, "Callflow routing must not contain a cycle.");
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const edge of flow.edges || []) if (edge.from === id && !edge.virtual) validateAcyclic(edge.to);
+    visiting.delete(id); visited.add(id);
+  };
+  if (root) validateAcyclic(root.id);
+  // The complete graph is validated before any write. Preview follows the same
+  // recursive resolver, including queue timeouts and every IVR branch.
+  if (payload.commit) {
+    const preflight = await applyComplexCallflowChange({ ...payload, commit: false });
+    if (!preflight.ok) return { ...preflight, dryRun: false, applied: false };
+    for (const node of flow.nodes || []) {
+      if (!routedNodeIds.has(node.id) || normalizeDestinationType(node.type) !== "QUEUE" || !node.config?.timeoutSeconds || !targetRouteFromNode(node)) continue;
+      const endpoint = `/api/customers/${customer}/targets/queue-services/${encodeURIComponent(targetRouteFromNode(node))}/timeout`;
+      const prior = await portalFetch(endpoint);
+      const item = objectFromBody(prior.body);
+      const links = Array.isArray(prior.body?.links) ? prior.body.links : Object.entries(item.links || {}).map(([rel, href]) => ({ rel, href }));
+      const data = Array.isArray(prior.body?.data) ? prior.body.data : Object.entries(item).filter(([key,value]) => !["href","links"].includes(key) && value != null && typeof value !== "object").map(([name,value]) => ({name,value}));
+      if (!links.some(link => link.rel === "destinationOnTimeout") || !data.some(field => field.name === "timeoutDelay")) throw httpError(409, "Queue timeout could not be captured. Reload before applying.");
+      priorTimeouts.set(endpoint, { links, data });
+    }
+  }
+  const writeExisting = async (operation, before) => {
+    const result = await runPortalOperation(operation, attempts);
+    restoredResources.push({ action: "restore-" + operation.action, method: "PUT", endpoint: operation.endpoint, body: before });
+    return result;
+  };
 
-  if (!didName) throw new Error("Keine Rufnummer fuer die Uebernahme gefunden.");
-  if (!root) throw new Error("Der Callflow hat keinen Start nach der Leitung.");
+  if (!didName) throw httpError(400, "Keine Rufnummer fuer die Uebernahme gefunden.");
+  if (!root) throw httpError(400, "Der Callflow hat keinen Start nach der Leitung.");
 
   const basePlan = {
     ok: true,
@@ -1465,20 +1760,63 @@ async function applyComplexCallflowChange(payload) {
     createdAt: new Date().toISOString(),
   };
 
-  if (payload.commit && !config.liveWritesEnabled) return liveWritesDisabledResult(basePlan);
+  if (payload.commit && !areLiveWritesEnabled()) return liveWritesDisabledResult(basePlan);
 
-  const ensurePortalTarget = async (node) => {
-    if (!node) throw new Error("Ein Flow-Pfad hat kein Ziel.");
+  const resolvedTargets = new Map();
+  // Bind only after all provider operations succeed. Failure/rollback responses
+  // retain the editable original draft and cannot claim rolled-back identities.
+  const appliedFlow = async () => {
+    const applied = JSON.parse(JSON.stringify(flow));
+    const nodes = new Map((applied.nodes || []).map(node => [node.id, node]));
+    for (const [id, pending] of resolvedTargets) {
+      const target = await pending;
+      const node = nodes.get(id);
+      if (!node || !target?.routeNumber) continue;
+      node.type = target.type;
+      node.routeNumber = String(target.routeNumber);
+      node.targetNumber = String(target.extensionNumber || target.number || target.routeNumber);
+      node.href = target.href;
+      if (["QUEUE", "GROUP", "SKILL", "IVR", "TIMECONTROL"].includes(node.type)) {
+        node.config = { ...node.config, portalMode: "existing" };
+      }
+    }
+    const syncBranches = id => {
+      const node = nodes.get(id);
+      if (!node) return;
+      for (const edge of applied.edges || []) {
+        if (edge.from !== id || edge.virtual) continue;
+        syncBranches(edge.to);
+        const child = nodes.get(edge.to);
+        if (!edge.branchField || !child) continue;
+        node.config ||= {};
+        node.config[edge.branchField] = {
+          ...node.config[edge.branchField], type: child.type, title: child.title,
+          subtitle: child.subtitle, targetNumber: child.targetNumber,
+          routeNumber: child.routeNumber, href: child.href,
+          config: JSON.parse(JSON.stringify(child.config || {})),
+        };
+      }
+    };
+    syncBranches(root.id);
+    return applied;
+  };
+  const ensurePortalTarget = async node => {
+    if (!node) throw httpError(400, "Ein Flow-Pfad hat kein Ziel.");
+    if (!resolvedTargets.has(node.id)) resolvedTargets.set(node.id, resolvePortalTarget(node));
+    return resolvedTargets.get(node.id);
+  };
+  const resolvePortalTarget = async (node) => {
+    if (!node) throw httpError(400, "Ein Flow-Pfad hat kein Ziel.");
     const type = normalizeDestinationType(node.type);
 
     if (type === "PLACEHOLDER") {
-      throw new Error(`Der Pfad "${node.title || "Neuer Schritt"}" ist noch leer.`);
+      throw httpError(400, serverMessage("portal.server.pathValueIsStillEmpty", {p0: node.title || "Neuer Schritt"}));
     }
     if (type === "HANGUP") {
       return { type, title: "Auflegen", routeNumber: "HANGUP", href: targetHrefForRoute("HANGUP", "HANGUP") };
     }
     if (type === "ANNOUNCEMENT") {
-      throw new Error("Ansagen sind in der Portal API Medien, aber keine eigenstaendigen Routing-Ziele. Nutze sie in Sprachdialog oder Queue.");
+      throw httpError(400, "Ansagen sind in der Portal API Medien, aber keine eigenstaendigen Routing-Ziele. Nutze sie in Sprachdialog oder Queue.");
     }
 
     const existingRoute = targetRouteFromNode(node);
@@ -1487,12 +1825,23 @@ async function applyComplexCallflowChange(payload) {
     if (type === "QUEUE") {
       if (node.config?.portalMode === "new" && !existingRoute) {
         const displayName = validatePortalDisplayName(node.title || "Neue Warteschlange", "Warteschlangen-Name");
+        let timeoutTarget;
+        if (node.config?.timeoutSeconds) {
+          if (!Number.isInteger(Number(node.config.timeoutSeconds)) || Number(node.config.timeoutSeconds) < 1) throw httpError(400, "Queue timeout must be a positive integer.");
+          timeoutTarget = await ensurePortalTarget(getTargetNode(flow, node.id, "timeoutTarget"));
+        }
         if (!payload.commit) {
           const routeNumber = nextResourceNumber(overview, "queues");
           return { ...nodeToPortalTarget(node), routeNumber, href: targetHrefForRoute("QUEUE", routeNumber) };
         }
         const created = await createPortalResource("queues", { displayName });
+        if (!created.ok) throw httpError(created.status || 502, created.error || "Queue creation failed.");
+        createdTargets.push({ type: "QUEUE", href: created.resource.href });
         attempts.push({ action: `create-queue-${displayName}`, method: "POST", status: created.status, endpoint: created.endpoint });
+        if (timeoutTarget) await runPortalOperation({ action: `queue-timeout-${node.title}`, method: "PUT", endpoint: `${created.resource.href}/timeout`, body: {
+          links: [{ rel: "destinationOnTimeout", href: timeoutTarget.href }],
+          data: [{ name: "timeoutDelay", value: Number(node.config.timeoutSeconds) }],
+        } }, attempts);
         return {
           ...nodeToPortalTarget(node),
           type: "QUEUE",
@@ -1501,8 +1850,8 @@ async function applyComplexCallflowChange(payload) {
           extensionNumber: created.resource.extensionNumber,
         };
       }
-      if (!existingRoute) throw new Error(`Warteschlange "${node.title}" hat keine Portal-Nummer.`);
-      if (payload.commit && node.config?.timeoutSeconds) {
+      if (!existingRoute) throw httpError(400, serverMessage("portal.server.queueValueHasNoPortalNumber", {p0: node.title}));
+      if (node.config?.timeoutSeconds) {
         const timeoutTargetNode = getTargetNode(flow, node.id, "timeoutTarget");
         const timeoutTarget = await ensurePortalTarget(timeoutTargetNode);
         const endpoint = `/api/customers/${customer}/targets/queue-services/${encodeURIComponent(existingRoute)}/timeout`;
@@ -1510,8 +1859,8 @@ async function applyComplexCallflowChange(payload) {
           links: [{ rel: "destinationOnTimeout", href: timeoutTarget.href }],
           data: [{ name: "timeoutDelay", value: Number(node.config.timeoutSeconds) || 120 }],
         };
-        const result = await runPortalOperation({ action: `queue-timeout-${node.title}`, method: "PUT", endpoint, body }, attempts);
-        attempts.push({ action: "queue-timeout-written", method: "PUT", status: result.status, endpoint });
+        if (!Number.isInteger(Number(node.config.timeoutSeconds)) || Number(node.config.timeoutSeconds) < 1) throw httpError(400, "Queue timeout must be a positive integer.");
+        if (payload.commit) await writeExisting({ action: `queue-timeout-${node.title}`, method: "PUT", endpoint, body }, priorTimeouts.get(endpoint));
       }
       return { ...nodeToPortalTarget(node), href: existingHref };
     }
@@ -1523,6 +1872,8 @@ async function applyComplexCallflowChange(payload) {
         return { ...nodeToPortalTarget(node), type: "SKILL", routeNumber, href: targetHrefForRoute("SKILL", routeNumber) };
       }
       const created = await createPortalResource("skills", { displayName });
+      if (!created.ok) throw httpError(created.status || 502, created.error || "Skill creation failed.");
+      createdTargets.push({ type: "SKILL", href: created.resource.href });
       attempts.push({ action: `create-skill-${displayName}`, method: "POST", status: created.status, endpoint: created.endpoint });
       return {
         ...nodeToPortalTarget(node),
@@ -1534,13 +1885,19 @@ async function applyComplexCallflowChange(payload) {
     }
 
     if (["PHONEEXTENSION", "FRONTDESK", "GROUP", "SKILL", "CONFERENCE", "VOICEMAIL"].includes(type)) {
-      if (!existingRoute) throw new Error(`Ziel "${node.title}" hat keine Portal-Route.`);
+      if (!existingRoute) throw httpError(400, serverMessage("portal.server.targetValueHasNoPortalRoute", {p0: node.title}));
       return { ...nodeToPortalTarget(node), href: existingHref };
     }
 
     if (type === "IVR") {
       if (node.config?.portalMode === "existing") {
-        if (!existingRoute) throw new Error(`Vorhandener Sprachdialog "${node.title}" hat keine Portal-Route.`);
+        if (!existingRoute) throw httpError(400, serverMessage("portal.server.existingVoiceDialogValueHasNoPortalRoute", {p0: node.title}));
+        const liveIvr = findInventoryIvrForNode(node, overview);
+        const includesTopology = (flow.edges || []).some(edge => edge.from === node.id && !edge.virtual)
+          || node.config?.ivrKeys?.length || node.config?.announcement || node.config?.timeoutSeconds;
+        if (includesTopology && !ivrTopologyMatchesLive(node, liveIvr, flow)) {
+          throw httpError(400, serverMessage("portal.server.voiceDialogValueAlreadyExistsValueButItsKeys", {p0: node.title, p1: liveIvr?.extensionNumber || existingRoute}));
+        }
         return { ...nodeToPortalTarget(node), href: existingHref };
       }
       const displayName = validatePortalDisplayName(node.title || "API Demo Sprachdialog", "Sprachdialog-Name");
@@ -1548,33 +1905,32 @@ async function applyComplexCallflowChange(payload) {
       const reusable = findReusableIvrForNode(node, overview, flow);
 
       if (reusable?.ambiguous) {
-        throw new Error(`Mehrere passende Sprachdialoge mit Name "${displayName}" gefunden. Bitte im Adminportal aufräumen oder den bestehenden Sprachdialog über seine Nebenstelle eindeutig auswählen.`);
+        throw httpError(400, serverMessage("portal.server.multipleMatchingVoiceDialogsNamedValueWereFoundRemove", {p0: displayName}));
       }
       if (reusable?.conflict) {
-        throw new Error(`Sprachdialog "${displayName}" existiert bereits${reusable.count > 1 ? ` ${reusable.count}x` : ""}, aber Ansage, Tasten oder Timeout passen nicht zu diesem Entwurf. Ich lege keinen weiteren Sprachdialog mit gleichem Namen an.`);
+        throw httpError(400, serverMessage("portal.server.voiceDialogValueAlreadyExistsvalueButItsAnnouncementKeys", {p0: displayName, p1: reusable.count > 1 ? ` ${reusable.count}x` : ""}));
       }
       if (reusable?.ivr) {
         const existingTarget = targetFromLiveIvr(node, reusable.ivr);
-        if (!payload.commit) return existingTarget;
-
         if (reusable.reason === "number" && !ivrTopologyMatchesLive(node, reusable.ivr, flow)) {
-          throw new Error(`Sprachdialog "${displayName}" existiert bereits (${existingTarget.extensionNumber || existingTarget.routeNumber}), aber Tasten, Ansage oder Timeout weichen ab. Ich lege ihn nicht automatisch neu an, damit keine Duplikate entstehen.`);
+          throw httpError(400, serverMessage("portal.server.voiceDialogValueAlreadyExistsValueButItsKeys", {p0: displayName, p1: existingTarget.extensionNumber || existingTarget.routeNumber}));
         }
+        if (!payload.commit) return existingTarget;
 
         const nameChanged = normalizeDisplayName(displayName) !== normalizeDisplayName(reusable.ivr.name);
         if (nameChanged) {
-          await runPortalOperation({
+          await writeExisting({
             action: `update-ivr-name-${displayName}`,
             method: "PUT",
             endpoint: existingTarget.href,
             body: ivrBaseBody(node, reusable.ivr, overview),
-          }, attempts);
+          }, ivrBaseBody({ ...node, title: reusable.ivr.name }, reusable.ivr, overview));
         }
         return existingTarget;
       }
 
       const announcementHref = existingAnnouncementHref(node.config?.announcement, overview);
-      if (!announcementHref) throw new Error(`Sprachdialog "${node.title}" braucht eine vorhandene Ansage.`);
+      if (!announcementHref) throw httpError(400, serverMessage("portal.server.voiceDialogValueRequiresAnExistingAnnouncement", {p0: node.title}));
       const extensionNumber = nextServiceExtension(overview, allocatedExtensions, 7100);
       const endpoint = `/api/customers/${customer}/targets/ivr-services`;
       const body = {
@@ -1586,7 +1942,17 @@ async function applyComplexCallflowChange(payload) {
           { name: "maxNumberOfDigits", value: Math.max(...keys.map((key) => String(key).length), 1) },
         ],
       };
-      if (!payload.commit) return { ...nodeToPortalTarget(node), number: extensionNumber, href: targetHrefForRoute("IVR", extensionNumber), routeNumber: extensionNumber, extensionNumber };
+      if (!payload.commit) {
+        if (keys.some(key => !/^\d+$/.test(String(key))) || new Set(keys.map(String)).size !== keys.length) throw httpError(400, "Voice menu keys must be unique numbers.");
+        for (const key of keys) {
+          const child = getTargetNode(flow, node.id, `key${key}Target`);
+          if (!child) throw httpError(400, "Every voice menu key needs a destination.");
+          await ensurePortalTarget(child);
+        }
+        const timeout = getTargetNode(flow, node.id, "timeoutTarget");
+        if (timeout) await ensurePortalTarget(timeout);
+        return { ...nodeToPortalTarget(node), number: extensionNumber, href: targetHrefForRoute("IVR", extensionNumber), routeNumber: extensionNumber, extensionNumber };
+      }
 
       const result = await runPortalOperation({ action: `create-ivr-${displayName}`, method: "POST", endpoint, body }, attempts);
       const created = createdTargetFromResult("IVR", result, extensionNumber);
@@ -1626,7 +1992,7 @@ async function applyComplexCallflowChange(payload) {
 
     if (type === "TIMECONTROL") {
       if (node.config?.portalMode === "existing") {
-        if (!existingRoute) throw new Error(`Vorhandene Zeitregel "${node.title}" hat keine Portal-Route.`);
+        if (!existingRoute) throw httpError(400, serverMessage("portal.server.existingTimeRuleValueHasNoPortalRoute", {p0: node.title}));
         return { ...nodeToPortalTarget(node), href: existingHref };
       }
       const openTarget = await ensurePortalTarget(getTargetNode(flow, node.id, "openTarget"));
@@ -1640,7 +2006,7 @@ async function applyComplexCallflowChange(payload) {
         links: [
           { rel: "destinationIfAllowed", href: openTarget.href },
           { rel: "destinationIfDenied", href: closedTarget.href },
-          { rel: "timezone", href: "/api/time-zones/Europe.Berlin" },
+          { rel: "timezone", href: timeZoneHref() },
         ],
         data: [
           { name: "name", value: node.title || "API Demo Zeitregel" },
@@ -1663,7 +2029,7 @@ async function applyComplexCallflowChange(payload) {
       return { ...nodeToPortalTarget(node), number: created.extensionNumber || extensionNumber, href: created.href, routeNumber: created.routeNumber, extensionNumber: created.extensionNumber };
     }
 
-    throw new Error(`Zieltyp ${type || "-"} wird noch nicht live geschrieben.`);
+    throw httpError(400, serverMessage("portal.server.targetTypeValueIsNotYetSupportedForLive", {p0: type || "-"}));
   };
 
   const updateExistingIvrName = async (node) => {
@@ -1675,103 +2041,28 @@ async function applyComplexCallflowChange(payload) {
 
     const duplicateName = findIvrNameConflict(displayName, liveIvr, overview);
     if (duplicateName) {
-      throw new Error(`Es gibt bereits einen anderen Sprachdialog mit dem Namen "${displayName}". Bitte waehle einen eindeutigen Namen, damit keine Duplikate entstehen.`);
+      throw httpError(400, serverMessage("portal.server.anotherVoiceDialogNamedValueAlreadyExistsChooseA", {p0: displayName}));
     }
 
     const endpoint = liveIvr.href || targetHrefForRoute("IVR", liveIvr.serviceNumber || node.routeNumber);
-    await runPortalOperation({
+    await writeExisting({
       action: `rename-ivr-${liveIvr.serviceNumber || node.routeNumber || displayName}`,
       method: "PUT",
       endpoint,
       body: ivrBaseBody(node, liveIvr, overview),
-    }, attempts);
+    }, ivrBaseBody({ ...node, title: liveIvr.name }, liveIvr, overview));
     return true;
   };
 
-  const liveIvrForRoot = findInventoryIvrForNode(root, overview);
-  const rootIsExistingLiveIvr = normalizeDestinationType(root?.type) === "IVR" && liveIvrForRoot;
-  const rootIvrNameChanged = rootIsExistingLiveIvr
-    && normalizeDisplayName(root.title) !== normalizeDisplayName(liveIvrForRoot.name);
-
-  if (rootIvrNameChanged) {
-    const duplicateName = findIvrNameConflict(root.title, liveIvrForRoot, overview);
-    if (duplicateName) {
-      return {
-        ...basePlan,
-        ok: false,
-        dryRun: !payload.commit,
-        applied: false,
-        title: "Sprachdialog-Name nicht eindeutig",
-        message: `Es gibt bereits einen anderen Sprachdialog mit dem Namen "${root.title}". Bitte waehle einen eindeutigen Namen, damit keine Duplikate entstehen.`,
-        attempts,
-      };
-    }
-    const endpoint = liveIvrForRoot.href || targetHrefForRoute("IVR", liveIvrForRoot.serviceNumber || root.routeNumber);
-    const body = ivrBaseBody(root, liveIvrForRoot, overview);
-    const target = {
-      ...nodeToPortalTarget(root),
-      href: endpoint,
-      routeNumber: liveIvrForRoot.serviceNumber || root.routeNumber,
-      extensionNumber: liveIvrForRoot.extensionNumber || root.targetNumber,
-    };
-
-    if (!payload.commit) {
-      return {
-        ...basePlan,
-        dryRun: true,
-        title: "Sprachdialog-Name geprueft",
-        message: `Der bestehende Sprachdialog wird per PUT in "${body.data.find((field) => field.name === "displayName")?.value}" umbenannt.`,
-        after: `${didName} → ${targetSummary(target)}`,
-        target,
-        method: "PUT",
-      };
-    }
-
-    try {
-      const result = await runPortalOperation({
-        action: `rename-ivr-${liveIvrForRoot.serviceNumber || root.routeNumber}`,
-        method: "PUT",
-        endpoint,
-        body,
-      }, attempts);
-      attempts.push({ action: "rename-ivr-done", method: "PUT", status: result.status, endpoint });
-    } catch (error) {
-      attempts.push({
-        action: "failed",
-        method: error.method || "PUT",
-        status: error.status || 0,
-        endpoint: error.endpoint || endpoint,
-        message: error.message,
-        body: error.body,
-      });
-      return {
-        ...basePlan,
-        ok: false,
-        dryRun: false,
-        applied: false,
-        title: "Sprachdialog-Name konnte nicht uebernommen werden",
-        message: attempts.map((attempt) => `${attempt.method || "-"}: ${attempt.message || attempt.action}`).join(" | "),
-        attempts,
-      };
-    }
-
-    cache.overview = null;
-    cache.callflow = null;
-    return {
-      ...basePlan,
-      ok: true,
-      dryRun: false,
-      applied: true,
-      title: "Sprachdialog-Name uebernommen",
-      message: "Die Portal API hat den Namen des bestehenden Sprachdialogs aktualisiert.",
-      after: `${didName} → ${targetSummary(target)}`,
-      target,
-      response: attempts,
-      appliedAt: new Date().toISOString(),
-    };
-  }
-
   if (!payload.commit) {
+    for (const node of flow.nodes || []) {
+      if (!routedNodeIds.has(node.id) || normalizeDestinationType(node.type) !== "IVR") continue;
+      const liveIvr = findInventoryIvrForNode(node, overview);
+      if (!liveIvr) continue;
+      const displayName = validatePortalDisplayName(node.title || liveIvr.name || "Sprachdialog", "Sprachdialog-Name");
+      if (findIvrNameConflict(displayName, liveIvr, overview)) throw httpError(400, serverMessage("portal.server.anotherVoiceDialogNamedValueAlreadyExistsChooseA", {p0: displayName}));
+      ivrBaseBody(node, liveIvr, overview);
+    }
     const topTarget = await ensurePortalTarget(root);
     return {
       ...basePlan,
@@ -1788,7 +2079,7 @@ async function applyComplexCallflowChange(payload) {
   let deletedOldRouting = false;
   try {
     for (const node of flow.nodes || []) {
-      if (node.id !== root.id) await updateExistingIvrName(node);
+      if (routedNodeIds.has(node.id)) await updateExistingIvrName(node);
     }
     topTarget = await ensurePortalTarget(root);
     if (didAlreadyTargetsTarget(payload.did, topTarget)) {
@@ -1799,9 +2090,10 @@ async function applyComplexCallflowChange(payload) {
         ok: true,
         dryRun: false,
         applied: true,
-        title: attempts.length ? "IVR aktualisiert" : "Keine Routing-Aenderung noetig",
+        flow: await appliedFlow(),
+        title: attempts.length ? serverMessage("portal.callflowApplied") : "Keine Routing-Aenderung noetig",
         message: attempts.length
-          ? "Der bestehende Sprachdialog wurde aktualisiert. Die Rufnummer war bereits korrekt verbunden."
+          ? serverMessage("portal.server.callflowUpdatedNumberUnchanged")
           : "Die Rufnummer war bereits mit diesem Ziel verbunden.",
         after: `${didName} → ${targetSummary(topTarget)}`,
         target: topTarget,
@@ -1830,6 +2122,7 @@ async function applyComplexCallflowChange(payload) {
     if (deletedOldRouting && update?.rollback) {
       await runRollbackOperations([update.rollback], attempts);
     }
+    await runRollbackOperations(restoredResources.reverse(), attempts);
     for (const created of createdTargets.reverse()) {
       if (!created.href) continue;
       await runRollbackOperations([{ action: `delete-created-${created.type}`, method: "DELETE", endpoint: created.href }], attempts);
@@ -1841,6 +2134,7 @@ async function applyComplexCallflowChange(payload) {
       dryRun: false,
       applied: false,
       title: "Komplexe Uebernahme fehlgeschlagen",
+      rolledBack: !attempts.some(item => item.action === "rollback-failed"),
       message: attempts.map((attempt) => `${attempt.method || "-"}: ${attempt.message || attempt.action}`).join(" | "),
       attempts,
     };
@@ -1853,8 +2147,9 @@ async function applyComplexCallflowChange(payload) {
     ok: true,
     dryRun: false,
     applied: true,
-    title: "Komplexer Callflow uebernommen",
-    message: "Die Portal API hat die Zielobjekte angelegt und die Rufnummer auf den neuen Flow geroutet.",
+    flow: await appliedFlow(),
+    title: serverMessage("portal.callflowApplied"),
+    message: serverMessage("portal.server.callflowAndRoutingUpdated"),
     after: `${didName} → ${targetSummary(topTarget)}`,
     target: topTarget,
     response: attempts,
@@ -1949,25 +2244,30 @@ function compactServiceMember(item, overview, kind) {
   return {
     id: extensionNumber,
     extensionNumber,
-    name: extension?.name || pickField(item, ["displayName", "name"], `Nebenstelle ${extensionNumber}`),
+    name: extension?.name || pickField(item, ["displayName", "name"], serverMessage("portal.extensionValue", {p0: extensionNumber})),
     type: extension?.type || "PHONE",
     penalty: Number(pickField(item, ["penalty"], kind === "queue" ? 0 : "")) || 0,
     skillLevel: Number(pickField(item, ["skillLevel"], kind === "skill" ? 1 : "")) || 1,
-    enabled: pickField(item, ["enabled"], true) !== false,
+    enabled: lowerFieldMap(item).get("enabled") !== false,
     href: item.href || href,
   };
+}
+
+function memberRevision(members) {
+  const normalized = members.map(member => ({ extensionNumber: String(member.extensionNumber), penalty: Number(member.penalty || 0), skillLevel: Number(member.skillLevel || 1), enabled: member.enabled !== false })).sort((a,b) => a.extensionNumber.localeCompare(b.extensionNumber));
+  return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
 async function hydrateServiceMembers(kind, services, overview) {
   return Promise.all((services || []).map(async (service) => {
     const serviceNumber = service.serviceNumber || service.extensionNumber || service.value || service.id;
-    if (!serviceNumber) return { ...service, kind, members: [], memberError: "Keine Service-Nummer gefunden." };
+    if (!serviceNumber) return { ...service, kind, members: [], memberError: serverMessage("portal.error.memberLoad") };
     try {
-      const endpoint = await portalFetch(`${serviceEndpoint(kind, serviceNumber)}/members`);
-      const members = extractItems(endpoint.body || endpoint.data || endpoint).map((item) => compactServiceMember(item, overview, kind));
-      return { ...service, kind, serviceNumber, members };
+      const endpoint = await fetchAllPages(`${serviceEndpoint(kind, serviceNumber)}/members`);
+      const members = endpoint.items.map((item) => compactServiceMember(item, overview, kind));
+      return { ...service, kind, serviceNumber, members, memberRevision: memberRevision(members) };
     } catch (error) {
-      return { ...service, kind, serviceNumber, members: [], memberError: error.message };
+      return { ...service, kind, serviceNumber, members: [], memberError: portalErrorMessage(error) };
     }
   }));
 }
@@ -1989,6 +2289,10 @@ async function loadServiceGroups() {
 }
 
 function normalizeDesiredMember(kind, member) {
+  if (!member || typeof member !== "object" || Array.isArray(member)) return null;
+  if (kind === "skill" && Object.prototype.hasOwnProperty.call(member, "enabled") && typeof member.enabled !== "boolean") {
+    throw httpError(400, "Invalid membership settings.");
+  }
   const extensionNumber = String(member.extensionNumber || member.number || member.id || "").trim();
   if (!extensionNumber) return null;
   return {
@@ -2001,86 +2305,66 @@ function normalizeDesiredMember(kind, member) {
 }
 
 async function applyServiceGroupChanges(payload) {
-  if (!config.configured) return { ok: false, message: "Portal API ist nicht konfiguriert." };
-  if (!config.liveWritesEnabled) {
-    return liveWritesDisabledResult({
-      type: "service-groups",
-      title: "Mitgliedschaften nicht übernommen",
-    });
-  }
-
+  if (!Array.isArray(payload.services) || payload.services.some(service => !service || typeof service !== "object" || Array.isArray(service))) throw httpError(400, serverMessage("portal.error.invalidJson"));
+  assertLiveWritesEnabled();
+  await loadOverview();
   const serviceGroups = await loadServiceGroups();
-  const attempts = [];
-  const services = Array.isArray(payload?.services) ? payload.services : [];
-
+  requireCompleteInventory(cache.overview);
+  if (payload.account !== config.customerAccount) throw httpError(409, "Account changed. Reload the memberships.");
+  const services = Array.isArray(payload.services) ? payload.services : [];
+  if (!services.length) throw httpError(400, "No membership changes provided.");
+  const operations = [];
+  const touched = new Set();
   for (const service of services) {
-    const kind = service.kind === "skill" ? "skill" : "queue";
-    const source = (kind === "skill" ? serviceGroups.skills : serviceGroups.queues)
-      .find((item) => String(item.serviceNumber || item.id) === String(service.serviceNumber || service.id));
-    const serviceNumber = source?.serviceNumber || service.serviceNumber || service.id;
-    if (!serviceNumber) continue;
-
-    const desired = new Map((service.members || [])
-      .map((member) => normalizeDesiredMember(kind, member))
-      .filter(Boolean)
-      .map((member) => [member.extensionNumber, member]));
-    const current = new Map((source?.members || []).map((member) => [member.extensionNumber, member]));
-
-    for (const [extensionNumber] of current.entries()) {
-      if (!desired.has(extensionNumber)) {
-        await runPortalOperation({
-          action: `${kind}-member-delete-${extensionNumber}`,
-          method: "DELETE",
-          endpoint: `${serviceEndpoint(kind, serviceNumber, "/members")}/${encodeURIComponent(extensionNumber)}`,
-        }, attempts, { kind, serviceNumber, extensionNumber });
-      }
-    }
-
-    for (const [extensionNumber, member] of desired.entries()) {
-      const existing = current.get(extensionNumber);
-      const body = {
-        links: [{ rel: "phoneExtension", href: phoneExtensionHref(extensionNumber) }],
-        data: serviceMemberData(kind, member),
-      };
-      if (!existing) {
-        await runPortalOperation({
-          action: `${kind}-member-add-${extensionNumber}`,
-          method: "POST",
-          endpoint: serviceEndpoint(kind, serviceNumber, "/members"),
-          body,
-        }, attempts, { kind, serviceNumber, extensionNumber });
-        continue;
-      }
-      const changed = kind === "skill"
-        ? Number(existing.skillLevel || 1) !== Number(member.skillLevel || 1) || (existing.enabled !== false) !== (member.enabled !== false)
-        : Number(existing.penalty || 0) !== Number(member.penalty || 0);
-      if (changed) {
-        await runPortalOperation({
-          action: `${kind}-member-update-${extensionNumber}`,
-          method: "PUT",
-          endpoint: `${serviceEndpoint(kind, serviceNumber, "/members")}/${encodeURIComponent(extensionNumber)}`,
-          body: { data: serviceMemberData(kind, member, { includeEnabled: true }) },
-        }, attempts, { kind, serviceNumber, extensionNumber });
+    if (!["queue", "skill"].includes(service.kind)) throw httpError(400, "Invalid service kind.");
+    const kind = service.kind;
+    const source = (kind === "skill" ? serviceGroups.skills : serviceGroups.queues).find(item => String(item.serviceNumber) === String(service.serviceNumber));
+    if (!source || source.memberError || !source.memberRevision) throw httpError(409, "Memberships could not be loaded. Reload before applying.");
+    if (!service.baseRevision || service.baseRevision !== source.memberRevision) throw httpError(409, "Memberships changed since this draft. Reload and review the changes.");
+    const serviceNumber = source.serviceNumber;
+    if (touched.has(kind + serviceNumber)) throw httpError(400, "Duplicate service change.");
+    touched.add(kind + serviceNumber);
+    if (![service.add, service.remove, service.update].every(Array.isArray)) throw httpError(400, "Explicit add, remove and update lists are required.");
+    const current = new Map(source.members.map(member => [String(member.extensionNumber), member]));
+    const seen = new Set();
+    for (const [action, entries] of [["add",service.add],["remove",service.remove],["update",service.update]]) {
+      for (const input of entries) {
+        const member = normalizeDesiredMember(kind, typeof input === "string" ? { extensionNumber: input } : input);
+        if (!member || !/^\d+$/.test(member.extensionNumber) || seen.has(member.extensionNumber)) throw httpError(400, "Invalid or duplicate member change.");
+        seen.add(member.extensionNumber);
+        if ((action === "add") === current.has(member.extensionNumber)) throw httpError(409, "Membership changed. Reload before applying.");
+        if (action !== "remove" && !serviceGroups.extensions.some(ext => String(ext.number) === member.extensionNumber)) throw httpError(400, "Unknown extension.");
+        if (!Number.isInteger(member.penalty) || member.penalty < 0 || !Number.isInteger(member.skillLevel) || member.skillLevel < 1) throw httpError(400, "Invalid membership settings.");
+        const endpoint = serviceEndpoint(kind, serviceNumber, "/members") + (action === "add" ? "" : "/" + encodeURIComponent(member.extensionNumber));
+        operations.push({ action: kind + "-member-" + action, method: action === "add" ? "POST" : action === "remove" ? "DELETE" : "PUT", endpoint, body: action === "remove" ? undefined : { ...(action === "add" ? { links: [{ rel: "phoneExtension", href: phoneExtensionHref(member.extensionNumber) }] } : {}), data: serviceMemberData(kind, member, { includeEnabled: action === "update" }) } });
       }
     }
   }
-
+  // Validate every group before the first write; untouched groups never appear here.
+  const attempts = [];
+  for (let index=0; index<operations.length; index++) {
+    const operation=operations[index];
+    try { await runPortalOperation(operation, attempts); } catch (error) {
+      cache.overview=null; cache.callflow=null;
+      return {ok:false,status:502,error:portalErrorMessage(error),partial:attempts.length>0,completed:operations.slice(0,index),failed:{...operation,status:error.status||502},notAttempted:operations.slice(index+1),attempts};
+    }
+  }
   cache.overview = null;
   cache.callflow = null;
   const overview = await loadOverview();
-  const updatedGroups = await loadServiceGroups();
-  return {
-    ok: true,
-    title: "Mitgliedschaften übernommen",
-    message: "Warteschlangen und Skillgruppen wurden über die Portal API aktualisiert.",
-    attempts,
-    overview,
-    serviceGroups: updatedGroups,
-    appliedAt: new Date().toISOString(),
-  };
+  return { ok: true, title: "Mitgliedschaften übernommen", message: "Warteschlangen und Skillgruppen wurden über die Portal API aktualisiert.", attempts, overview, serviceGroups: await loadServiceGroups(), appliedAt: new Date().toISOString() };
 }
 
 async function applyCallflowChange(payload) {
+  if (payload.flow) assertUnambiguousFlow(payload.flow);
+  if (payload.commit && areLiveWritesEnabled()) {
+    const overview = await loadOverview();
+    requireCompleteInventory(overview);
+    const requested = payload.did?.name || payload.did?.id;
+    const actualDid = overview.inventory.dids.find(did => (did.name || did.id) === requested);
+    if (!actualDid) throw httpError(409, "Number is no longer available. Reload before applying.");
+    payload = { ...payload, did: actualDid };
+  }
   if (flowHasComplexPayload(payload)) {
     return applyComplexCallflowChange(payload);
   }
@@ -2090,21 +2374,22 @@ async function applyCallflowChange(payload) {
   const target = payload.target || {};
 
   if (!didName) {
-    throw new Error("Keine Rufnummer für die Übernahme gefunden.");
+    throw httpError(400, "Keine Rufnummer für die Übernahme gefunden.");
   }
   if (!update.fields.destinationType) {
-    throw new Error("Kein Zieltyp für die Übernahme gefunden.");
+    throw httpError(400, "Kein Zieltyp für die Übernahme gefunden.");
   }
   if (!update.fields.destinationRouteNumber) {
-    throw new Error("Keine Zielroute gefunden. Bitte ein bestehendes Ziel aus der Liste wählen.");
+    throw httpError(400, "Keine Zielroute gefunden. Bitte ein bestehendes Ziel aus der Liste wählen.");
   }
   if (!update.operations.length || update.operations.some((operation) => !operation.endpoint)) {
-    throw new Error("Die Portal-API-Zielroute konnte nicht eindeutig gebildet werden.");
+    throw httpError(400, "Die Portal-API-Zielroute konnte nicht eindeutig gebildet werden.");
   }
 
   const basePlan = {
     ok: true,
     type: "callflow",
+    target: { ...target, type: update.fields.destinationType, number: update.fields.destinationExtensionNumber, routeNumber: update.fields.destinationRouteNumber, href: update.body.links[0].href },
     title: "Callflow zur Übernahme bereit",
     message: "Die Änderung ist technisch vorbereitet.",
     did: didName,
@@ -2121,7 +2406,7 @@ async function applyCallflowChange(payload) {
   };
 
   if (!payload.commit) return { ...basePlan, dryRun: true };
-  if (!config.liveWritesEnabled) return liveWritesDisabledResult(basePlan);
+  if (!areLiveWritesEnabled()) return liveWritesDisabledResult(basePlan);
 
   const attempts = [];
   let deletedOldRouting = false;
@@ -2190,7 +2475,22 @@ async function applyCallflowChange(payload) {
 }
 
 async function applyBulkCallflowChange(payload) {
-  const changes = Array.isArray(payload.changes) ? payload.changes : [];
+  if (!Array.isArray(payload.changes)) throw httpError(400, serverMessage("portal.error.invalidJson"));
+  if (payload.commit) assertLiveWritesEnabled();
+  let changes = Array.isArray(payload.changes) ? payload.changes : [];
+  changes.forEach(change => {
+    if (!change || typeof change !== "object" || Array.isArray(change)) throw httpError(400, "Each callflow change must be an object.");
+    assertUnambiguousFlow(change.flow);
+  });
+  if (payload.commit) {
+    const overview = await loadOverview();
+    requireCompleteInventory(overview);
+    changes = changes.map(change => {
+      const current = overview.inventory.dids.find(did => inboundNumberIdForDid(did) === inboundNumberIdForDid(change.did || {}));
+      if (!current) throw httpError(409, "Number changed. Reload before applying.");
+      return {...change, did: current};
+    });
+  }
   const profileName = payload.profileName || "Callflow-Profil";
 
   if (!changes.length) {
@@ -2211,7 +2511,7 @@ async function applyBulkCallflowChange(payload) {
   const plans = changes.map((change, index) => {
     const update = buildCallflowUpdate(change);
     validateCallflowUpdate(change, update);
-    const didName = change.did?.name || change.did?.id || `Rufnummer ${index + 1}`;
+    const didName = change.did?.name || change.did?.id || serverMessage("portal.numberValue", {p0: index + 1});
     const target = change.target || {};
     return {
       index,
@@ -2227,8 +2527,8 @@ async function applyBulkCallflowChange(payload) {
     ok: true,
     dryRun: !payload.commit,
     type: "profile",
-    title: `${profileName} zur Übernahme bereit`,
-    message: `${plans.length} Routing-Änderung${plans.length === 1 ? "" : "en"} technisch vorbereitet.`,
+    title: serverMessage("portal.server.valueReadyToApply", {p0: profileName}),
+    message: serverMessage("portal.server.valueRoutingChangesTechnicallyPrepared", {p0: plans.length, p1: plans.length === 1 ? "" : "en"}),
     profileName,
     changeCount: plans.length,
     changes: plans.map((plan) => ({
@@ -2252,7 +2552,7 @@ async function applyBulkCallflowChange(payload) {
   };
 
   if (!payload.commit) return basePlan;
-  if (!config.liveWritesEnabled) return liveWritesDisabledResult(basePlan);
+  if (!areLiveWritesEnabled()) return liveWritesDisabledResult(basePlan);
 
   const attempts = [];
   const appliedPlans = [];
@@ -2302,7 +2602,7 @@ async function applyBulkCallflowChange(payload) {
         title: "Profil-Übernahme fehlgeschlagen",
         message: failedText || "Die Portal API hat eine Bulk-Änderung abgelehnt.",
         attempts,
-        rolledBack: true,
+        rolledBack: !attempts.some(item => item.action === "rollback-failed"),
       };
     }
   }
@@ -2314,7 +2614,7 @@ async function applyBulkCallflowChange(payload) {
     ok: true,
     dryRun: false,
     applied: true,
-    title: `${profileName} übernommen`,
+    title: serverMessage("portal.server.valueApplied", {p0: profileName}),
     message: "Alle Routing-Änderungen wurden von der Portal API angenommen.",
     attempts,
     appliedAt: new Date().toISOString(),
@@ -2328,7 +2628,12 @@ function publicEndpoint(endpoint) {
     status: endpoint.status || 0,
     path: endpoint.path || "",
     count: endpoint.count || 0,
+    complete: endpoint.complete === true,
+    total: endpoint.total ?? endpoint.count ?? 0,
     error: endpoint.ok ? "" : endpoint.error || "Unknown error",
+    errorCode: endpoint.ok ? "" : endpoint.errorCode || "",
+    errorKind: endpoint.ok ? "" : endpoint.errorKind || (endpoint.status ? "http" : "unknown"),
+    optional: Boolean(endpoint.optional),
   };
 }
 
@@ -2391,7 +2696,7 @@ function contractFieldLabel(key) {
 
 function compactCustomerOption(customer, index = 0) {
   const account = pickField(customer, ["externalIdentifier", "customerId", "customer", "account", "id", "number"], "");
-  const name = pickField(customer, ["name", "displayName", "company", "description"], account || `Anlage ${index + 1}`);
+  const name = pickField(customer, ["name", "displayName", "company", "description"], account || serverMessage("portal.server.pbxValue", {p0: index + 1}));
   return {
     id: account || name,
     account: account || name,
@@ -2414,7 +2719,7 @@ async function listPortalCustomers() {
   }
 
   try {
-    const endpoint = summarizeEndpoint(await portalFetch("/api/customers/"));
+    const endpoint = summarizeEndpoint(await fetchAllPages("/api/customers/"));
     const customers = (endpoint.items || []).map(compactCustomerOption).filter((customer) => customer.account);
     if (config.customerAccount && !customers.some((customer) => customer.account === config.customerAccount)) {
       customers.unshift({ id: config.customerAccount, account: config.customerAccount, name: config.customerAccount, label: config.customerAccount, href: "" });
@@ -2440,6 +2745,7 @@ async function listPortalCustomers() {
 }
 
 async function switchCustomerAccount(account) {
+  if (typeof account !== "string") throw httpError(400, serverMessage("portal.error.invalidJson"));
   const normalized = String(account || "").trim();
   if (!normalized) {
     const error = new Error("Keine Anlage ausgewählt.");
@@ -2455,13 +2761,13 @@ async function switchCustomerAccount(account) {
   const customers = await listPortalCustomers();
   const known = customers.customers.find((customer) => customer.account === normalized);
   if (customers.ok && customers.customers.length && !known) {
-    const error = new Error(`Anlage ${normalized} ist mit diesen API-Zugangsdaten nicht sichtbar.`);
+    const error = new Error(serverMessage("portal.server.pbxValueIsNotVisibleWithTheseApiCredentials", {p0: normalized}));
     error.status = 403;
     throw error;
   }
-  const validation = await safePortalCall("customerValidation", `/api/customers/${encodeURIComponent(normalized)}/basic-data`);
+  const validation = await safePortalCall("customerValidation", `/api/customers/${encodeURIComponent(normalized)}/basic-data`, { collection: false });
   if (!validation.ok) {
-    const error = new Error(`Anlage ${normalized} konnte nicht gelesen werden: ${validation.error || `HTTP ${validation.status}`}`);
+    const error = new Error(serverMessage("portal.server.pbxValueCouldNotBeReadValue", {p0: normalized, p1: validation.error || `HTTP ${validation.status}`}));
     error.status = validation.status || 403;
     throw error;
   }
@@ -2503,14 +2809,15 @@ function sanitizeBrowserLogin(body = {}) {
     .filter(([, value]) => !value)
     .map(([key]) => key);
   if (missing.length) {
-    const error = new Error(`Browser-Login unvollständig: ${missing.join(", ")} fehlt.`);
+    const error = new Error(serverMessage("portal.server.browserLoginIncompleteValueIsMissing", {p0: missing.join(", ")}));
     error.status = 400;
     throw error;
   }
 
   try {
     const parsed = new URL(credentials.baseUrl);
-    if (!["https:", "http:"].includes(parsed.protocol)) throw new Error("Unsupported protocol");
+    if (!["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || !["", "/"].includes(parsed.pathname)) throw new Error("Unsupported endpoint");
+    if (parsed.origin !== new URL(config.baseUrl).origin) throw new Error("Endpoint must match server configuration");
     credentials.baseUrl = parsed.toString().replace(/\/$/, "");
   } catch {
     const error = new Error("PORTAL_BASE_URL ist keine gültige HTTP/HTTPS URL.");
@@ -2522,6 +2829,7 @@ function sanitizeBrowserLogin(body = {}) {
 
 async function applyBrowserLogin(body = {}) {
   const credentials = sanitizeBrowserLogin(body);
+  await portalFetch(`/api/customers/${encodeURIComponent(credentials.customerAccount)}/basic-data`, { credentials: { ...credentials, configured: true } });
   config.baseUrl = credentials.baseUrl;
   config.apiKeyId = credentials.apiKeyId;
   config.apiKeySecret = credentials.apiKeySecret;
@@ -2533,12 +2841,6 @@ async function applyBrowserLogin(body = {}) {
   runtimeSettings.liveWritesChangedAt = runtimeSettings.browserCredentialsChangedAt;
   clearPortalCache();
 
-  const validation = await safePortalCall("customerValidation", `/api/customers/${encodeURIComponent(config.customerAccount)}/basic-data`);
-  if (!validation.ok) {
-    const error = new Error(`Browser-Login gespeichert, aber Anlage ${config.customerAccount} konnte nicht gelesen werden: ${validation.error || `HTTP ${validation.status}`}`);
-    error.status = validation.status || 403;
-    throw error;
-  }
 
   return {
     ok: true,
@@ -2565,10 +2867,10 @@ function demoOverview(reason = "") {
     customer: { company: "Demo Customer", account: config.customerAccount || "Demo" },
     counts: {
       extensions: extensions.length,
-      devices: 4,
+      devices: 2,
       trunks: 1,
-      dids: 3,
-    phoneBooks: 2,
+      dids: 1,
+    phoneBooks: 1,
     groups: 1,
     queues: 1,
     skills: 1,
@@ -2640,13 +2942,19 @@ function buildCallflow(overview) {
 }
 
 async function loadOverview() {
+  const generation = accountGeneration;
+  const account = config.customerAccount;
   if (!config.configured) {
     cache.overview = demoOverview("Portal API ist noch nicht vollständig konfiguriert.");
     cache.syncedAt = cache.overview.syncedAt;
+    cache.overview.connection = portalConnection();
     return cache.overview;
   }
 
   const customer = encodeURIComponent(config.customerAccount);
+  const snapshot = await readDaynightSnapshot(account);
+  if (generation !== accountGeneration) throw httpError(409, "Account changed. Reload before continuing.");
+  cache.managedTimeControls = snapshot?.ownedTimeControls || [];
   const base = `/api/customers/${customer}`;
   const endpointDefs = {
     version: "/api/version",
@@ -2665,7 +2973,9 @@ async function loadOverview() {
   };
 
   const entries = await Promise.all(
-    Object.entries(endpointDefs).map(async ([key, apiPath]) => [key, await safePortalCall(key, apiPath)])
+    Object.entries(endpointDefs).map(async ([key, apiPath]) => [key, await safePortalCall(key, apiPath, {
+      collection: !["version", "basicData", "contract", "featureStatus"].includes(key),
+    })])
   );
   const endpoints = Object.fromEntries(entries);
   const optionalTargetEntries = await Promise.all([
@@ -2697,10 +3007,8 @@ async function loadOverview() {
     ]),
   ]);
   const [queuesEndpoint, skillsEndpoint, voicemailsEndpoint, frontdesksEndpoint] = optionalTargetEntries;
-  if (queuesEndpoint.ok) endpoints.queues = queuesEndpoint;
-  if (skillsEndpoint.ok) endpoints.skills = skillsEndpoint;
-  if (voicemailsEndpoint.ok) endpoints.voicemails = voicemailsEndpoint;
-  if (frontdesksEndpoint.ok) endpoints.frontdesks = frontdesksEndpoint;
+  Object.assign(endpoints, { queues: queuesEndpoint, skills: skillsEndpoint, voicemails: voicemailsEndpoint, frontdesks: frontdesksEndpoint });
+  for (const [key, endpoint] of Object.entries(endpoints)) endpoint.optional = OPTIONAL_ENDPOINT_KEYS.has(key);
 
   const inventory = {
     extensions: (endpoints.extensions.items || []).map(compactExtension),
@@ -2739,12 +3047,23 @@ async function loadOverview() {
     })),
   };
   inventory.ivrs = await hydrateIvrDetails(inventory.ivrs, inventory);
-  inventory.timeControls = await hydrateTimeControlDetails(inventory.timeControls);
+  inventory.timeControls = (await hydrateTimeControlDetails(inventory.timeControls)).map(control => ({
+    ...control, dayTarget: targetFromHref(control.dayTargetHref, inventory), nightTarget: targetFromHref(control.nightTargetHref, inventory),
+  }));
+  if (generation !== accountGeneration) throw httpError(409, "Account changed. Reload before continuing.");
+  // Overview is read-only. Pruning a persisted backup here raced both account
+  // changes and live mutations. Explicit cleanup/save owns persistence instead.
+  cache.managedTimeControls = (snapshot?.ownedTimeControls || []).filter(item =>
+    inventory.timeControls.some(control => sameApiHref(control.href, item.href)));
+
+  for (const kind of ["ivrs", "timeControls"]) {
+    if (inventory[kind].some(item => item.detailError)) Object.assign(endpoints[kind], { ok: false, complete: false, error: "Routing details could not be loaded.", status: 502 });
+  }
 
   const overview = {
     ok: Object.values(endpoints).some((endpoint) => endpoint.ok),
     demo: false,
-    account: config.customerAccount,
+    account,
     version: endpoints.version.data || {},
     customer: publicCustomer(endpoints.basicData.data || {}),
     contract: publicContract(endpoints.contract.data || {}),
@@ -2770,8 +3089,11 @@ async function loadOverview() {
     settings: publicSettingsPayload(),
     syncedAt: new Date().toISOString(),
   };
+  overview.daynight = {active:Boolean(snapshot?.routingActive || inventory.dids.some(did => inventory.timeControls.some(tc => ownedDaynightTimeControl(tc) && didTargetsTimeControl(did,tc)))), nightTarget:snapshot?.nightTarget || null};
+  overview.connection = portalConnection(overview.endpoints, overview.syncedAt);
   overview.callflow = buildCallflow(overview);
 
+  if (generation !== accountGeneration) throw httpError(409, "Account changed. Reload before continuing.");
   cache.overview = overview;
   cache.callflow = overview.callflow;
   cache.syncedAt = overview.syncedAt;
@@ -2781,6 +3103,29 @@ async function loadOverview() {
       .map(([key, endpoint]) => [key, endpoint.error])
   );
   return overview;
+}
+
+function portalConnection(endpoints = cache.overview?.endpoints, checkedAt = cache.overview?.syncedAt || null) {
+  const required = REQUIRED_ENDPOINT_KEYS.map((key) => endpoints?.[key]);
+  const optional = [...OPTIONAL_ENDPOINT_KEYS].map((key) => endpoints?.[key]);
+  const requiredLoaded = required.filter((endpoint) => endpoint?.ok).length;
+  const requiredFailed = required.filter((endpoint) => endpoint && !endpoint.ok).length;
+  let state = "unchecked";
+  if (!config.configured) state = "unconfigured";
+  else if (requiredLoaded === required.length) state = "connected";
+  else if (requiredLoaded) state = "partial";
+  else if (requiredFailed) state = "unavailable";
+  return {
+    state,
+    authenticationRequired: required.some(endpoint => endpoint?.status === 401),
+    checkedAt,
+    requiredTotal: required.length,
+    requiredLoaded,
+    requiredFailed,
+    optionalTotal: optional.length,
+    optionalLoaded: optional.filter((endpoint) => endpoint?.ok).length,
+    optionalFailed: optional.filter((endpoint) => endpoint && !endpoint.ok).length,
+  };
 }
 
 function publicSettingsPayload() {
@@ -2793,18 +3138,21 @@ function publicSettingsPayload() {
     browserCredentialsActive: runtimeSettings.authMode === "browser",
     browserCredentialsChangedAt: runtimeSettings.browserCredentialsChangedAt,
     apiKeyIdConfigured: Boolean(config.apiKeyId),
-    liveWritesEnabled: runtimeSettings.liveWritesEnabled,
+    liveWritesEnabled: areLiveWritesEnabled(),
+    liveWritesLocked: config.liveWritesLocked,
     liveWritesDefaultEnabled: config.liveWritesEnabled,
+    liveWritesPermitted: config.liveWritesPermitted,
     liveWritesRuntimeOverride: runtimeSettings.liveWritesEnabled !== config.liveWritesEnabled,
     liveWritesChangedAt: runtimeSettings.liveWritesChangedAt,
     csrfToken,
+    writeContext,
     sources: {
       environment: Boolean(process.env.PORTAL_API_KEY_ID || process.env.PORTAL_API_KEY_SECRET || process.env.PORTAL_CUSTOMER_ACCOUNT),
-      portalSecretFound: Boolean(config.portalSecretFile),
-      ctiSecretFound: Boolean(config.ctiSecretFile),
-      googleContactsCacheFound: Boolean(googleContactsFile),
+      portalSecretFound: Boolean(config.portalSecretFile && fs.existsSync(config.portalSecretFile)),
+      ctiSecretFound: Boolean(config.ctiSecretFile && fs.existsSync(config.ctiSecretFile)),
+      googleContactsCacheFound: Boolean(googleContactsFile && fs.existsSync(googleContactsFile)),
     },
-    googleContactsFile: googleContactsFile ? path.relative(ROOT, googleContactsFile) : "",
+    googleContactsFile: googleContactsFile ? path.basename(googleContactsFile) : "",
     phonebookMapping: runtimeSettings.phonebookMapping,
     variables: [
       "PORTAL_BASE_URL",
@@ -2824,12 +3172,14 @@ function publicSettingsPayload() {
 function getStatusPayload() {
   const settings = publicSettingsPayload();
   return {
+    appId: "portal",
     ok: settings.configured,
     configured: settings.configured,
     account: settings.account,
     baseUrl: settings.baseUrl,
     secrets: settings.sources,
     settings,
+    connection: portalConnection(),
     cache: {
       syncedAt: cache.syncedAt,
       counts: cache.overview?.counts || null,
@@ -2839,22 +3189,15 @@ function getStatusPayload() {
 }
 
 function normalizeSyncPhone(value) {
-  let digits = String(value || "").replace(/[^\d]/g, "");
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `49${digits.slice(1)}`;
-  return digits;
+  const raw = String(value || "").trim().replace(/\(0\)/g, "");
+  if (!/^(?:\+|00)[\d () .-]+$/.test(raw)) return "";
+  const digits = raw.replace(/[^\d]/g, "").replace(/^00/, "");
+  return /^[1-9]\d{6,14}$/.test(digits) ? digits : "";
 }
 
 function displaySyncPhone(value) {
-  const raw = String(value || "").trim();
-  let digits = raw.replace(/[^\d]/g, "");
-  if (!digits) return "";
-  if (digits.startsWith("00")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `49${digits.slice(1)}`;
-  if (!digits.startsWith("49") && digits.length >= 7 && digits.length <= 12) {
-    digits = `49${digits}`;
-  }
-  return `+${digits}`;
+  const digits = normalizeSyncPhone(value);
+  return digits ? "+" + digits : "";
 }
 
 function normalizeSyncName(value) {
@@ -2911,7 +3254,7 @@ async function readGoogleContactsCache() {
       ok: false,
       syncedAt: null,
       contacts: [],
-      error: `Kontaktquelle konnte nicht gelesen werden: ${error.message}`,
+      error: serverMessage("portal.server.theContactSourceCouldNotBeReadValue", {p0: error.message}),
     };
   }
 }
@@ -2943,8 +3286,12 @@ function compactGoogleContactForSync(contact, index) {
   const firstName = normalizeDisplayName(stringFromMappedField(contact, mapping.firstName, ["firstName", "givenName"]));
   const lastName = normalizeDisplayName(stringFromMappedField(contact, mapping.lastName, ["lastName", "familyName", "surname", "name"]));
   const fallbackName = contact.name || [contact.givenName || contact.firstName, contact.familyName || contact.lastName].filter(Boolean).join(" ");
+  const mappedDisplayName = normalizeDisplayName(stringFromMappedField(contact, mapping.displayName, ["displayName", "name", "fullName"]));
+  const alreadyIncludesFirstName = firstName && mappedDisplayName.toLocaleLowerCase().split(/[\s,;-]+/).includes(firstName.toLocaleLowerCase());
   const displayName = normalizeDisplayName(
-    stringFromMappedField(contact, mapping.displayName, ["displayName", "name", "fullName"])
+    (mappedDisplayName && (mapping.displayName !== mapping.lastName || !firstName || alreadyIncludesFirstName) ? mappedDisplayName : "")
+      || (firstName && lastName && firstName !== lastName && !alreadyIncludesFirstName ? [firstName, lastName].join(" ") : "")
+      || stringFromMappedField(contact, mapping.displayName, ["displayName", "name", "fullName"])
       || [firstName, lastName].filter(Boolean).join(" ")
       || fallbackName
       || "Kontakt",
@@ -2955,7 +3302,7 @@ function compactGoogleContactForSync(contact, index) {
         ? phone.value || phone.canonical || phone.canonicalForm || phone.number || phone.phoneNumber || ""
         : phone,
       normalized: normalizeSyncPhone(typeof phone === "object"
-        ? phone.normalized || phone.canonical || phone.canonicalForm || phone.value || phone.number || phone.phoneNumber
+        ? phone.value || phone.canonical || phone.canonicalForm || phone.number || phone.phoneNumber || phone.normalized
         : phone),
     }))
     .filter((phone) => phone.value && phone.normalized);
@@ -3042,8 +3389,6 @@ function buildPhonebookEntryBody(contact, phone) {
   const displayNumber = displaySyncPhone(phone.value || phone.normalized);
   return {
     data: [
-      { name: "firstName", value: contact.firstName },
-      { name: "lastName", value: contact.lastName },
       { name: "displayName", value: contact.name },
       { name: "displayNumber", value: displayNumber },
     ].filter((field) => field.value !== undefined && field.value !== null && field.value !== ""),
@@ -3055,6 +3400,7 @@ async function buildPhonebookSyncPreview() {
     cache.overview || loadOverview(),
     readGoogleContactsCache(),
   ]);
+  if (!overview.demo) requireCompleteInventory(overview, ["phoneBooks"]);
   const portal = await loadPhonebookEntries(overview);
   const syncBook = portal.books[0] || null;
   const portalByPhone = new Map();
@@ -3064,13 +3410,18 @@ async function buildPhonebookSyncPreview() {
     }
   }
 
-  const googleContacts = google.contacts.map(compactGoogleContactForSync).filter((contact) => contact.phones.length);
+  const googleContacts = google.contacts.map(compactGoogleContactForSync);
   const seenGooglePhones = new Set();
   const actions = [];
   const unchanged = [];
   const skipped = [];
   const googlePreview = [];
   for (const contact of googleContacts) {
+    if (!contact.phones.length) {
+      skipped.push({ reason: "invalid-phone", contact: contact.name, phone: "" });
+      googlePreview.push({ contact: contact.name, phone: "", status: "skipped", reason: serverMessage("portal.invalidContactPhone") });
+      continue;
+    }
     for (const phone of contact.phones) {
       if (seenGooglePhones.has(phone.normalized)) {
         skipped.push({ reason: "duplicate-google-phone", contact: contact.name, phone: phone.value });
@@ -3106,7 +3457,7 @@ async function buildPhonebookSyncPreview() {
           contact: contact.name,
           phone: displaySyncPhone(phone.value || phone.normalized),
           status: "update",
-          reason: `Name in NFON: ${existing.name}`,
+          reason: serverMessage("portal.server.nameInNfonValue", {p0: existing.name}),
         });
         actions.push({
           action: "update",
@@ -3172,8 +3523,8 @@ async function buildPhonebookSyncPreview() {
     message: !google.ok
       ? google.error
       : changeCount > 0
-        ? `${changeCount} Änderung${changeCount === 1 ? "" : "en"} gefunden. Es wurde noch nichts gespeichert.`
-        : `${unchanged.length} Einträge sind bereits synchron. Es gibt nichts zu übernehmen.`,
+        ? serverMessage("portal.server.valueChangesFoundNothingHasBeenSavedYet", {p0: changeCount, p1: changeCount === 1 ? "" : "en"})
+        : serverMessage("portal.valueEntriesAreAlreadyInSyncThereAreNo", {p0: unchanged.length}),
     source: {
       googleCacheFound: Boolean(config.googleContactsFile),
       googleSyncedAt: google.syncedAt,
@@ -3207,6 +3558,7 @@ async function buildPhonebookSyncPreview() {
 
 async function applyPhonebookSync() {
   assertLiveWritesEnabled();
+  await loadOverview();
   const plan = await buildPhonebookSyncPreview();
   if (!plan.ok) {
     return {
@@ -3275,9 +3627,9 @@ async function applyPhonebookSync() {
       : "Telefonbuch-Sync teilweise fehlgeschlagen",
     message: failed.length === 0
       ? noActions
-        ? `${plan.summary?.unchanged || 0} Einträge sind bereits synchron. Es wurde nichts gespeichert.`
-        : `${results.length} Telefonbuch-Aktion${results.length === 1 ? "" : "en"} wurden an die Portal API gesendet.`
-      : `${failed.length} von ${results.length} Telefonbuch-Aktionen sind fehlgeschlagen.`,
+        ? serverMessage("portal.server.valueEntriesAreAlreadyInSyncNothingWasSaved", {p0: plan.summary?.unchanged || 0})
+        : serverMessage("portal.server.valuePhonebookActionsWereSentToThePortalApi", {p0: results.length, p1: results.length === 1 ? "" : "en"})
+      : serverMessage("portal.server.valueOfValuePhonebookActionsFailed", {p0: failed.length, p1: results.length}),
     results,
     appliedAt: new Date().toISOString(),
   };
@@ -3312,11 +3664,13 @@ async function saveUploadedGoogleContacts(body = {}) {
     error.status = 400;
     throw error;
   }
+  if (contacts.some(contact => !contact || typeof contact !== "object" || Array.isArray(contact))) throw httpError(400, "Each contact must be an object.");
   if (contacts.length > 5000) {
     const error = new Error("Upload ist zu gross. Maximal 5000 Kontakte pro Datei.");
     error.status = 413;
     throw error;
   }
+  if (!contacts.some((contact, index) => compactGoogleContactForSync(contact, index).phones.length)) throw httpError(400, "No contacts contain an explicit international phone number.");
   const payload = {
     syncedAt: body.syncedAt || new Date().toISOString(),
     source: body.source || "portal-upload",
@@ -3331,7 +3685,7 @@ async function saveUploadedGoogleContacts(body = {}) {
   return {
     ok: true,
     contacts: contacts.length,
-    file: path.relative(ROOT, file),
+    file: path.basename(file),
     syncedAt: payload.syncedAt,
     settings: publicSettingsPayload(),
   };
@@ -3359,8 +3713,11 @@ function nextResourceNumber(overview, kind) {
 
 function linkForTargetPayload(target) {
   if (!target) return "";
-  const explicitHref = apiPathFromHref(target.href || "");
-  if (explicitHref) return explicitHref;
+  if (typeof target !== "object" || Array.isArray(target)
+      || ["type", "href"].some(key => target[key] != null && typeof target[key] !== "string")
+      || ["routeNumber", "serviceNumber", "number", "targetNumber"].some(key => target[key] != null && !["string", "number"].includes(typeof target[key]))) throw httpError(400, serverMessage("portal.error.invalidJson"));
+  if (target.href) return assertCustomerPath(target.href);
+  const explicitHref = "";
   const type = normalizeDestinationType(target.type);
   const route = target.routeNumber || target.serviceNumber || target.number || target.targetNumber || "";
   return targetHrefForRoute(type, route);
@@ -3375,7 +3732,8 @@ async function deletePortalResource(kind, id) {
     throw error;
   }
 
-  const overview = cache.overview || await loadOverview();
+  const overview = await loadOverview();
+  requireCompleteInventory(overview);
   const item = (overview.inventory?.[kind] || []).find((entry) => resourceRouteNumber(entry) === String(id));
   if (!item) {
     const error = new Error("Ressource nicht gefunden.");
@@ -3385,7 +3743,13 @@ async function deletePortalResource(kind, id) {
 
   const customer = encodeURIComponent(config.customerAccount || "");
   const endpoint = item.href || `/api/customers/${customer}/targets/${collection}/${encodeURIComponent(resourceRouteNumber(item))}`;
+  const type = { queues: "QUEUE", skills: "SKILL", ivrs: "IVR", timeControls: "TIMECONTROL" }[kind];
+  await loadDeletionReferences(overview.inventory);
+  const referenced = (overview.inventory.dids || []).some(did => normalizeDestinationType(did.destinationType) === type && String(didDestinationRoute(did)) === String(resourceRouteNumber(item)))
+    || [...(overview.inventory.ivrs || []), ...(overview.inventory.timeControls || []), ...(overview.inventory.queues || []), ...(overview.inventory.skills || []), ...(overview.inventory.groups || [])].some(other => !sameApiHref(other.href, endpoint) && containsTargetReference(other, endpoint));
+  if (referenced) throw httpError(409, "Resource remains referenced; deletion blocked.");
   const result = await portalFetch(endpoint, { method: "DELETE" });
+  if (kind === "timeControls") await forgetManagedTimeControl(endpoint);
   cache.overview = null;
   cache.callflow = null;
   cache.syncedAt = null;
@@ -3401,6 +3765,7 @@ async function deletePortalResource(kind, id) {
 }
 
 async function createPortalResource(kind, payload = {}) {
+  if (["serviceNumber", "extensionNumber", "keyNumber"].some(key => payload[key] != null && (!["string", "number"].includes(typeof payload[key]) || (String(payload[key]) !== "" && !/^\d+$/.test(String(payload[key])))))) throw httpError(400, serverMessage("portal.error.invalidJson"));
   assertLiveWritesEnabled();
   const collection = RESOURCE_COLLECTIONS[kind];
   if (!collection) {
@@ -3412,7 +3777,9 @@ async function createPortalResource(kind, payload = {}) {
   const overview = cache.overview || await loadOverview();
   const customer = encodeURIComponent(config.customerAccount || "");
   const displayName = validatePortalDisplayName(payload.displayName, "Name");
-  const serviceNumber = String(payload.serviceNumber || (kind === "queues" || kind === "skills" ? "" : nextResourceNumber(overview, kind))).trim();
+  const serviceNumber = String(kind === "queues" || kind === "skills"
+    ? payload.serviceNumber ?? ""
+    : payload.serviceNumber || nextResourceNumber(overview, kind)).trim();
   const preferredExtension = kind === "ivrs" ? 7100 : kind === "timeControls" ? 7200 : 10;
   const extensionNumber = String(payload.extensionNumber || (kind === "queues" || kind === "skills" ? "" : nextServiceExtension(overview, new Set(), preferredExtension))).trim();
   const endpoint = `/api/customers/${customer}/targets/${collection}`;
@@ -3423,7 +3790,7 @@ async function createPortalResource(kind, payload = {}) {
       data: [
         { name: "displayName", value: displayName },
         { name: "name", value: displayName },
-        { name: "serviceNumber", value: serviceNumber },
+        { name: "serviceNumber", value: serviceNumber === "" ? "" : nfonInteger(serviceNumber) },
         { name: "extensionNumber", value: extensionNumber },
       ].filter((field) => field.value !== ""),
     };
@@ -3455,7 +3822,7 @@ async function createPortalResource(kind, payload = {}) {
       links: [
         { rel: "destinationIfAllowed", href: openHref },
         { rel: "destinationIfDenied", href: closedHref },
-        { rel: "timezone", href: "/api/time-zones/Europe.Berlin" },
+        { rel: "timezone", href: timeZoneHref() },
       ],
       data: [
         { name: "name", value: displayName },
@@ -3472,9 +3839,12 @@ async function createPortalResource(kind, payload = {}) {
     };
   }
 
+  // Validate every dependent target before creating the resource.
+  if (kind === "ivrs") { linkForTargetPayload(payload.keyTarget); linkForTargetPayload(payload.timeoutTarget); }
   const result = await portalFetch(endpoint, { method: "POST", body });
   const created = createdTargetFromResult(kind === "ivrs" ? "IVR" : kind === "timeControls" ? "TIMECONTROL" : kind === "skills" ? "SKILL" : "QUEUE", result, serviceNumber);
 
+  try {
   if (kind === "ivrs" && created.href) {
     const keyTargetHref = linkForTargetPayload(payload.keyTarget);
     if (payload.keyNumber && keyTargetHref) {
@@ -3498,6 +3868,13 @@ async function createPortalResource(kind, payload = {}) {
     }
   }
 
+  } catch (error) {
+    const actualHref = result.location || result.body?.href || extractItems(result.body)[0]?.href;
+    const attempts = [];
+    if (actualHref) await runRollbackOperations([{action:"delete-incomplete-resource",method:"DELETE",endpoint:assertCustomerPath(apiPathFromHref(actualHref).replace(/\/+$/, ""))}], attempts);
+    cache.overview = null; cache.callflow = null;
+    return {ok:false,status:502,created:false,error:portalErrorMessage(error),attempts,rolledBack:Boolean(actualHref) && !attempts.some(item=>item.action==="rollback-failed")};
+  }
   cache.overview = null;
   cache.callflow = null;
   cache.syncedAt = null;
@@ -3519,7 +3896,7 @@ function announcementTargetPlan(payload = {}) {
   const announcementHref = existingAnnouncementHref(announcementName, overview);
   const afterTarget = payload.afterTarget || { type: "HANGUP", title: "Auflegen", routeNumber: "HANGUP", number: "HANGUP" };
   const afterHref = linkForTargetPayload(afterTarget);
-  const displayName = validatePortalDisplayName(payload.displayName || `Nachtansage ${announcementName || "Ansage"}`, "Ansage-Ziel");
+  const displayName = validatePortalDisplayName(payload.displayName || serverMessage("portal.nightAnnouncementValue", {p0: announcementName || "Ansage"}), "Ansage-Ziel");
   const serviceNumber = nextResourceNumber(overview, "ivrs");
   const extensionNumber = nextServiceExtension(overview, new Set(), 7110);
   const endpoint = `/api/customers/${customer}/targets/ivr-services`;
@@ -3533,7 +3910,7 @@ function announcementTargetPlan(payload = {}) {
     title: blockers.length ? "Ansage-Ziel unvollständig" : "Ansage-Ziel bereit",
     message: blockers.length
       ? blockers.join(" ")
-      : `Sprachdialog "${displayName}" wuerde die Ansage abspielen und danach zu ${afterTarget.title || targetTypeLabel(afterTarget.type)} routen.`,
+      : serverMessage("portal.server.voiceDialogValueWouldPlayTheAnnouncementAndThen", {p0: displayName, p1: afterTarget.title || targetTypeLabel(afterTarget.type)}),
     displayName,
     announcementName,
     announcementHref,
@@ -3542,7 +3919,7 @@ function announcementTargetPlan(payload = {}) {
     target: {
       type: "IVR",
       title: displayName,
-      subtitle: `Sprachdialog ${extensionNumber}`,
+      subtitle: serverMessage("portal.voiceDialogValue", {p0: extensionNumber}),
       targetNumber: extensionNumber,
       routeNumber: serviceNumber,
       href: `${endpoint}/${encodeURIComponent(serviceNumber)}`,
@@ -3595,6 +3972,7 @@ async function applyAnnouncementTarget(payload = {}) {
     timeoutTarget: plan.afterTarget,
     timeoutDelay: Number(payload.timeoutDelay) || 1,
   });
+  if (!created.ok) return {...created,applied:false};
   const target = {
     ...plan.target,
     href: created.resource?.href || plan.target.href,
@@ -3608,10 +3986,10 @@ async function applyAnnouncementTarget(payload = {}) {
     applied: true,
     status: 200,
     title: "Ansage-Ziel angelegt",
-    message: `Sprachdialog "${plan.displayName}" wurde angelegt und kann als Nachtziel genutzt werden.`,
+    message: serverMessage("portal.server.voiceDialogValueWasCreatedAndCanBeUsed", {p0: plan.displayName}),
     target,
     option: {
-      label: `${target.targetNumber || target.routeNumber} - (Sprachdialog | ${target.title})`,
+      label: serverMessage("portal.server.valueVoiceDialogValue", {p0: target.targetNumber || target.routeNumber, p1: target.title}),
       value: JSON.stringify({ ...target, tone: "coral" }),
     },
     result: created,
@@ -3734,6 +4112,7 @@ function buildExtensionVoiceMailBody(row) {
 }
 
 function normalizeExtensionBatchRows(rows = []) {
+  if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== "object" || Array.isArray(row))) throw httpError(400, serverMessage("portal.error.invalidJson"));
   return rows.map((row, index) => {
     const normalized = {
       index,
@@ -3752,17 +4131,17 @@ function normalizeExtensionBatchRows(rows = []) {
 function buildExtensionBatchPlan(payload = {}) {
   const overview = cache.overview || null;
   const existing = new Set((overview?.inventory?.extensions || []).map((extension) => String(extension.number || extension.id || "")));
-  const rows = normalizeExtensionBatchRows(Array.isArray(payload.rows) ? payload.rows : []);
+  const rows = normalizeExtensionBatchRows(payload.rows ?? []);
   const seen = new Set();
   const entries = rows.map((row) => {
     const errors = [];
     if (!row.extensionNumber) errors.push("Nummer fehlt");
-    if (!/^\d{2,8}$/.test(row.extensionNumber)) errors.push("Nummer muss 2 bis 8 Ziffern enthalten");
+    if (!/^[1-9]\d{1,7}$/.test(row.extensionNumber)) errors.push("Nummer muss 2 bis 8 Ziffern enthalten");
     if (!row.displayName) errors.push("Name fehlt");
     if (!row.mailboxPin) errors.push("Mailbox-PIN fehlt");
     if (row.mailboxPin && !/^\d{4,12}$/.test(row.mailboxPin)) errors.push("Mailbox-PIN muss 4 bis 12 Ziffern enthalten");
     for (const field of EXTENSION_BATCH_FIELD_DEFS.filter((definition) => definition.type === "number")) {
-      if (hasOwn(row, field.key) && !Number.isFinite(row[field.key])) errors.push(`${field.label} muss eine Zahl sein`);
+      if (hasOwn(row, field.key) && !Number.isFinite(row[field.key])) errors.push(serverMessage("portal.server.valueMustBeANumber", {p0: field.label}));
     }
     if (existing.has(row.extensionNumber)) errors.push("Nebenstelle existiert bereits");
     if (seen.has(row.extensionNumber)) errors.push("Nummer ist doppelt in der Liste");
@@ -3791,9 +4170,9 @@ function buildExtensionBatchPlan(payload = {}) {
         ? "Batch Import geprüft"
         : "Keine Nebenstellen in der Liste",
     message: invalid.length
-      ? `${invalid.length} von ${entries.length} Zeile${entries.length === 1 ? "" : "n"} brauchen Korrektur.`
+      ? serverMessage("portal.server.valueOfValueRowsNeedCorrection", {p0: invalid.length, p1: entries.length, p2: entries.length === 1 ? "" : "n"})
       : valid.length
-        ? `${valid.length} Nebenstelle${valid.length === 1 ? "" : "n"} können angelegt werden.`
+        ? serverMessage("portal.server.valueExtensionsCanBeCreated", {p0: valid.length, p1: valid.length === 1 ? "" : "n"})
         : "Bitte mindestens eine Nebenstelle erfassen.",
     summary: {
       total: entries.length,
@@ -3814,6 +4193,7 @@ async function planExtensionBatch(payload = {}) {
 async function applyExtensionBatch(payload = {}) {
   assertLiveWritesEnabled();
   if (!cache.overview) await loadOverview();
+  requireCompleteInventory(cache.overview);
   const plan = buildExtensionBatchPlan(payload);
   if (!plan.ok) return { ...plan, dryRun: false, applied: false, status: 400 };
   const results = [];
@@ -3865,8 +4245,8 @@ async function applyExtensionBatch(payload = {}) {
     status: failed.length === 0 ? 200 : 502,
     title: failed.length === 0 ? "Batch Import übernommen" : "Batch Import teilweise fehlgeschlagen",
     message: failed.length === 0
-      ? `${results.length} Nebenstelle${results.length === 1 ? "" : "n"} wurden angelegt.`
-      : `${failed.length} von ${results.length} Nebenstelle${results.length === 1 ? "" : "n"} konnten nicht vollständig angelegt werden.`,
+      ? serverMessage("portal.server.valueExtensionsWereCreated", {p0: results.length, p1: results.length === 1 ? "" : "n"})
+      : serverMessage("portal.server.valueOfValueExtensionsCouldNotBeFullyCreated", {p0: failed.length, p1: results.length, p2: results.length === 1 ? "" : "n"}),
     results,
     appliedAt: new Date().toISOString(),
   };
@@ -3882,6 +4262,7 @@ function didDestinationRoute(did = {}) {
 
 function nightTargetFromPayload(payload = {}) {
   const target = payload.nightTarget || payload.target || {};
+  linkForTargetPayload(target);
   const type = normalizeDestinationType(target.type);
   const explicitHref = apiPathFromHref(target.href || "");
   const routeNumber = target.routeNumber || target.serviceNumber || lastPathSegment(explicitHref) || target.targetNumber || target.number || "";
@@ -3953,7 +4334,7 @@ function targetPreviewFromHref(href, inventory = {}) {
   if (!target) {
     return {
       type: "",
-      label: "kein Ziel erkannt",
+      label: "",
       routeNumber: "",
       extensionNumber: "",
       href: normalizedHref,
@@ -3982,8 +4363,12 @@ function gatewayNameForDid(did = {}, index = 0) {
   return `${DAYNIGHT_TIME_CONTROL_PREFIX}${String(did.name || did.id || index + 1).replace(/\s+/g, " ").slice(0, 42)}`;
 }
 
+function ownedDaynightTimeControl(timeControl) {
+  return isManagedDaynightTimeControl(timeControl) && (cache.managedTimeControls || []).some(item => sameApiHref(item.href, timeControl.href) && sameGatewayName(item.name, timeControl.name));
+}
+
 function isManagedDaynightTimeControl(timeControl = {}) {
-  return String(timeControl.name || "").trim().toLowerCase().startsWith(DAYNIGHT_TIME_CONTROL_PREFIX.trim().toLowerCase() + " ");
+  return /^TN (?:\+|00)[\d ().-]+$/i.test(String(timeControl.name || "").trim());
 }
 
 function sameGatewayName(left, right) {
@@ -3995,7 +4380,11 @@ function findExistingDaynightGateway(gatewayName, inventory = {}) {
 }
 
 function sameApiHref(left, right) {
-  return apiPathFromHref(left) === apiPathFromHref(right);
+  return canonicalResourceHref(left) === canonicalResourceHref(right);
+}
+
+function canonicalResourceHref(value) {
+  return apiPathFromHref(value).replace(/\/+$/, "");
 }
 
 function gatewayHrefFromServiceNumber(serviceNumber) {
@@ -4005,6 +4394,8 @@ function gatewayHrefFromServiceNumber(serviceNumber) {
 
 function daynightSnapshotPayload(plan, result = {}) {
   return {
+    schemaVersion: 2,
+    routingActive: false,
     type: "daynight-gateway-migration",
     customer: config.customerAccount || "",
     createdAt: new Date().toISOString(),
@@ -4025,21 +4416,57 @@ function daynightSnapshotPayload(plan, result = {}) {
 }
 
 async function saveDaynightSnapshot(plan, result = {}) {
+  const previous = await readDaynightSnapshot();
   const snapshot = daynightSnapshotPayload(plan, result);
-  await writePrivateJson(DAYNIGHT_GATEWAY_SNAPSHOT, snapshot);
+  snapshot.routingActive = result.routingActive ?? previous?.routingActive ?? false;
+  if (previous?.routingActive) {
+    snapshot.entries = previous.entries;
+    snapshot.nightTarget = previous.nightTarget;
+    snapshot.createdAt = previous.createdAt;
+  }
+  const owned = new Map((previous?.ownedTimeControls || []).map(item => [item.href, item]));
+  for (const entry of plan?.entries || []) {
+    const creation = result.results?.find(item => item.ok && item.action === "create-daynight-gateway" && item.gateway === entry.gateway?.name);
+    if (creation?.href) owned.set(creation.href, { href: creation.href, name: entry.gateway.name });
+  }
+  snapshot.ownedTimeControls = [...owned.values()];
+  await writePrivateJson(daynightSnapshotFile(snapshot.customer), snapshot);
+  cache.managedTimeControls = snapshot.ownedTimeControls;
   return snapshot;
 }
 
-async function readDaynightSnapshot() {
+async function forgetManagedTimeControl(href) {
+  const snapshot = await readDaynightSnapshot();
+  if (!snapshot) return;
+  snapshot.ownedTimeControls = (snapshot.ownedTimeControls || []).filter(item => !sameApiHref(item.href, href));
+  cache.managedTimeControls = snapshot.ownedTimeControls;
+  await writePrivateJson(daynightSnapshotFile(snapshot.customer), snapshot);
+}
+
+function daynightSnapshotFile(account = config.customerAccount) {
+  return path.join(DATA_DIR, "daynight-" + crypto.createHash("sha256").update(account).digest("hex") + ".json");
+}
+
+async function readDaynightSnapshot(account = config.customerAccount) {
   try {
-    return JSON.parse(await fsp.readFile(DAYNIGHT_GATEWAY_SNAPSHOT, "utf8"));
-  } catch {
-    return null;
+    const snapshot = JSON.parse(await fsp.readFile(daynightSnapshotFile(account), "utf8"));
+    return snapshot.customer === account ? snapshot : null;
+  } catch (error) {
+    if (error.code !== "ENOENT") return null;
+    // Read the previous single-account format without migrating on a GET.
+    // An explicit mutation writes the account-bound file afterwards.
+    try {
+      const legacy = JSON.parse(await fsp.readFile(path.join(DATA_DIR, "daynight-snapshot.json"), "utf8"));
+      return legacy.customer === account ? legacy : null;
+    } catch {
+      return null;
+    }
   }
 }
 
 function buildDaynightGatewayPreview(payload = {}) {
   const overview = cache.overview || null;
+  if (config.configured) requireCompleteInventory(overview);
   const inventory = overview?.inventory || {};
   const customer = encodeURIComponent(config.customerAccount || "{customer}");
   const nightTarget = nightTargetFromPayload(payload);
@@ -4051,11 +4478,11 @@ function buildDaynightGatewayPreview(payload = {}) {
     const portalCurrentTarget = targetPreviewFromDid(did, inventory);
     const blockers = [];
     if (!did.href && !did.name) blockers.push("Rufnummer hat keinen stabilen DID-Identifier.");
-    if (!did.trunkNumber && !trunkHrefForDid(did)) blockers.push("Trunk kann fuer Restore nicht eindeutig bestimmt werden.");
     if (!nightTarget.href) blockers.push("Nachtziel fehlt oder kann nicht eindeutig gebildet werden.");
 
     const gatewayName = gatewayNameForDid(did, index);
     const existingGateway = findExistingDaynightGateway(gatewayName, inventory);
+    if (existingGateway && !ownedDaynightTimeControl(existingGateway)) blockers.push(serverMessage("portal.timeControlNotOwned"));
     const didAlreadyUsesGateway = Boolean(existingGateway && didTargetsTimeControl(did, existingGateway));
     const gatewayDayTargetHref = apiPathFromHref(existingGateway?.dayTargetHref || "");
     const currentTarget = didAlreadyUsesGateway
@@ -4065,7 +4492,7 @@ function buildDaynightGatewayPreview(payload = {}) {
     if (!currentTarget.isUnassigned && !currentTarget.routeNumber) blockers.push("Aktuelle Zielroute fehlt.");
     if (!currentTarget.isUnassigned && !currentTarget.href) blockers.push("Aktueller Ziel-Href kann nicht gebildet werden.");
     if (!currentTarget.isUnassigned && !["IVR", "TIMECONTROL", "QUEUE", "SKILL", "GROUP", "PHONEEXTENSION", "FRONTDESK", "VOICEMAIL", "HANGUP"].includes(currentTarget.type)) {
-      blockers.push(`Zieltyp ${currentTarget.type || "-"} ist noch nicht fuer Zeitsteuerungs-Restore bewertet.`);
+      blockers.push(serverMessage("portal.server.targetTypeValueHasNotYetBeenEvaluatedFor", {p0: currentTarget.type || "-"}));
     }
     const serviceNumber = existingGateway?.serviceNumber || nextServiceNumber(overview, "TIMECONTROL", allocatedServiceNumbers);
     const extensionNumber = existingGateway?.extensionNumber || nextServiceExtension(overview, allocatedExtensions, 7300 + index);
@@ -4090,7 +4517,7 @@ function buildDaynightGatewayPreview(payload = {}) {
       links: [
         dayTargetHref ? { rel: "destinationIfAllowed", href: dayTargetHref } : null,
         { rel: "destinationIfDenied", href: nightTarget.href || "{night-target}" },
-        { rel: "timezone", href: "/api/time-zones/Europe.Berlin" },
+        { rel: "timezone", href: timeZoneHref(existingGateway?.timezoneHref) },
       ].filter(Boolean),
       data: [
         { name: "name", value: gatewayName },
@@ -4122,18 +4549,13 @@ function buildDaynightGatewayPreview(payload = {}) {
           links: [
             { rel: "destinationIfAllowed", href: nightTarget.href || "{night-target}" },
             { rel: "destinationIfDenied", href: nightTarget.href || "{night-target}" },
-            { rel: "timezone", href: "/api/time-zones/Europe.Berlin" },
+            { rel: "timezone", href: timeZoneHref(existingGateway?.timezoneHref) },
           ],
         },
         note: "Nachtmodus erzwingen: innerhalb und ausserhalb des Zeitfensters auf Nachtziel routen.",
       }
       : null;
-    const routeOperations = didAlreadyUsesGateway
-      ? []
-      : [
-        { action: "delete-old-routing", method: "DELETE", endpoint: portalCurrentTarget.href ? `${portalCurrentTarget.href}/inbound-trunk-numbers/${encodeURIComponent(inboundNumberIdForDid(did))}` : "", note: "Aktuelle Rufnummern-Zuordnung entfernen." },
-        { action: "route-did-to-gateway", method: "POST", endpoint: didRouteEndpoint, body: buildInboundAssignmentBody(did), note: "Rufnummer auf Zeitsteuerung routen." },
-      ].filter((operation) => operation.endpoint);
+    const routeOperations = didAlreadyUsesGateway ? [] : [didDestinationOperation(did, gatewayHref, "route-did-to-gateway")];
     return {
       ok: blockers.length === 0,
       did: {
@@ -4153,36 +4575,32 @@ function buildDaynightGatewayPreview(payload = {}) {
         nightTargetHref: nightTarget.href || "",
       },
       gatewayExists: Boolean(existingGateway),
+      routingActive: didAlreadyUsesGateway,
       gatewayNeedsUpdate,
       gatewayMatchesDayTarget,
       gatewayMatchesNightTarget,
       gatewayCreateOperation,
       gatewayUpdateOperation,
       forceNightGatewayOperation,
+      restoreGatewayOperation: existingGateway ? {action:"restore-time-control",method:"PUT",endpoint:existingGateway.href,body:existingGateway.routingBody} : null,
       routeOperations,
       plannedOperations: [
         gatewayCreateOperation,
         gatewayUpdateOperation,
         ...routeOperations,
       ].filter(Boolean),
-      restorePlan: {
-        action: currentTarget.isUnassigned ? "restore-unassigned-routing" : "restore-original-routing",
-        method: currentTarget.isUnassigned ? "DELETE" : "POST",
-        endpoint: currentTarget.isUnassigned
-          ? `${gatewayHref}/inbound-trunk-numbers/${encodeURIComponent(inboundNumberIdForDid(did))}`
-          : `${currentTarget.href}/inbound-trunk-numbers`,
-        body: currentTarget.isUnassigned ? null : buildInboundAssignmentBody(did),
-      },
+      restorePlan: didDestinationOperation(did, currentTarget.isUnassigned ? "" : currentTarget.href, "restore-original-routing"),
       behaviorNote: currentTarget.isUnassigned
         ? "Rufnummer ist tagsueber unbelegt. Im Zeitsteuerungsfenster wird das als Auflegen abgebildet; nach der Wiederherstellung bleibt sie wieder ohne Ziel."
         : currentTarget.isFrontdesk
           ? "Frontdesk/Nia bleibt Tagesziel hinter der Zeitsteuerung. Die KI-Loesung wird nicht veraendert; nur die Rufnummer wuerde initial vor den Frontdesk auf die Zeitsteuerung zeigen."
           : "Originalziel bleibt als Tagesziel hinter der Zeitsteuerung erhalten.",
-      blockers,
+      blockers: blockers.map(message => ({ message, ...(messageDescriptor(message) ? { messageKey: messageDescriptor(message).key, messageParams: messageDescriptor(message).params } : {}) })),
     };
   });
   const staleTimeControls = (inventory.timeControls || [])
-    .filter((timeControl) => isManagedDaynightTimeControl(timeControl))
+    .filter((timeControl) => ownedDaynightTimeControl(timeControl))
+    .filter((timeControl) => !timeControlReferenced(timeControl, inventory))
     .filter((timeControl) => !expectedGatewayNames.has(String(timeControl.name || "").trim().toLowerCase()))
     .map((timeControl) => ({
       id: timeControl.serviceNumber || timeControl.id || timeControl.value || "",
@@ -4191,14 +4609,14 @@ function buildDaynightGatewayPreview(payload = {}) {
       href: timeControl.href || gatewayHrefFromServiceNumber(timeControl.serviceNumber || timeControl.id || timeControl.value || ""),
     }))
     .filter((timeControl) => timeControl.href);
-  const blockers = entries.flatMap((entry) => entry.blockers.map((message) => `${entry.did.name || entry.did.id}: ${message}`));
+  const blockers = entries.flatMap(entry => entry.blockers.map(blocker => ({ ...blocker, label: entry.did.name || entry.did.id })));
   return {
     ok: blockers.length === 0 && dids.length > 0,
     readOnly: true,
     type: "daynight-gateway-preview",
-    title: "Tag/Nacht-Zeitsteuerungs-Check",
+    title: "Zeitsteuerungs-Check",
     message: dids.length
-      ? `${entries.filter((entry) => entry.ok).length} von ${dids.length} Rufnummern sind fuer eine Zeitsteuerungs-Migration eindeutig bewertbar.`
+      ? serverMessage("portal.server.valueOfValueNumbersCanBeEvaluatedUnambiguouslyFor", {p0: entries.filter((entry) => entry.ok).length, p1: dids.length})
       : "Keine Rufnummern gefunden.",
     capabilities: {
       dids: publicEndpoint(overview?.endpoints?.dids),
@@ -4241,7 +4659,8 @@ async function previewDaynightGateway(payload = {}) {
 
 async function applyDaynightGateways(payload = {}) {
   assertLiveWritesEnabled();
-  if (!cache.overview) await loadOverview();
+  await loadOverview();
+  if (cache.overview.daynight?.active) throw httpError(409, "Restore day mode before changing night routing.");
   const plan = buildDaynightGatewayPreview(payload);
   if (!plan.ok) return { ...plan, dryRun: false, applied: false, status: 400 };
 
@@ -4265,8 +4684,29 @@ async function applyDaynightGateways(payload = {}) {
         did: entry.did?.name || entry.did?.id || "",
         gateway: entry.gateway?.name || "",
       });
+      let createdHref = "";
+      if (operation.action === "create-daynight-gateway") {
+        const resourcePrefix = canonicalResourceHref(operation.endpoint) + "/";
+        // Only the create response can establish ownership. A newly visible,
+        // same-named resource in a later inventory read may belong to another client.
+        const identities = new Set([result.location, ...extractItems(result.body).map(item => item.href)].flatMap(value => {
+          if (typeof value !== "string" || !value.trim()) return [];
+          try {
+            const url = new URL(value, config.baseUrl);
+            if (url.search || url.hash) return [];
+            const href = canonicalResourceHref(assertCustomerPath(value));
+            return href.startsWith(resourcePrefix) && /^\d+$/.test(href.slice(resourcePrefix.length)) ? [href] : [];
+          } catch {
+            return [];
+          }
+        }));
+        if (identities.size !== 1) throw httpError(502, "Created resource could not be identified. Reload before continuing.");
+        createdHref = [...identities][0];
+        entry.gateway.href = createdHref;
+      }
       results.push({
         ok: true,
+        href: createdHref,
         action: operation.action,
         did: entry.did?.name || entry.did?.id || "",
         gateway: entry.gateway?.name || "",
@@ -4308,13 +4748,13 @@ async function applyDaynightGateways(payload = {}) {
     status: applied ? 200 : 502,
     title: applied ? "Zeitsteuerungen angelegt" : "Zeitsteuerungs-Anlage fehlgeschlagen",
     message: applied
-      ? `${results.filter((result) => result.action === "create-daynight-gateway").length} Zeitsteuerung${results.filter((result) => result.action === "create-daynight-gateway").length === 1 ? "" : "en"} angelegt, ${results.filter((result) => result.action === "update-daynight-gateway").length} aktualisiert, ${results.filter((result) => result.skipped).length} unveraendert. Rufnummern wurden nicht veraendert.`
-      : `${failed.length} Zeitsteuerung${failed.length === 1 ? "" : "en"} konnten nicht angelegt oder aktualisiert werden. Rufnummern wurden nicht veraendert.`,
+      ? serverMessage("portal.server.valueTimeControlsCreatedValueUpdatedValueUnchangedNumbers", {p0: results.filter((result) => result.action === "create-daynight-gateway").length, p1: results.filter((result) => result.action === "create-daynight-gateway").length === 1 ? "" : "en", p2: results.filter((result) => result.action === "update-daynight-gateway").length, p3: results.filter((result) => result.skipped).length})
+      : serverMessage("portal.server.valueTimeControlsCouldNotBeCreatedOrUpdated", {p0: failed.length, p1: failed.length === 1 ? "" : "en"}),
     results,
     attempts,
     appliedAt: new Date().toISOString(),
   };
-  if (applied) {
+  if (applied || results.some(result => result.ok && result.action === "create-daynight-gateway")) {
     response.snapshot = await saveDaynightSnapshot(plan, {
       ok: response.ok,
       title: response.title,
@@ -4332,7 +4772,14 @@ async function applyDaynightGateways(payload = {}) {
 
 async function applyDaynightGatewayRouting(payload = {}) {
   assertLiveWritesEnabled();
-  if (!cache.overview) await loadOverview();
+  await loadOverview();
+  if (cache.overview.daynight?.active) {
+    const snapshot = await readDaynightSnapshot();
+    const selected = nightTargetFromPayload(payload);
+    const unchanged = sameApiHref(selected.href, snapshot?.nightTarget?.href) && (cache.overview.inventory.dids || []).every(did => cache.overview.inventory.timeControls.some(tc => ownedDaynightTimeControl(tc) && didTargetsTimeControl(did, tc)));
+    if (unchanged) return {ok:true,applied:true,status:200,unchanged:true,message:"Night mode is already active.",attempts:[]};
+    throw httpError(409, "Restore day mode before changing night routing.");
+  }
   const plan = buildDaynightGatewayPreview(payload);
   const missingGateway = plan.entries.filter((entry) => entry.ok && !entry.gatewayExists);
   const outdatedGateway = plan.entries.filter((entry) => entry.ok && entry.gatewayNeedsUpdate);
@@ -4345,7 +4792,7 @@ async function applyDaynightGatewayRouting(payload = {}) {
       status: 400,
       title: "Rufnummern noch nicht bereit",
       message: missingGateway.length
-        ? `${missingGateway.length} Zeitsteuerung${missingGateway.length === 1 ? "" : "en"} fehlen noch. Lege zuerst die Zeitsteuerungen an.`
+        ? serverMessage("portal.server.valueTimeControlsAreStillMissingCreateTheTime", {p0: missingGateway.length, p1: missingGateway.length === 1 ? "" : "en"})
         : plan.message,
     };
   }
@@ -4354,6 +4801,7 @@ async function applyDaynightGatewayRouting(payload = {}) {
   const appliedEntries = [];
   await saveDaynightSnapshot(plan, {
     ok: true,
+    routingActive: true,
     title: "Nachtmodus vorbereitet",
     message: "Tagesziele vor der Aktivierung gesichert.",
     appliedAt: new Date().toISOString(),
@@ -4381,23 +4829,19 @@ async function applyDaynightGatewayRouting(payload = {}) {
         message: error.message,
       });
 
-      if (completed.includes("delete-old-routing") && entry.restorePlan?.endpoint) {
+      if (completed.includes("force-night-daynight-gateway") && entry.restoreGatewayOperation) await runRollbackOperations([entry.restoreGatewayOperation], attempts, {gateway:entry.gateway?.name || ""});
+      if (completed.includes("route-did-to-gateway") && entry.restorePlan?.endpoint) {
         await runRollbackOperations([entry.restorePlan], attempts, { did: entry.did?.name || entry.did?.id || "", gateway: entry.gateway?.name || "" });
       }
       for (const applied of appliedEntries.reverse()) {
-        const gatewayDelete = applied.gateway?.href
-          ? {
-            action: "delete-gateway-routing",
-            method: "DELETE",
-            endpoint: `${applied.gateway.href}/inbound-trunk-numbers/${encodeURIComponent(inboundNumberIdForDid(applied.did))}`,
-          }
-          : null;
-        await runRollbackOperations([gatewayDelete, applied.restorePlan].filter(Boolean), attempts, {
+        await runRollbackOperations([applied.restorePlan, applied.restoreGatewayOperation].filter(Boolean), attempts, {
           did: applied.did?.name || applied.did?.id || "",
           gateway: applied.gateway?.name || "",
         });
       }
 
+      const snapshot = await readDaynightSnapshot();
+      if (snapshot && !attempts.some(item => item.action === "rollback-failed")) {snapshot.routingActive=false; await writePrivateJson(daynightSnapshotFile(snapshot.customer), snapshot);}
       return {
         ...plan,
         ok: false,
@@ -4407,7 +4851,7 @@ async function applyDaynightGatewayRouting(payload = {}) {
         title: "Rufnummern-Migration fehlgeschlagen",
         message: portalErrorMessage(error),
         attempts,
-        rolledBack: true,
+        rolledBack: !attempts.some(item => item.action === "rollback-failed"),
       };
     }
   }
@@ -4422,7 +4866,7 @@ async function applyDaynightGatewayRouting(payload = {}) {
     applied: true,
     status: 200,
     title: "Rufnummern auf Zeitsteuerungen umgehängt",
-    message: `${appliedEntries.length} Rufnummer${appliedEntries.length === 1 ? "" : "n"} wurden auf die vorbereiteten Tag/Nacht-Zeitsteuerungen geroutet.`,
+    message: serverMessage("portal.server.valueNumbersWereRoutedToThePreparedDayNight", {p0: appliedEntries.length, p1: appliedEntries.length === 1 ? "" : "n"}),
     attempts,
     appliedAt: new Date().toISOString(),
   };
@@ -4430,9 +4874,11 @@ async function applyDaynightGatewayRouting(payload = {}) {
 
 async function cleanupDaynightTimeControls(payload = {}) {
   assertLiveWritesEnabled();
-  if (!cache.overview) await loadOverview();
+  await loadOverview();
+  requireCompleteInventory(cache.overview);
   const plan = buildDaynightGatewayPreview(payload);
-  const staleTimeControls = plan.staleTimeControls || [];
+  await loadDeletionReferences(cache.overview.inventory);
+  const staleTimeControls = (plan.staleTimeControls || []).filter(item=>!timeControlReferenced(item,cache.overview.inventory));
   if (!staleTimeControls.length) {
     return {
       ...plan,
@@ -4453,6 +4899,7 @@ async function cleanupDaynightTimeControls(payload = {}) {
       method: "DELETE",
       endpoint: timeControl.href,
     }, attempts, { timeControl: timeControl.name });
+    await forgetManagedTimeControl(timeControl.href);
   }
 
   cache.overview = null;
@@ -4465,7 +4912,7 @@ async function cleanupDaynightTimeControls(payload = {}) {
     applied: true,
     status: 200,
     title: "Zeitsteuerungen bereinigt",
-    message: `${staleTimeControls.length} nicht mehr benötigte Zeitsteuerung${staleTimeControls.length === 1 ? "" : "en"} nach Namenskonvention gelöscht.`,
+    message: serverMessage("portal.server.valueObsoleteTimeControlsMatchingTheNamingConventionDeleted", {p0: staleTimeControls.length, p1: staleTimeControls.length === 1 ? "" : "en"}),
     attempts,
     deleted: staleTimeControls,
     appliedAt: new Date().toISOString(),
@@ -4474,7 +4921,7 @@ async function cleanupDaynightTimeControls(payload = {}) {
 
 function managedDaynightTimeControls(inventory = {}) {
   return (inventory.timeControls || [])
-    .filter((timeControl) => isManagedDaynightTimeControl(timeControl))
+    .filter((timeControl) => ownedDaynightTimeControl(timeControl))
     .map((timeControl) => ({
       id: timeControl.serviceNumber || timeControl.id || timeControl.value || "",
       name: timeControl.name || "",
@@ -4485,6 +4932,37 @@ function managedDaynightTimeControls(inventory = {}) {
       nightTargetHref: apiPathFromHref(timeControl.nightTargetHref || ""),
     }))
     .filter((timeControl) => timeControl.href);
+}
+
+function containsTargetReference(value, href) {
+  if (typeof value === "string") return /(?:^|\/)targets\//.test(value) && sameApiHref(value, href);
+  if (Array.isArray(value)) return value.some(item => containsTargetReference(item, href));
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key,item]) => !["name","title","displayName","routingBody"].includes(key) && containsTargetReference(item, href));
+}
+
+async function loadDeletionReferences(inventory) {
+  for (const [kind, suffixes] of [["queues",["timeout","destination-on-rejection"]],["skills",["timeout","destination-on-rejection"]],["groups",["timeout"]]]) {
+    if (cache.overview?.endpoints?.[kind]?.ok === false) throw httpError(409, serverMessage("portal.deletionReferencesUnavailable"));
+    for (const item of inventory[kind] || []) {
+      item.routingReferences=[];
+      for (const suffix of suffixes) {
+        const response=await safePortalCall("delete-reference-"+kind+"-"+item.href+suffix, item.href+"/"+suffix, { collection: false });
+        if (!response.ok) throw httpError(409, serverMessage("portal.deletionReferencesUnavailable"));
+        item.routingReferences.push(response.items?.length ? response.items : response.item);
+      }
+    }
+  }
+}
+
+function timeControlReferenced(timeControl, inventory = {}) {
+  if ((inventory.dids || []).some(did => didTargetsTimeControl(did, timeControl))) return true;
+  const href = apiPathFromHref(timeControl.href || gatewayHrefFromServiceNumber(timeControl.serviceNumber));
+  for (const item of [...(inventory.timeControls || []), ...(inventory.ivrs || []), ...(inventory.queues || []), ...(inventory.skills || []), ...(inventory.groups || [])]) {
+    if (sameApiHref(item.href, href)) continue;
+    if (containsTargetReference(item, href)) return true;
+  }
+  return false;
 }
 
 function didTargetsTimeControl(did = {}, timeControl = {}) {
@@ -4500,9 +4978,11 @@ function didTargetsTimeControl(did = {}, timeControl = {}) {
 async function resetDaynightTimeControls(options = {}) {
   assertLiveWritesEnabled();
   const deleteTimeControls = options.deleteTimeControls !== false;
-  if (!cache.overview) await loadOverview();
+  await loadOverview();
   const overview = cache.overview || {};
+  requireCompleteInventory(overview);
   const inventory = overview.inventory || {};
+  if (deleteTimeControls) await loadDeletionReferences(inventory);
   const timeControls = managedDaynightTimeControls(inventory);
   const snapshot = await readDaynightSnapshot();
   const snapshotEntries = snapshot?.entries || [];
@@ -4515,39 +4995,17 @@ async function resetDaynightTimeControls(options = {}) {
     if (!timeControl) continue;
     const didName = did.name || did.id || "";
     const snapshotEntry = snapshotEntries.find((entry) => entry.did?.name === didName || entry.did?.id === didName);
-    const fallbackDayTarget = targetPreviewFromHref(timeControl.dayTargetHref, inventory);
-    const rawSnapshotRestore = snapshotEntry?.restorePlan?.method === "POST" && snapshotEntry.restorePlan?.endpoint
-      ? snapshotEntry.restorePlan
-      : null;
-    const snapshotRestore = rawSnapshotRestore && !String(rawSnapshotRestore.endpoint || "").startsWith(`${timeControl.href}/inbound-trunk-numbers`)
-      ? rawSnapshotRestore
-      : null;
-    const fallbackRestore = fallbackDayTarget.isUnassigned
-      ? null
-      : {
-        action: "restore-original-routing-from-time-control",
-        method: "POST",
-        endpoint: `${fallbackDayTarget.href}/inbound-trunk-numbers`,
-        body: buildInboundAssignmentBody(did),
-        note: "Tagesziel aus destinationIfAllowed der verwalteten Zeitsteuerung wiederherstellen.",
-      };
-    if (!snapshotRestore && !fallbackRestore && !fallbackDayTarget.isUnassigned) {
-      blockers.push(`${didName}: kein gespeicherter Restore-Plan und kein Tagesziel in der Zeitsteuerung gefunden.`);
+    const snapshotRestore = snapshotEntry?.restorePlan?.method === "PUT" ? snapshotEntry.restorePlan : null;
+    if (!snapshotRestore) {
+      blockers.push({ label: didName, message: serverMessage("portal.originalRoutingMissing") });
       continue;
     }
-    restoreOperations.push({
-      context: { did: didName, gateway: timeControl.name },
-      operations: [
-        {
-          action: "remove-daynight-routing",
-          method: "DELETE",
-          endpoint: `${timeControl.href}/inbound-trunk-numbers/${encodeURIComponent(inboundNumberIdForDid(did))}`,
-        },
-        snapshotRestore || fallbackRestore,
-      ].filter(Boolean),
-    });
+    restoreOperations.push({ context: { did: didName, gateway: timeControl.name }, operations: [snapshotRestore] });
   }
 
+  if (deleteTimeControls) for (const control of timeControls) {
+    if (timeControlReferenced(control,{...inventory,dids:[]})) blockers.push({ label: control.name, message: serverMessage("portal.routingReferenceRemains") });
+  }
   if (blockers.length) {
     return {
       ok: false,
@@ -4555,7 +5013,7 @@ async function resetDaynightTimeControls(options = {}) {
       applied: false,
       status: 409,
       title: "Reset blockiert",
-      message: "Mindestens eine Rufnummer zeigt auf eine verwaltete Zeitsteuerung, aber der gespeicherte Restore-Plan fehlt.",
+      message: serverMessage("portal.resetBlockedReason"),
       blockers,
       attempts,
     };
@@ -4567,13 +5025,19 @@ async function resetDaynightTimeControls(options = {}) {
     }
   }
 
+  if (snapshot) {snapshot.routingActive = false; await writePrivateJson(daynightSnapshotFile(snapshot.customer), snapshot);}
   if (deleteTimeControls) {
+    await loadOverview();
+    requireCompleteInventory(cache.overview);
+    await loadDeletionReferences(cache.overview.inventory);
     for (const timeControl of timeControls) {
+      if (timeControlReferenced(timeControl, cache.overview.inventory)) throw httpError(409, "Time control remains referenced; deletion blocked.");
       await runPortalOperation({
         action: "delete-managed-daynight-time-control",
         method: "DELETE",
         endpoint: timeControl.href,
       }, attempts, { timeControl: timeControl.name });
+      await forgetManagedTimeControl(timeControl.href);
     }
   }
 
@@ -4587,8 +5051,8 @@ async function resetDaynightTimeControls(options = {}) {
     status: 200,
     title: deleteTimeControls ? "Nachtschaltung zurückgesetzt" : "Tagmodus aktiviert",
     message: deleteTimeControls
-      ? `${restoreOperations.length} Rufnummer${restoreOperations.length === 1 ? "" : "n"} wiederhergestellt, ${timeControls.length} verwaltete Zeitsteuerung${timeControls.length === 1 ? "" : "en"} gelöscht.`
-      : `${restoreOperations.length} Rufnummer${restoreOperations.length === 1 ? "" : "n"} wiederhergestellt. Vorbereitete Zeitsteuerungen bleiben für den nächsten Nachtmodus erhalten.`,
+      ? serverMessage("portal.server.valueNumbersRestoredValueManagedTimeControlsDeleted", {p0: restoreOperations.length, p1: restoreOperations.length === 1 ? "" : "n", p2: timeControls.length, p3: timeControls.length === 1 ? "" : "en"})
+      : serverMessage("portal.server.valueNumbersRestoredPreparedTimeControlsRemainAvailableFor", {p0: restoreOperations.length, p1: restoreOperations.length === 1 ? "" : "n"}),
     restoredRoutings: restoreOperations.length,
     deletedTimeControls: deleteTimeControls ? timeControls.length : 0,
     keptTimeControls: deleteTimeControls ? 0 : timeControls.length,
@@ -4601,6 +5065,10 @@ async function handleApi(req, res, url) {
   assertAllowedOrigin(req);
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
     requireCsrf(req);
+    if (!["/api/settings/customer", "/api/settings/browser-login"].includes(url.pathname)
+      && req.headers["x-portal-context"] !== writeContext) {
+      throw httpError(409, "Account changed. Reload before continuing.");
+    }
   }
 
   if (url.pathname === "/api/status" && req.method === "GET") {
@@ -4634,9 +5102,15 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/settings/live-writes" && req.method === "POST") {
     const body = await readRequestJson(req);
+    if (typeof body.enabled !== "boolean") throw httpError(400, serverMessage("portal.error.invalidJson"));
     const enabled = body?.enabled === true;
     if (enabled && !config.configured) {
       sendError(req, res, 400, "Portal API ist nicht vollständig konfiguriert.");
+      return;
+    }
+    if (enabled && (!config.liveWritesPermitted || config.liveWritesLocked)) {
+      const error = liveWritesDisabledError();
+      sendError(req, res, error.status, error.message, { code: error.code });
       return;
     }
     runtimeSettings.liveWritesEnabled = enabled;
@@ -4685,7 +5159,9 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/version" && req.method === "GET") {
     try {
-      sendJson(req, res, 200, summarizeEndpoint(await portalFetch("/api/version")));
+      const result = await portalFetch("/api/version");
+      const data = objectFromBody(result.body);
+      sendJson(req, res, 200, { appId: "portal", version: config.appVersion, upstreamVersion: String(data.version || data.name || "").slice(0, 80), ok: true });
     } catch (error) {
       sendError(req, res, error.status || 500, error.message);
     }
@@ -4706,13 +5182,13 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/callflow/apply" && req.method === "POST") {
     const result = await applyCallflowChange(await readRequestJson(req));
-    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     return;
   }
 
   if (url.pathname === "/api/callflow/bulk-apply" && req.method === "POST") {
     const result = await applyBulkCallflowChange(await readRequestJson(req));
-    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     return;
   }
 
@@ -4725,7 +5201,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/daynight/gateways/apply" && req.method === "POST") {
     try {
       const result = await applyDaynightGateways(await readRequestJson(req));
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4735,7 +5211,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/daynight/gateway-routing/apply" && req.method === "POST") {
     try {
       const result = await applyDaynightGatewayRouting(await readRequestJson(req));
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4745,7 +5221,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/daynight/time-controls/cleanup" && req.method === "POST") {
     try {
       const result = await cleanupDaynightTimeControls(await readRequestJson(req));
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4754,8 +5230,9 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/daynight/reset" && req.method === "POST") {
     try {
+      await readRequestJson(req);
       const result = await resetDaynightTimeControls();
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4764,8 +5241,9 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/daynight/restore" && req.method === "POST") {
     try {
+      await readRequestJson(req);
       const result = await resetDaynightTimeControls({ deleteTimeControls: false });
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4785,7 +5263,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/daynight/announcement-target/apply" && req.method === "POST") {
     try {
       const result = await applyAnnouncementTarget(await readRequestJson(req));
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4801,7 +5279,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/phonebook-sync/apply" && req.method === "POST") {
     try {
       const result = await applyPhonebookSync();
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { code: error.code || undefined, body: error.body || null });
     }
@@ -4823,7 +5301,8 @@ async function handleApi(req, res, url) {
   if (resourceCreateMatch && req.method === "POST") {
     try {
       const [, kind] = resourceCreateMatch.map(decodeURIComponent);
-      sendJson(req, res, 200, await createPortalResource(kind, await readRequestJson(req)));
+      const result = await createPortalResource(kind, await readRequestJson(req));
+      sendJson(req, res, result.ok ? 200 : result.status || 502, result);
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { body: error.body || null, code: error.code || undefined });
     }
@@ -4838,7 +5317,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/service-groups/apply" && req.method === "POST") {
     const result = await applyServiceGroupChanges(await readRequestJson(req));
-    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+    sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     return;
   }
 
@@ -4851,7 +5330,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/extensions/batch/apply" && req.method === "POST") {
     try {
       const result = await applyExtensionBatch(await readRequestJson(req));
-      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.message });
+      sendJson(req, res, result.ok ? 200 : result.status || 400, result.ok ? result : { ...result, error: result.error || result.message });
     } catch (error) {
       sendError(req, res, error.status || 500, portalErrorMessage(error), { body: error.body || null, code: error.code || undefined });
     }
@@ -4872,7 +5351,8 @@ async function handleApi(req, res, url) {
 }
 
 async function serveStatic(req, res, url) {
-  let pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try { pathname = decodeURIComponent(url.pathname); } catch { throw httpError(400, "Malformed URL"); }
   if (pathname === "/") pathname = "/index.html";
   const normalized = path.normalize(pathname).replace(/^(\.\.[/\\])+/, "");
   let filePath = path.join(PUBLIC_DIR, normalized);
@@ -4882,28 +5362,27 @@ async function serveStatic(req, res, url) {
     return;
   }
 
-  const exists = fs.existsSync(filePath) && fs.statSync(filePath).isFile();
-  if (!exists) {
-    const ext = path.extname(filePath);
-    if (!ext || ext === ".html") {
-      filePath = path.join(PUBLIC_DIR, "index.html");
-    } else {
-      sendError(req, res, 404, "File not found");
-      return;
-    }
+  let data;
+  try { data = await readPublicFile(PUBLIC_DIR, filePath); }
+  catch (error) {
+    if (error.code === "EACCES") return sendError(req,res,403,"Forbidden");
+    if (error.code === "ENAMETOOLONG") return sendError(req,res,404,"File not found");
+    if (!["ENOENT","EISDIR","ENOTDIR"].includes(error.code)) throw error;
+    if (path.extname(filePath) && path.extname(filePath) !== ".html") return sendError(req,res,404,"File not found");
+    filePath=path.join(PUBLIC_DIR,"index.html");
+    try {data=await readPublicFile(PUBLIC_DIR,filePath);} catch (fallbackError) {return sendError(req,res,fallbackError.code==="EACCES"?403:404,"File not found");}
   }
-
   const ext = path.extname(filePath);
-  const data = await fsp.readFile(filePath);
   res.writeHead(200, {
     "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
-    "Cache-Control": "no-store",
+    "Cache-Control": staticCacheControl(req.url),
   });
   res.end(data);
 }
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (!guardRequest(req, res)) return;
     if (req.method === "OPTIONS") {
       assertAllowedOrigin(req);
       res.writeHead(204, corsHeaders(req));
@@ -4911,9 +5390,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const url = new URL(req.url, `http://${req.headers.host || `${config.host}:${config.port}`}`);
+    const url = requestUrl(req);
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(req, res, url);
+      const mutating = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+      if (mutating && mutationInFlight) throw httpError(409, "Another change is in progress. Wait for it to finish.");
+      if (mutating) mutationInFlight = true;
+      try {
+        await requestContext.run({ generation: accountGeneration, changesAccount: ["/api/settings/customer", "/api/settings/browser-login"].includes(url.pathname) }, () => handleApi(req, res, url));
+      } finally { if (mutating) mutationInFlight = false; }
       return;
     }
 
@@ -4923,7 +5407,7 @@ const server = http.createServer(async (req, res) => {
     }
     await serveStatic(req, res, url);
   } catch (error) {
-    sendError(req, res, error.status || 500, error.message || "Unexpected server error", { code: error.code || undefined });
+    sendError(req, res, error.status || 500, portalErrorMessage(error) || "Unexpected server error", { code: error.code || undefined });
   }
 });
 

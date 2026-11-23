@@ -1,21 +1,36 @@
 (function () {
   "use strict";
 
+  // The standalone CTI page loads the same adapter as the download. It is
+  // entirely inert in live mode; selecting Demo reloads into a fresh context.
+  if (document.currentScript?.dataset?.nfonOptionalDemo === 'cti') {
+    if (new URL(window.location.href).searchParams.get('demo') !== '1') return;
+    document.body.dataset.nfonApp = 'cti';
+    window.NFON_LOCAL_DEMO = true;
+  }
   window.NFON_WEB_ONLY_DEMO = true;
+
+  function demoMessage(key, fallback, params = {}) {
+    const translated = window.NFON_I18N?.message?.(key, params);
+    return translated || fallback.replace(/\{(\w+)\}/g, (match, name) => Object.hasOwn(params, name) ? String(params[name]) : match);
+  }
+
+  function localAppearanceControl(target) {
+    return target?.closest?.("[data-appearance-settings], .language-picker, #demo-control");
+  }
+
+  function localCtiDemoControl(target) {
+    return appKind() === "cti" && target?.closest?.(".setup-contacts-layout, #contacts-module-panel, #contacts-list, #backup-download, #storage-refresh");
+  }
 
   const token = "demo-csrf-token";
   const CALL_HISTORY_CALLS_PER_DAY = 20;
   const now = () => new Date().toISOString();
-  const pagePath = () => window.location.pathname.toLowerCase();
-  const appKind = () => {
-    const path = pagePath();
-    if (path.includes("/cti/")) return "cti";
-    if (path.includes("/portal/")) return "portal";
-    if (path.includes("/call-history/")) return "call-history";
-    return "landing";
-  };
+  const appKind = () => document.body?.dataset?.nfonApp || '';
 
   const demo = createDemoState();
+  const ctiGoogleContactSeed = appKind() === 'cti' ? JSON.parse(JSON.stringify(demo.cti.contacts)) : [];
+  let ctiLocalContactSequence = 0;
   const originalFetch = window.fetch.bind(window);
 
   window.fetch = async function demoFetch(input, options = {}) {
@@ -31,7 +46,7 @@
       if (payload instanceof Response) return payload;
       return jsonResponse(payload);
     } catch (error) {
-      return jsonResponse({ ok: false, error: error.message || "Demo API Fehler", csrfToken: token }, 400);
+      return jsonResponse({ ok: false, error: error.message || demoMessage("demo.apiError", "Demo API error"), csrfToken: token }, 400);
     }
   };
 
@@ -40,8 +55,11 @@
       super();
       this.readyState = 1;
       this.interval = window.setInterval(() => {
+        if (isAppPaused()) return;
         const event = demo.cti.events[Math.floor(Math.random() * demo.cti.events.length)];
-        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "state", state: randomCtiState(event.extension || "201") }) }));
+        const message = new MessageEvent("message", { data: JSON.stringify({ type: "state", state: randomCtiState(event.extension || "201") }) });
+        this.dispatchEvent(message);
+        if (typeof this.onmessage === "function") this.onmessage(message);
       }, 7000);
       window.setTimeout(() => this.dispatchEvent(new Event("open")), 0);
     }
@@ -54,13 +72,25 @@
 
   installDemoUiGuards();
 
-  document.addEventListener("click", (event) => {
+  document.addEventListener("click", async (event) => {
     const link = event.target.closest("a");
     if (!link) return;
     const href = link.getAttribute("href") || "";
-    if (href.includes("/auth/") || href.includes("/api/storage/backup")) {
+    let path;
+    try { path = normalizeApiPath(new URL(href, window.location.href).pathname); } catch { return; }
+    if (appKind() === "cti" && (href === "#demo-google-login" || path === "/auth/google/start")) {
       event.preventDefault();
-      downloadText("nfon-demo-backup.json", JSON.stringify({ exportedAt: now(), demo: true, cti: demo.cti.history }, null, 2), "application/json");
+      connectCtiDemoContacts();
+      await window.refreshContactsPage?.();
+      return;
+    }
+    if (path.startsWith("/auth/")) {
+      event.preventDefault();
+      return;
+    }
+    if (path === "/api/storage/backup" || (appKind() === "cti" && href === "#demo-backup")) {
+      event.preventDefault();
+      downloadText("nfon-cti-demo-backup.json", JSON.stringify(createCtiDemoBackup(), null, 2), "application/json");
     }
   });
 
@@ -70,6 +100,7 @@
     document.addEventListener(
       "click",
       (event) => {
+        if (localAppearanceControl(event.target) || localCtiDemoControl(event.target)) return;
         const readonly = event.target.closest("[data-demo-readonly='true']");
         if (!readonly) return;
         const interactive = event.target.closest("a, button, label, input, select, textarea");
@@ -86,6 +117,7 @@
     document.addEventListener(
       "submit",
       (event) => {
+        if (localAppearanceControl(event.target) || localCtiDemoControl(event.target)) return;
         if (!event.target.closest("[data-demo-readonly='true']")) return;
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -112,6 +144,16 @@
   }
 
   function applySetupReadOnly() {
+    if (appKind() === "cti") {
+      const contacts = document.querySelector("#contacts-module-panel");
+      if (contacts && !contacts.querySelector(".demo-contacts-note")) {
+        const note = document.createElement("p");
+        note.className = "demo-contacts-note";
+        note.dataset.i18nKey = "demo.cti.contactsLocal";
+        note.textContent = demoMessage("demo.cti.contactsLocal", "Sample contacts · changes stay in this demo");
+        contacts.prepend(note);
+      }
+    }
     for (const container of setupReadOnlyContainers()) {
       if (!container) continue;
       container.dataset.demoReadonly = "true";
@@ -124,7 +166,7 @@
 
   function setupReadOnlyContainers() {
     const kind = appKind();
-    if (kind === "cti" && pagePath().endsWith("/setup.html")) {
+    if (kind === "cti" && window.location.pathname.toLowerCase().endsWith("/setup.html")) {
       return [document.querySelector("main.app-shell")];
     }
     if (kind === "portal") {
@@ -140,12 +182,14 @@
     if (container.querySelector(":scope > .demo-readonly-note")) return;
     const note = document.createElement("div");
     note.className = "demo-readonly-note";
-    note.textContent = "Demo-Ansicht · Setup nur lesbar";
+    const key = appKind() === "cti" ? "demo.cti.setupReadOnly" : "demo.setupReadOnly";
+    note.dataset.i18nKey = key;
+    note.textContent = demoMessage(key, appKind() === "cti" ? "Demo view · Credentials and backup restore are read-only" : "Demo view · Setup is read-only");
     container.prepend(note);
   }
 
   function markReadOnlyControl(control) {
-    if (control.closest(".demo-readonly-note")) return;
+    if (localAppearanceControl(control) || localCtiDemoControl(control) || control.closest(".demo-readonly-note")) return;
     const tag = control.tagName.toLowerCase();
     if (tag === "a") {
       control.setAttribute("aria-disabled", "true");
@@ -194,7 +238,7 @@
   }
 
   function replaceLegacyDemoTerms(root) {
-    if (!root) return;
+    if (!root || ["cti", "call-history"].includes(appKind())) return;
     const legacyPlant = "F" + "ake";
     const legacySeed = "Se" + "ed";
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -208,6 +252,7 @@
     const nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
     for (const node of nodes) {
+      if (node.parentElement?.closest("[data-i18n-ignore], script, style, code, pre, textarea")) continue;
       let text = node.nodeValue;
       for (const [pattern, replacement] of replacements) text = text.replace(pattern, replacement);
       if (text !== node.nodeValue) node.nodeValue = text;
@@ -221,11 +266,12 @@
   function route(url, method, body) {
     const kind = appKind();
     const path = normalizeApiPath(url.pathname);
-    if (kind === "landing") return landingRoute(path, method);
+    if (kind === "landing") return landingRoute(path, method, body);
+    if (isAppPaused() && !['GET','HEAD'].includes(method)) return landingError('demo.landing.paused', 'Demo paused', 423);
     if (kind === "cti") return ctiRoute(path, method, body, url);
     if (kind === "portal") return portalRoute(path, method, body);
     if (kind === "call-history") return callHistoryRoute(path, method, body, url);
-    return { ok: true, csrfToken: token };
+    return landingError('demo.landing.unknownAction', 'Unknown demo action.', 404);
   }
 
   function normalizeApiPath(pathname) {
@@ -236,21 +282,184 @@
     return pathname;
   }
 
-  function landingRoute(path, method) {
-    if (path === "/api/status") {
-      return {
-        ok: true,
-        health: "online",
-        csrfToken: token,
-        services: {
-          cti: { health: "online", detail: "Demo bereit.", route: "./cti/index.html", upstream: "./cti/index.html", checkedAt: now() },
-          portal: { health: "online", detail: "Demo bereit.", route: "./portal/index.html", upstream: "./portal/index.html", checkedAt: now() },
-          "core-history": { health: "online", detail: "Demo bereit.", route: "./call-history/index.html", upstream: "./call-history/index.html", checkedAt: now() },
-        },
-      };
+  const landingDefaults = Object.freeze({
+    cti: "./cti/index.html",
+    portal: "./portal/index.html",
+    "core-history": "./call-history/index.html",
+  });
+  const landingStorageKey = `nfon-static-landing-v1:${new URL(appKind() === 'landing' ? '.' : '../', window.location.href).pathname}`;
+  const landingState = loadLandingState();
+  window.NFON_DEMO_PAUSED = isAppPaused();
+  for (const type of ['click','submit','change']) document.addEventListener(type, event => {
+    if (!isAppPaused() || appKind() === 'landing') return;
+    if (localAppearanceControl(event.target) || event.target.closest?.('#demo-pause-panel, .nfon-menu-button, .nfon-sidebar, .home-icon-button')) return;
+    if (event.target.closest?.('button, a, input, select, textarea, form, label')) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  function isAppPaused() {
+    const id = appKind() === 'call-history' ? 'core-history' : appKind();
+    return landingState.active[id] === false;
+  }
+  function renderPause() {
+    if (appKind() === 'landing') return;
+    const paused = isAppPaused();
+    window.NFON_DEMO_PAUSED = paused;
+    const existing = document.getElementById('demo-pause-panel');
+    document.querySelectorAll('main').forEach(main => { main.inert = paused; });
+    if (!paused) existing?.remove();
+    else if (!existing) {
+      const panel = document.createElement('section');
+      panel.id = 'demo-pause-panel';
+      panel.setAttribute('role', 'region');
+      panel.setAttribute('aria-live', 'polite');
+      panel.setAttribute('aria-labelledby', 'demo-pause-title');
+      panel.style.cssText = 'position:fixed;inset:35% 16px auto;max-width:420px;margin:auto;padding:24px;z-index:1000;background:var(--surface,#fff);border:1px solid var(--line,#ddd);box-shadow:0 4px 20px #0002;';
+      const title = document.createElement('h2');
+      title.id = 'demo-pause-title';
+      title.dataset.i18nKey = 'demo.landing.paused';
+      title.textContent = demoMessage('demo.landing.paused', 'Demo paused');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.i18nKey = 'demo.landing.resume';
+      button.textContent = demoMessage('demo.landing.resume', 'Resume demo');
+      button.addEventListener('click', () => {
+        const id = appKind() === 'call-history' ? 'core-history' : appKind();
+        landingState.active[id] = true;
+        saveLandingState();
+        window.location.reload();
+      });
+      panel.append(title, button);
+      document.body.append(panel);
+      button.focus();
     }
-    if (path.startsWith("/api/services/")) return { ok: true, csrfToken: token };
-    return { ok: true, csrfToken: token };
+    document.dispatchEvent(new CustomEvent('nfon:demo-pause', { detail: { paused } }));
+  }
+  window.addEventListener('storage', event => {
+    if (event.key !== landingStorageKey) return;
+    const wasPaused = isAppPaused();
+    Object.assign(landingState, loadLandingState());
+    if (wasPaused && !isAppPaused()) { window.location.reload(); return; }
+    renderPause();
+  });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', renderPause, { once: true });
+  else renderPause();
+  if (appKind() === "landing") {
+    // The static landing calls this local handler directly, even if fetch is replaced.
+    window.NFON_LANDING_DEMO = Object.freeze({
+      async request(path, options = {}) {
+        const url = new URL(path, window.location.href);
+        const payload = landingRoute(normalizeApiPath(url.pathname), String(options.method || "GET").toUpperCase(), parseJson(options.body || ""));
+        return payload instanceof Response ? payload : jsonResponse(payload);
+      },
+    });
+  }
+
+  function validLandingPreview(value, id) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === landingDefaults[id]) return "";
+    try {
+      const url = new URL(trimmed);
+      if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) return null;
+      return url.href;
+    } catch { return null; }
+  }
+
+  function loadLandingState() {
+    let saved;
+    try { saved = JSON.parse(window.localStorage.getItem(landingStorageKey) || "{}"); } catch { saved = {}; }
+    const result = { active: {}, overrides: {} };
+    for (const id of Object.keys(landingDefaults)) {
+      result.active[id] = saved?.active?.[id] !== false;
+      const override = validLandingPreview(saved?.overrides?.[id], id);
+      if (override) result.overrides[id] = override;
+    }
+    return result;
+  }
+
+  function saveLandingState() {
+    try { window.localStorage.setItem(landingStorageKey, JSON.stringify(landingState)); } catch { /* Keep this page usable without storage. */ }
+  }
+
+  function landingStatus() {
+    return {
+      ok: true,
+      demo: true,
+      health: "online",
+      csrfToken: token,
+      services: Object.fromEntries(Object.entries(landingDefaults).map(([id, route]) => {
+        const active = landingState.active[id];
+        const detailKey = active ? "demo.landing.activeDetail" : "demo.landing.pausedDetail";
+        return [id, {
+          health: active ? "online" : "offline",
+          demoActive: active,
+          detailKey,
+          detail: demoMessage(detailKey, active ? "Local demo active." : "Local demo paused."),
+          route,
+          defaultUpstream: route,
+          upstream: landingState.overrides[id] || route,
+          upstreamSource: landingState.overrides[id] ? "override" : "default",
+          checkedAt: now(),
+        }];
+      })),
+    };
+  }
+
+  function landingError(key, fallback, status = 400) {
+    return jsonResponse({ ok: false, errorKey: key, error: demoMessage(key, fallback), csrfToken: token }, status);
+  }
+
+  function landingRoute(path, method, body) {
+    if (path === "/api/status" && method === "GET") return landingStatus();
+    const action = path.match(/^\/api\/services\/([^/]+)\/(start|stop|upstream)$/);
+    if (!action || !Object.hasOwn(landingDefaults, action[1])) {
+      return landingError("demo.landing.unknownAction", "Unknown demo action.", 404);
+    }
+    if (method !== "POST") return landingError("demo.landing.postRequired", "Demo actions require POST.", 405);
+    const [, id, command] = action;
+    if (command === "upstream") {
+      const upstream = validLandingPreview(body?.upstream, id);
+      if (upstream === null) return landingError("demo.landing.invalidUrl", "Enter an HTTP(S) URL without credentials, or reset to the default.");
+      if (upstream) landingState.overrides[id] = upstream;
+      else delete landingState.overrides[id];
+    } else {
+      landingState.active[id] = command === "start";
+    }
+    saveLandingState();
+    return landingStatus();
+  }
+
+  function createCtiDemoBackup() {
+    return {
+      schema: "nfon-cti-local-backup-v1",
+      exportedAt: now(),
+      demo: true,
+      app: { name: "NFON CTI API Demo", account: "NFON Demo" },
+      data: { callEvents: demo.cti.history },
+    };
+  }
+
+  function ctiContactsPayload() {
+    demo.cti.google.contacts = demo.cti.contacts.filter((contact) => contact.source === "google").length;
+    demo.cti.storage.files["contacts.json"].records = demo.cti.contacts.length;
+    return { status: demo.cti.google, contacts: demo.cti.contacts };
+  }
+
+  function connectCtiDemoContacts() {
+    demo.cti.google.connected = true;
+    demo.cti.google.lastSyncAt = now();
+    demo.cti.contacts = [
+      ...demo.cti.contacts.filter((contact) => contact.source === "local"),
+      ...JSON.parse(JSON.stringify(ctiGoogleContactSeed)),
+    ];
+    return ctiContactsPayload();
+  }
+
+  function ctiContactError(key, fallback, status) {
+    return jsonResponse({ ok: false, error: demoMessage(key, fallback, { detail: "" }) }, status);
+  }
+
+  function ctiContactPhone(value) {
+    return window.NFON_PHONE?.lookup(value, { countryCode: "49", nationalPrefix: "0" }) || "";
   }
 
   function ctiRoute(path, method, body, url) {
@@ -258,8 +467,11 @@
       return {
         ok: true,
         connected: true,
+        authStatus: "demo",
+        credentialsConfigured: true,
+        phoneNumberContext: { countryCode: "49", nationalPrefix: "0" },
         demo: true,
-        account: "Demo-Anlage",
+        account: "NFON Demo",
         configured: true,
         serverTime: now(),
         csrfToken: token,
@@ -273,26 +485,61 @@
     if (path === "/api/active-calls") return demo.cti.activeCalls;
     if (path === "/api/events") return "";
     if (path === "/api/google/status") return demo.cti.google;
-    if (path === "/api/google/contacts") return { status: demo.cti.google, contacts: demo.cti.contacts };
-    if (path === "/api/google/sync" || path === "/api/google/disconnect") return { status: demo.cti.google, contacts: demo.cti.contacts.length };
+    if (path === "/api/google/contacts") return ctiContactsPayload();
+    if (path === "/auth/google/start" && method === "GET") return connectCtiDemoContacts();
+    if (path === "/api/google/sync" || path === "/api/google/disconnect") {
+      if (method !== "POST") return ctiContactError("demo.cti.contactActionMethod", "Contact actions require POST.", 405);
+      if (path === "/api/google/disconnect") {
+        demo.cti.google.connected = false;
+        demo.cti.google.lastSyncAt = null;
+        demo.cti.contacts = demo.cti.contacts.filter((contact) => contact.source === "local");
+        return ctiContactsPayload();
+      }
+      if (!demo.cti.google.connected) return ctiContactError("demo.cti.contactsDisconnected", "Connect the sample contacts first.", 409);
+      const result = connectCtiDemoContacts();
+      return { status: result.status, contacts: result.status.contacts };
+    }
     if (path === "/api/storage") return demo.cti.storage;
-    if (path === "/api/storage/restore") return { ok: true, imported: 3, message: "Demo-Backup geprüft." };
+    if (path === "/api/storage/restore") return { ok: true, imported: 3, message: demoMessage("demo.cti.backupChecked", "Demo backup checked.") };
     if (path === "/api/storage/backup") {
-      return downloadResponse("nfon-cti-demo-backup.json", JSON.stringify({ exportedAt: now(), history: demo.cti.history }, null, 2), "application/json");
+      return downloadResponse("nfon-cti-demo-backup.json", JSON.stringify(createCtiDemoBackup(), null, 2), "application/json");
     }
     if (path === "/api/contacts/lookup") {
-      const phone = url.searchParams.get("phone") || "";
-      return { contact: demo.cti.contacts.find((contact) => phone.includes(contact.phone.slice(-4))) || demo.cti.contacts[0] };
+      const phone = ctiContactPhone(url.searchParams.get("phone"));
+      return { contact: phone ? demo.cti.contacts.find((contact) => (contact.phones || []).some((entry) => {
+        const candidate = ctiContactPhone(entry.value);
+        return candidate && candidate === phone;
+      })) || null : null };
     }
     if (path === "/api/local-contacts" && method === "POST") {
-      const contact = { id: `local-${Date.now()}`, name: body?.name || "Demo Kontakt", phone: body?.phone || "+49 89 000000", source: "local" };
+      const name = typeof body?.name === "string" ? body.name.trim() : "";
+      const phone = typeof body?.phone === "string" ? body.phone.trim() : "";
+      if (!name || !ctiContactPhone(phone)) return ctiContactError("cti.error.contactRequired", "Name and phone number are required", 400);
+      const contact = {
+        id: `local-demo-${++ctiLocalContactSequence}`, name, phone,
+        organization: typeof body?.organization === "string" ? body.organization.trim() : "",
+        phones: [{ value: phone, canonical: phone, normalized: ctiContactPhone(phone) }],
+        emails: [], source: "local",
+      };
       demo.cti.contacts.unshift(contact);
-      return { contact, status: demo.cti.google, contacts: demo.cti.contacts };
+      return jsonResponse({ contact, ...ctiContactsPayload() }, 201);
     }
-    if (path.startsWith("/api/local-contacts/") && method === "DELETE") return { status: demo.cti.google, contacts: demo.cti.contacts };
-    if (path === "/api/settings/browser-login") return { ok: true, status: { csrfToken: token, configured: true, account: "Demo-Anlage" } };
+    if (path.startsWith("/api/local-contacts/") && method === "DELETE") {
+      const id = decodeURIComponent(path.slice("/api/local-contacts/".length));
+      const contact = demo.cti.contacts.find((entry) => entry.id === id && entry.source === "local");
+      if (!contact) return ctiContactError("cti.error.contactNotFound", "Local contact not found", 404);
+      demo.cti.contacts = demo.cti.contacts.filter((entry) => entry !== contact);
+      return ctiContactsPayload();
+    }
+    if (path === "/api/settings/browser-login") return { ok: true, status: { csrfToken: token, configured: true, account: "NFON Demo" } };
     if (path === "/api/calls" && method === "POST") {
-      const call = createCtiCall(body);
+      const target = window.NFON_PHONE?.target(body?.callee || body?.target, { context: body?.context });
+      if (!target) return ctiContactError('cti.error.dialTarget','Enter an extension or international number.',400);
+      if (body?.timeout !== undefined && body.timeout !== "") {
+        const timeout = ["string", "number"].includes(typeof body.timeout) ? Number(body.timeout) : NaN;
+        if (!Number.isInteger(timeout) || timeout < 1 || timeout > 120) return ctiContactError('cti.error.dialTimeout','Enter a timeout from 1 to 120 seconds.',400);
+      }
+      const call = createCtiCall({...body,callee:target.number,context:target.context});
       demo.cti.activeCalls.unshift(call);
       demo.cti.history.unshift(call);
       return { ok: true, uuid: call.uuid, call, activeCalls: demo.cti.activeCalls, history: demo.cti.history };
@@ -302,39 +549,55 @@
       demo.cti.activeCalls = demo.cti.activeCalls.filter((call) => call.uuid !== uuid);
       return {};
     }
-    return { ok: true, csrfToken: token };
+    return landingError('demo.landing.unknownAction', 'Unknown demo action.', 404);
+  }
+
+  function portalDemoMessage(key, fallback, params = {}) {
+    return window.NFON_I18N?.message?.(key, params) || fallback.replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
+  }
+
+  function portalDemoSettings() {
+    return { configured: true, authMode: "demo", account: "Demo-Anlage", csrfToken: token, liveWritesEnabled: false, writeContext: "demo-portal-context" };
   }
 
   function portalRoute(path, method, body) {
-    if (path === "/api/status") return { ok: true, configured: true, account: "Demo-Anlage", csrfToken: token };
+    if (path === "/api/status") return { ok: true, configured: true, account: "Demo-Anlage", csrfToken: token, settings: portalDemoSettings() };
     if (path === "/api/customers") return { ok: true, customers: [{ account: "Demo-Anlage", name: "Demo-Anlage", label: "Demo-Anlage" }] };
     if (path === "/api/overview") return portalOverview();
     if (path === "/api/settings/customer") return { ok: true, account: body?.account || "Demo-Anlage", customer: { name: "Demo-Anlage" }, customers: [{ account: "Demo-Anlage", name: "Demo-Anlage", label: "Demo-Anlage" }] };
-    if (path === "/api/settings/live-writes") return { ok: true, enabled: false, message: "Demo-Dry-Run aktiv." };
+    if (path === "/api/settings/live-writes") return { ok: true, enabled: false, message: portalDemoMessage("portal.demo.dryRunActive", "Demo dry run active.") };
     if (path === "/api/service-groups") return serviceGroupsResponse();
     if (path === "/api/service-groups/apply") return applyDemoServiceGroups(body);
-    if (path === "/api/phonebook-sync/preview") return { ok: true, summary: demo.portal.phonebookSummary, rows: demo.portal.phonebook };
-    if (path === "/api/phonebook-sync/apply") return { ok: true, applied: demo.portal.phonebook.length, message: "Telefonbuch-Demo übernommen." };
-    if (path === "/api/phonebook-sync/upload") return { ok: true, rows: demo.portal.phonebook, summary: demo.portal.phonebookSummary };
-    if (path === "/api/extensions/batch/plan") return { ok: true, plan: extensionBatchPlan(body), rows: extensionBatchPlan(body).items };
-    if (path === "/api/extensions/batch/apply") return { ok: true, applied: true, plan: extensionBatchPlan(body) };
+    if (path === "/api/phonebook-sync/preview") return demoPhonebookPlan();
+    if (path === "/api/phonebook-sync/apply") return { ok: false, applied: false, blocked: true, type: "phonebook-sync", message: portalDemoMessage("portal.demo.blockedMessage", "This action is unavailable in demo mode.") };
+    if (path === "/api/phonebook-sync/upload") return uploadDemoPhonebook(body);
+    if (path === "/api/extensions/batch/plan") return extensionBatchPlan(body);
+    if (path === "/api/extensions/batch/apply") return { ...extensionBatchPlan(body), ok: false, applied: false, blocked: true, message: portalDemoMessage("portal.demo.blockedMessage", "This action is unavailable in demo mode.") };
     if (path === "/api/callflow/apply" || path === "/api/callflow/bulk-apply") return applyDemoCallflow(body);
     if (path.startsWith("/api/resources/") && method === "POST") return createDemoPortalResource(path, body);
-    if (path.includes("/api/daynight/") || path.includes("/api/demo/") || path.startsWith("/api/resources/")) {
-      return { ok: true, preview: true, message: "Demo-Plan erzeugt.", result: body || {} };
+    if (path === "/api/demo/clone-extension" || path === "/api/demo/create-extension") {
+      const clone = path.endsWith("clone-extension");
+      return { ok: true, dryRun: true, type: clone ? "clone-extension" : "create-extension", title: portalDemoMessage(clone ? "portal.server.copyPrepared" : "portal.server.newExtensionPrepared", clone ? "Copy prepared" : "New extension prepared"), message: portalDemoMessage("portal.nothingWasSavedInThePortal", "Nothing was saved in the Portal."), body: { extensionNumber: String(body?.extensionNumber || ""), displayName: String(body?.displayName || ""), templateSource: clone ? String(body?.source?.number || body?.source?.id || "") : "" } };
     }
-    return { ok: true, csrfToken: token, message: "Demo-Antwort" };
+    if (["/api/daynight/gateway-preview", "/api/daynight/gateways/apply", "/api/daynight/time-controls/cleanup", "/api/daynight/reset", "/api/daynight/restore", "/api/daynight/gateway-routing/apply", "/api/daynight/announcement-target/plan", "/api/daynight/announcement-target/apply"].includes(path) && method === "POST") {
+      return { ok: true, preview: true, message: portalDemoMessage("portal.demo.planPrepared", "Demo plan prepared."), result: body || {} };
+    }
+    return landingError('demo.landing.unknownAction', 'Unknown demo action.', 404);
   }
 
   function callHistoryRoute(path, method, body, url) {
     if (path === "/api/status") {
       return {
         ok: true,
-        configured: true,
-        authenticated: true,
-        oauthConfigured: true,
+        configured: false,
+        authenticated: false,
+        oauthConfigured: false,
+        historyConfigured: true,
+        transcriptsConfigured: true,
         demoMode: true,
-        account: "Demo-Anlage",
+        demo: true,
+        appId: "core-history",
+        account: "NFON Demo",
         csrfToken: token,
         redirectUri: window.location.href,
       };
@@ -342,13 +605,14 @@
     if (path === "/api/calls") return callHistoryCalls(url.searchParams);
     if (path.startsWith("/api/transcripts/")) {
       const id = decodeURIComponent(path.replace("/api/transcripts/", ""));
-      return demo.callHistory.transcripts.find((item) => item.id === id) || { ok: false, error: "Transcript nicht gefunden" };
+      const call = demo.callHistory.calls.find((item) => item.transcriptId === id);
+      return (call ? callHistoryTranscript(call) : demo.callHistory.transcripts.find((item) => item.id === id)) || { ok: false, error: demoMessage("demo.history.transcriptMissing", "Transcript not found") };
     }
-    if (path === "/api/assignment-preview") return assignmentPreview(body);
-    if (path === "/api/settings/browser-login") return { ok: true, status: { csrfToken: token, authenticated: true, account: "Demo-Anlage" } };
+    if (path === "/api/assignment-preview") return jsonResponse({ok:false,error:"Not found"},404);
+    if (path === "/api/settings/browser-login") return { ok: true, status: { csrfToken: token, authenticated: true, account: "NFON Demo" } };
     if (path === "/api/auth/logout") return { ok: true, status: { csrfToken: token, authenticated: false } };
-    if (path.startsWith("/auth/")) return { ok: true, message: "Demo-Login aktiv." };
-    return { ok: true, csrfToken: token };
+    if (path.startsWith("/auth/")) return { ok: true, message: demoMessage("demo.history.loginActive", "Demo sign-in active.") };
+    return landingError('demo.landing.unknownAction', 'Unknown demo action.', 404);
   }
 
   function callHistoryCalls(params) {
@@ -356,22 +620,30 @@
     const direction = params.get("direction") || "all";
     const outcome = params.get("outcome") || "all";
     const party = normalize(params.get("party") || "");
-    const maxAgeMinutes = range === "today" ? 24 * 60 : range === "30d" ? 30 * 24 * 60 : 7 * 24 * 60;
+    const end = new Date();
+    const start = range === "today" ? new Date(end) : new Date(end.getTime() - (range === "30d" ? 30 : 7) * 86400000);
+    if (range === "today") start.setHours(0, 0, 0, 0);
     const calls = demo.callHistory.calls.filter((call) => {
-      if (call.relativeMinutesAgo > maxAgeMinutes) return false;
+      const startedAt = new Date(call.startedAt);
+      if (startedAt < start || startedAt > end) return false;
       if (direction !== "all" && call.direction !== direction) return false;
       if (outcome !== "all" && call.outcome !== outcome) return false;
-      if (party && !normalize(JSON.stringify(call)).includes(party)) return false;
+      if (party && !normalize(JSON.stringify(call)).includes(party)) {
+        const digits = party.replace(/\D/g, "");
+        if (!digits || ![call.from?.number, call.to?.number].some(number => String(number || "").replace(/\D/g, "").includes(digits))) return false;
+      }
       return true;
     });
     return { ok: true, source: "demo", generatedAt: now(), filters: Object.fromEntries(params.entries()), calls };
   }
 
   function createDemoState() {
-    const callHistory = createCallHistoryData();
-    const cti = createCtiData();
-    const portal = createPortalData();
-    return { callHistory, cti, portal };
+    const state = {};
+    for (const [key, create] of Object.entries({callHistory:createCallHistoryData, cti:createCtiData, portal:createPortalData})) {
+      let value;
+      Object.defineProperty(state,key,{get(){ return value || (value=create()); }});
+    }
+    return state;
   }
 
   function createCallHistoryData() {
@@ -422,10 +694,11 @@
         const outcome = answered
           ? "answered"
           : direction === "outbound" && seededPick(index * 11 + dayOffset, 100) < 55
-            ? "busy"
+            ? "cancelled"
             : "missed";
         const durationSeconds = outcome === "answered" ? 65 + seededPick(index * 37 + dayOffset * 19, 870) : 0;
         const startedAt = callHistoryStartedAt(date, index, dayOffset);
+        if (startedAt.getTime() + durationSeconds * 1000 > today.getTime()) continue;
         const id = `demo-call-${ctiDayKey(startedAt).replaceAll("-", "")}-${String(index + 1).padStart(3, "0")}`;
         const hasTranscript = outcome === "answered" && seededPick(index * 41 + dayOffset * 23, 100) < (direction === "inbound" ? 72 : 46);
         calls.push(demoCallAt({
@@ -463,38 +736,36 @@
     return {
       id,
       relativeMinutesAgo,
+      source: "demo",
+      demoTemplate: "call-history-v1",
       startedAt: startedAt.toISOString(),
       direction,
       from: direction === "inbound" ? external : internal,
       to: direction === "inbound" ? internal : external,
       user: { number: extension, name: agentName, email: `${agentName.toLowerCase().replaceAll(" ", ".")}@example.local` },
+      queue: { name: queue, id: queue },
       durationSeconds,
       outcome,
       transcriptId,
-      summary: `${contactName} · ${queue} · Demo-Anlage`,
+      summary: demoMessage("history.demoCallSummary", "{customer} · {queue} · Demo system", { customer: contactName, queue }),
       contact: company ? { name: contactName, company, email } : null,
-      ticket: outcome === "missed" ? null : { id: `NFON-${id.slice(-7).toUpperCase()}`, title: `${queue} Demo Vorgang`, status: outcome === "answered" ? "open" : "pending" },
       tags: ["demo", queue.toLowerCase().replaceAll(" ", "-")],
     };
   }
 
   function callHistoryTranscript(call) {
     const customerName = call.contact?.name || call.from.name;
-    const company = call.contact?.company || "Demo-Anlage";
+    const company = call.contact?.company || "NFON Demo";
     return {
       ok: true,
       id: call.transcriptId,
       callId: call.id,
-      language: "de",
+      language: window.NFON_I18N?.getLanguage?.() || "en",
+      source: "demo",
       confidence: 0.89 + seededPick(call.relativeMinutesAgo, 9) / 100,
-      summary: `${customerName} wurde als Demo-Call ausgewertet und dem Konto ${company} zugeordnet. Ticket, Owner und Abrechnung wurden vorbereitet.`,
-      text: [
-        `${customerName}: Wir brauchen eine kurze Rueckmeldung zum aktuellen Vorgang.`,
-        `${call.user.name}: Ich pruefe den Status und dokumentiere die naechsten Schritte.`,
-        "System: Transcript, Ticketvorschlag und CRM-Zuordnung wurden automatisch vorbereitet.",
-      ].join("\n"),
-      topics: ["Demo", "Call History", call.user.name, call.contact?.company || "Unbekannt"],
-      ticketSuggestion: { id: call.ticket?.id || "NFON-DEMO", title: call.ticket?.title || "Demo Ticket", priority: call.outcome === "missed" ? "hoch" : "normal" },
+      summary: demoMessage("history.demoTranscriptSummary", "{customer} from {company} discussed the current service request. The next steps were documented.", { customer: customerName, company }),
+      text: demoMessage("history.demoTranscriptText", "{customer}: We need a brief update on the current case.\n{agent}: I will check the status and document the next steps.", { customer: customerName, agent: call.user.name }),
+      topics: ["Demo", "Call History", call.user.name, call.contact?.company || "Demo"],
       assignee: { name: call.user.name, email: call.user.email },
     };
   }
@@ -502,12 +773,6 @@
   function callHistoryStartedAt(date, index, dayOffset) {
     const startedAt = new Date(date);
     startedAt.setHours(callHistoryBusinessHour(index, dayOffset), seededPick(index * 43 + dayOffset, 60), seededPick(index * 47 + dayOffset, 60), 0);
-    const current = new Date();
-    if (dayOffset === 0 && startedAt > current) {
-      const minutesSinceBusinessStart = Math.max(20, (current.getHours() - 8) * 60 + current.getMinutes());
-      const minutesBack = 5 + seededPick(index * 53 + dayOffset, Math.min(540, minutesSinceBusinessStart));
-      return new Date(current.getTime() - minutesBack * 60000);
-    }
     return startedAt;
   }
 
@@ -578,12 +843,12 @@
       history,
       activeCalls: createCtiActiveCalls(extensions),
       events: history.slice(0, 32).map((call) => ({ extension: call.extension })),
-      google: { configured: true, connected: true, contacts: 8, account: "Demo-Anlage" },
+      google: { configured: true, connected: true, contacts: 4, account: "NFON Demo", demo: true, lastSyncAt: now() },
       contacts: [
-        { id: "", name: "Demo Kontakt A", company: "Demo Account A", phone: "+49 89 0000 2001", email: "kontakt-a@example.local", source: "demo" },
-        { id: "", name: "Demo Kontakt B", company: "Demo Account B", phone: "+49 89 0000 2002", email: "kontakt-b@example.local", source: "demo" },
-        { id: "", name: "Demo Kontakt C", company: "Demo Account C", phone: "+49 89 0000 2003", email: "kontakt-c@example.local", source: "demo" },
-        { id: "", name: "Demo Kontakt D", company: "Demo Account D", phone: "+49 89 0000 2004", email: "kontakt-d@example.local", source: "demo" },
+        { id: "", name: "Demo Contact A", organization: "Demo Account A", phone: "+49 89 0000 2001", phones: [{ value: "+49 89 0000 2001", normalized: "498900002001" }], emails: [{ value: "kontakt-a@example.local" }], source: "google" },
+        { id: "", name: "Demo Contact B", organization: "Demo Account B", phone: "+49 89 0000 2002", phones: [{ value: "+49 89 0000 2002", normalized: "498900002002" }], emails: [{ value: "kontakt-b@example.local" }], source: "google" },
+        { id: "", name: "Demo Contact C", organization: "Demo Account C", phone: "+49 89 0000 2003", phones: [{ value: "+49 89 0000 2003", normalized: "498900002003" }], emails: [{ value: "kontakt-c@example.local" }], source: "google" },
+        { id: "", name: "Demo Contact D", organization: "Demo Account D", phone: "+49 89 0000 2004", phones: [{ value: "+49 89 0000 2004", normalized: "498900002004" }], emails: [{ value: "kontakt-d@example.local" }], source: "google" },
       ],
       storage: { ok: true, files: { "history.json": { bytes: history.length * 420, records: history.length }, "contacts.json": { bytes: 4096, records: 4 } } },
     };
@@ -619,6 +884,7 @@
         const hour = ctiBusinessHour(index, dayOffset);
         startedAt.setHours(hour, seededPick(index * 29 + dayOffset, 60), seededPick(index * 31 + dayOffset, 60), 0);
         const durationSeconds = answered ? 45 + seededPick(index * 37 + dayOffset, 540) : 0;
+        if (startedAt.getTime() + Math.max(10,durationSeconds) * 1000 > today.getTime()) continue;
         const uuid = `demo-cti-${ctiDayKey(startedAt)}-${String(index).padStart(3, "0")}`;
         const caller = direction === "outbound" ? extension.extension_number : external;
         const callee = direction === "outbound" ? external : "+49 89 12345-0";
@@ -633,7 +899,7 @@
             uuid,
             id: `${uuid}-${stateName}`,
             demo: true,
-            account: "Demo-Anlage",
+            account: "NFON Demo",
             extension: extension.extension_number,
             caller,
             callee,
@@ -731,7 +997,7 @@
       { id: "208", number: "208", name: "Daniel Wagner", type: "PHONE", email: "daniel.wagner@example.local", device: "Softphone" },
     ];
     const member = (number, penalty = 0, skillLevel = 1) => {
-      const extension = extensions.find((item) => item.number === number) || { number, id: number, name: `Nebenstelle ${number}`, type: "PHONE" };
+      const extension = extensions.find((item) => item.number === number) || { number, id: number, name: portalDemoMessage("portal.extensionValue", "Extension {p0}", { p0: number }), type: "PHONE" };
       return { extensionNumber: extension.number, id: extension.id, name: extension.name, type: extension.type, penalty, skillLevel, enabled: true };
     };
     const queues = [
@@ -739,7 +1005,7 @@
       { id: "10001", serviceNumber: "10001", extensionNumber: "10001", value: "10001", name: "Demo Support Queue", color: "blue", members: [member("203"), member("204"), member("207")], overflow: "205" },
     ];
     const skills = [
-      { id: "10010", serviceNumber: "10010", extensionNumber: "10010", value: "10010", name: "Demo Skillgruppe", color: "purple", members: [member("202", 0, 3), member("206", 0, 2), member("208", 0, 1)] },
+      { id: "10010", serviceNumber: "10010", extensionNumber: "10010", value: "10010", name: portalDemoMessage("portal.demo.skillGroup", "Demo skill group"), color: "purple", members: [member("202", 0, 3), member("206", 0, 2), member("208", 0, 1)] },
     ];
     const phonebook = [
       phonebookEntry("pb-001", "Mara Seidel", "Demo Account A", "+49 89 0000 2101", "mara.seidel@example.local"),
@@ -768,11 +1034,11 @@
         didId: "+49 89 12345-0",
         original: { did: "+49 89 12345-0", destinationName: "Demo Frontdesk", destinationExtension: "10000", destinationServiceNumber: "10000", destinationType: "QUEUE" },
         nodes: [
-          { id: "inbound", type: "DID", title: "Eingehender Anruf", subtitle: "+49 89 12345-0", x: 8, y: 45, tone: "blue", locked: true },
-          { id: "trunk", type: "Trunk", title: "Leitung", subtitle: "Main SIP Trunk", x: 34, y: 45, tone: "purple", locked: true },
-          { id: "target", type: "QUEUE", title: "Demo Frontdesk", subtitle: "Warteschlange 10000", targetNumber: "10000", routeNumber: "10000", x: 68, y: 45, tone: "amber", serviceKind: "queue", serviceColor: "green", memberCount: 2, memberNames: ["201 Anna Weber", "202 Max Schneider"], isTarget: true, config: { portalMode: "existing" } },
+          { id: "inbound", type: "DID", title: portalDemoMessage("portal.incomingCall", "Incoming call"), subtitle: "+49 89 12345-0", x: 8, y: 45, tone: "blue", locked: true },
+          { id: "trunk", type: "Trunk", title: portalDemoMessage("portal.line", "Line"), subtitle: "Main SIP Trunk", x: 34, y: 45, tone: "purple", locked: true },
+          { id: "target", type: "QUEUE", title: "Demo Frontdesk", subtitle: portalDemoMessage("portal.demo.queueNumber", "Queue 10000"), targetNumber: "10000", routeNumber: "10000", x: 68, y: 45, tone: "amber", serviceKind: "queue", serviceColor: "green", memberCount: 2, memberNames: ["201 Anna Weber", "202 Max Schneider"], isTarget: true, config: { portalMode: "existing" } },
         ],
-        edges: [{ from: "inbound", to: "trunk", label: "kommt an" }, { from: "trunk", to: "target", label: "führt zu" }],
+        edges: [{ from: "inbound", to: "trunk", label: portalDemoMessage("portal.server.arrivesAt", "Arrives at") }, { from: "trunk", to: "target", label: portalDemoMessage("portal.routesTo", "routes to") }],
       },
       phonebook,
       phonebookSummary: { create: 4, update: 3, unchanged: phonebook.length - 7 },
@@ -799,13 +1065,13 @@
     const extensions = demo.portal.extensions;
     const queues = demo.portal.serviceGroups.queues || [];
     const skills = demo.portal.serviceGroups.skills || [];
-    return {
+    const overview = {
       ok: true,
       demo: true,
       account: "Demo-Anlage",
       version: { version: "Demo", host: "static" },
       customer: { company: "Demo-Anlage", account: "Demo-Anlage" },
-      counts: { extensions: extensions.length, devices: 4, trunks: 1, dids: 3, phoneBooks: demo.portal.phonebook.length, groups: 1, queues: queues.length, skills: skills.length, ivrs: 1, timeControls: 1, announcements: 1 },
+      counts: { extensions: extensions.length, devices: 2, trunks: 1, dids: 3, phoneBooks: demo.portal.phonebook.length, groups: 1, queues: queues.length, skills: skills.length, ivrs: 1, timeControls: 1, announcements: 1 },
       inventory: {
         extensions,
         devices: [{ id: "demo-softphone", name: "Softphone" }, { id: "demo-t54", name: "Yealink T54W" }],
@@ -821,51 +1087,61 @@
         skills,
         ivrs: [{ id: "20", serviceNumber: "20", value: "20", name: "Welcome IVR" }],
         timeControls: [{ id: "30", serviceNumber: "30", value: "30", name: "Business Hours" }],
-        announcements: [{ id: "40", name: "Nachtansage", value: "GENERAL_ANNOUNCEMENT" }],
+        announcements: [{ id: "40", name: portalDemoMessage("portal.server.nightAnnouncement", "Night announcement"), value: "GENERAL_ANNOUNCEMENT" }],
       },
       endpoints: {},
       callflow: demo.portal.callflow,
-      settings: { configured: true, authMode: "demo", account: "Demo-Anlage", csrfToken: token, liveWritesEnabled: false },
+      settings: portalDemoSettings(),
       syncedAt: now(),
     };
+    let applied = {};
+    try { applied = JSON.parse(localStorage.getItem('nfon-portal-flow-applied-v2') || '{}'); } catch { /* Unavailable or malformed browser storage. */ }
+    for (const did of overview.inventory.dids) {
+      const snapshot = applied?.[`${overview.account}:${did.id}`];
+      if (snapshot?.did !== did.name || !Array.isArray(snapshot?.flow?.nodes)) continue;
+      const target = snapshot.target?.type ? snapshot.target : demoFlowRoot(snapshot.flow);
+      if (target) Object.assign(did, demoRouting(did.id,target));
+    }
+    const changed = demo.portal.routingOverride;
+    if (changed) { const did = overview.inventory.dids.find(item => item.id === changed.did); if (did) Object.assign(did, changed); }
+    return overview;
   }
 
   function serviceGroupsResponse() {
     demo.portal.serviceGroups.syncedAt = now();
     demo.portal.serviceGroups.extensions = demo.portal.extensions;
+    for (const group of [...demo.portal.serviceGroups.queues, ...demo.portal.serviceGroups.skills]) group.memberRevision = JSON.stringify(group.members);
     return demo.portal.serviceGroups;
   }
 
   function applyDemoServiceGroups(body) {
     const services = Array.isArray(body?.services) ? body.services : [];
+    const current = serviceGroupsResponse();
+    if (body.account !== current.account) return jsonResponse({ok:false,error:'Account changed.'},409);
+    const changes = [];
     for (const service of services) {
-      const collection = service.kind === "skill" ? "skills" : "queues";
-      const target = (demo.portal.serviceGroups[collection] || []).find((item) => String(item.serviceNumber || item.id) === String(service.serviceNumber || service.id));
-      if (!target) continue;
-      target.members = (service.members || []).map((member) => ({
-        extensionNumber: String(member.extensionNumber || member.number || member.id || ""),
-        id: String(member.extensionNumber || member.number || member.id || ""),
-        name: member.name || extensionName(member.extensionNumber || member.number || member.id),
-        type: member.type || "PHONE",
-        penalty: Number(member.penalty || 0),
-        skillLevel: Number(member.skillLevel || 1),
-        enabled: member.enabled !== false,
-      })).filter((member) => member.extensionNumber);
+      const target = (current[service.kind === 'skill' ? 'skills' : 'queues'] || []).find(item => String(item.serviceNumber || item.id) === String(service.serviceNumber));
+      if (!target || service.baseRevision !== target.memberRevision) return jsonResponse({ok:false,error:'Memberships changed. Reload before applying.'},409);
+      if (!Array.isArray(service.add) || !Array.isArray(service.remove) || !Array.isArray(service.update)) return jsonResponse({ok:false,error:'Explicit membership changes required.'},400);
+      changes.push({service,target});
     }
-    return {
-      ok: true,
-      title: "Demo-Mitgliedschaften übernommen",
-      message: "Warteschlangen und Skillgruppen wurden lokal in der Demo-Anlage aktualisiert.",
-      overview: portalOverview(),
-      serviceGroups: serviceGroupsResponse(),
-      appliedAt: now(),
-    };
+    for (const {service,target} of changes) {
+      const key = member => String(member.extensionNumber || member.number || member.id || member);
+      const members = new Map(target.members.map(member=>[key(member),member]));
+      for (const member of service.remove) members.delete(key(member));
+      for (const member of [...service.add,...service.update]) {
+        const number=key(member); members.set(number,{...members.get(number),...member,extensionNumber:number,id:number,name:member.name || extensionName(number),type:member.type || 'PHONE'});
+      }
+      target.members=[...members.values()];
+    }
+    return {ok:true,title:portalDemoMessage('portal.demo.localMembershipsApplied','Demo memberships applied'),message:portalDemoMessage('portal.demo.membershipsSaved','Queues and skill groups were updated locally in the demo PBX.'),overview:portalOverview(),serviceGroups:serviceGroupsResponse(),appliedAt:now()};
   }
 
   function createDemoPortalResource(path, body) {
     const collection = decodeURIComponent(path.replace("/api/resources/", "").split("/")[0] || "");
+    if (!['queues','skills','ivrs','timeControls'].includes(collection)) return landingError('demo.landing.unknownAction', 'Unknown demo action.', 404);
     if (collection !== "queues" && collection !== "skills") {
-      return { ok: true, preview: true, message: "Demo-Ressource vorbereitet.", result: body || {} };
+      return { ok: true, preview: true, message: portalDemoMessage("portal.demo.resourcePrepared", "Demo resource prepared."), result: body || {} };
     }
     const existing = [
       ...(demo.portal.serviceGroups.queues || []),
@@ -876,7 +1152,7 @@
     let next = start;
     while (used.has(next)) next += 1;
     const number = String(body?.extensionNumber || body?.serviceNumber || next);
-    const name = String(body?.displayName || (collection === "queues" ? "Neue Demo Warteschlange" : "Neue Demo Skillgruppe")).trim();
+    const name = String(body?.displayName || (collection === "queues" ? portalDemoMessage("portal.demo.newQueue", "New demo queue") : portalDemoMessage("portal.demo.newSkillGroup", "New demo skill group"))).trim();
     const item = {
       id: number,
       serviceNumber: number,
@@ -889,8 +1165,8 @@
     demo.portal.serviceGroups[collection].push(item);
     return {
       ok: true,
-      title: `${collection === "queues" ? "Warteschlange" : "Skillgruppe"} lokal angelegt`,
-      message: `${name} wurde in der Demo-Anlage angelegt.`,
+      title: portalDemoMessage("portal.demo.resourceCreated", "{p0} created locally", { p0: collection === "queues" ? portalDemoMessage("portal.queue", "Queue") : portalDemoMessage("portal.skillGroup", "Skill group") }),
+      message: portalDemoMessage("portal.demo.namedResourceCreated", "{p0} was created in the demo PBX.", { p0: name }),
       item,
       overview: portalOverview(),
       serviceGroups: serviceGroupsResponse(),
@@ -898,14 +1174,42 @@
     };
   }
 
+  function demoFlowRoot(flow) {
+    const nodes=flow?.nodes || [], edges=flow?.edges || [];
+    let node=nodes.find(item=>item.id==='inbound') || nodes.find(item=>item.locked);
+    const seen=new Set();
+    while(node?.locked || String(node?.type).toUpperCase()==='TRUNK') {
+      if(seen.has(node.id)) return null;
+      seen.add(node.id);
+      const outgoing=edges.filter(edge=>edge.from===node.id&&!edge.virtual&&!edge.branchField);
+      if(outgoing.length!==1) return null;
+      node=nodes.find(item=>item.id===outgoing[0].to);
+    }
+    return node || nodes.find(item=>item.isTarget) || null;
+  }
+
+  function demoRouting(did,target) {
+    return {did,destinationName:target.title || '',destinationExtension:target.targetNumber || target.number || '',destinationServiceNumber:target.routeNumber || '',destinationType:target.type,value:target.title || ''};
+  }
+
   function applyDemoCallflow(body) {
-    if (body?.flow) demo.portal.callflow = body.flow;
+    let target=body?.target?.type ? body.target : demoFlowRoot(body?.flow);
+    if (target && !target.routeNumber && !target.targetNumber && !target.number && target.type !== 'HANGUP') {
+      const seed = [...String(target.id || target.title || target.type)].reduce((hash,char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0);
+      const number = String(12000 + seed % 8000);
+      target = { ...target, number, targetNumber: number, routeNumber: number };
+    }
+    if (body?.flow) {
+      demo.portal.callflow = body.flow;
+      if (target) demo.portal.routingOverride = demoRouting(body.did?.id || body.flow.didId || body.flow.original?.did,target);
+    }
     return {
       ok: true,
       applied: true,
-      title: "Callflow lokal übernommen",
-      message: "Der Callflow wurde in der Demo-Anlage lokal gespeichert.",
+      title: portalDemoMessage("portal.demo.flowAppliedLocally", "Callflow applied locally"),
+      message: portalDemoMessage("portal.demo.flowSavedLocally", "The callflow was saved locally in the demo PBX."),
       flow: demo.portal.callflow,
+      target,
       overview: portalOverview(),
       appliedAt: now(),
     };
@@ -913,20 +1217,69 @@
 
   function extensionName(number) {
     const extension = demo.portal.extensions.find((item) => String(item.number || item.id) === String(number));
-    return extension?.name || `Nebenstelle ${number}`;
+    return extension?.name || portalDemoMessage("portal.extensionValue", "Extension {p0}", { p0: number });
   }
 
   function extensionBatchPlan(body) {
-    const rows = body?.rows || body?.items || [];
-    const items = Array.isArray(rows) && rows.length ? rows : demo.portal.extensions.map((extension) => ({ number: extension.number, name: extension.name }));
-    return { ok: true, items: items.map((item, index) => ({ index, action: "dry-run", title: `Nebenstelle ${item.number || index + 1}`, message: "Demo-Prüfung erfolgreich." })) };
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    const existing = new Set(demo.portal.extensions.map(item => String(item.number || item.id)));
+    const seen = new Set();
+    const entries = rows.map((item, index) => {
+      const extensionNumber = String(item.extensionNumber || item.number || "").trim();
+      const displayName = String(item.displayName || item.name || "").trim();
+      const mailboxPin = String(item.mailboxPin || item.pin || "").trim();
+      const errors = [];
+      if (!extensionNumber) errors.push(portalDemoMessage("portal.server.numberMissing", "Number missing"));
+      if (!/^\d{2,8}$/.test(extensionNumber)) errors.push(portalDemoMessage("portal.server.numberMustContain2To8Digits", "Number must contain 2 to 8 digits"));
+      if (!displayName) errors.push(portalDemoMessage("portal.server.nameMissing", "Name missing"));
+      if (!mailboxPin) errors.push(portalDemoMessage("portal.server.mailboxPinMissing", "Mailbox PIN missing"));
+      if (mailboxPin && !/^\d{4,12}$/.test(mailboxPin)) errors.push(portalDemoMessage("portal.server.mailboxPinMustContain4To12Digits", "Mailbox PIN must contain 4 to 12 digits"));
+      if (existing.has(extensionNumber)) errors.push(portalDemoMessage("portal.server.extensionAlreadyExists", "Extension already exists"));
+      if (seen.has(extensionNumber)) errors.push(portalDemoMessage("portal.server.numberAppearsMoreThanOnceInTheList", "Number appears more than once in the list"));
+      seen.add(extensionNumber);
+      return { ...item, index, extensionNumber, displayName, mailboxPin, ok: errors.length === 0, errors };
+    });
+    const valid = entries.filter(entry => entry.ok).length;
+    const ok = entries.length > 0 && valid === entries.length;
+    return { ok, dryRun: true, type: "extension-batch", title: ok ? portalDemoMessage("portal.server.batchImportChecked", "Batch import checked") : portalDemoMessage("portal.server.batchImportIncomplete", "Batch import incomplete"), message: portalDemoMessage("portal.demo.batchPreview", "Extensions ready: {valid} of {total}. Nothing is saved.", { valid, total: entries.length }), entries, summary: { total: entries.length, valid, invalid: entries.length - valid, existing: existing.size } };
   }
 
-  function assignmentPreview() {
-    return { ok: true, queue: "Support", assignee: "Demo Agent 203", billing: { minutes: 12, amount: 28.8 }, message: "Demo-Zuordnung vorbereitet." };
+  function uploadDemoPhonebook(body) {
+    const contacts = body?.contacts;
+    if (!Array.isArray(contacts) || !contacts.length) throw new Error(portalDemoMessage("portal.server.uploadContainsNoContacts", "Upload contains no contacts."));
+    if (contacts.length > 5000) throw new Error(portalDemoMessage("portal.server.uploadIsTooLargeMaximum5000ContactsPerFile", "Upload is too large. Maximum 5000 contacts per file."));
+    demo.portal.phonebookSource = contacts.flatMap((contact) => {
+      const phones = Array.isArray(contact.phones) ? contact.phones : String(contact.phones || contact.phone || "").split(/[;,]/);
+      return phones.map(phone => ({ contact: String(contact.name || contact.displayName || "").trim(), phone: String(phone?.value || phone).trim() })).filter(row => row.contact && row.phone);
+    });
+    if (!demo.portal.phonebookSource.length) throw new Error(portalDemoMessage("portal.server.uploadContainsNoContacts", "Upload contains no contacts."));
+    demo.portal.phonebookSourceFile = String(body?.source || "demo-contacts");
+    return { ok: true, contacts: contacts.length, settings: { ...portalOverview().settings, googleContactsFile: demo.portal.phonebookSourceFile } };
+  }
+
+  function demoPhonebookPlan() {
+    const target = demo.portal.phonebook;
+    const source = demo.portal.phonebookSource || target.map(row => ({contact: row.contact, phone: row.phone}));
+    const phoneKey = value => String(value || "").replace(/\D/g, "");
+    const byPhone = new Map(target.map(row => [phoneKey(row.phone), row]));
+    const seen = new Set();
+    const actions = [];
+    const summary = { create: 0, update: 0, unchanged: 0, duplicate: 0 };
+    const rows = source.map(row => {
+      const key = phoneKey(row.phone);
+      const previous = byPhone.get(key);
+      if (seen.has(key)) { summary.duplicate += 1; return {...row, status: "duplicate", reason: portalDemoMessage("portal.server.duplicatePhoneNumberInTheContactSource", "Duplicate phone number in the contact source")}; }
+      seen.add(key);
+      const status = !previous ? "create" : previous.contact === row.contact ? "unchanged" : "update";
+      summary[status] += 1;
+      if (status !== "unchanged") actions.push({action: status, contact: row.contact, phone: row.phone});
+      return {...row, status};
+    });
+    return { ok: true, dryRun: true, type: "phonebook-sync", title: portalDemoMessage("portal.demo.phonebookPreview", "Phonebook comparison"), message: portalDemoMessage("portal.demo.previewOnly", "Local preview. No live changes are written."), source: { file: demo.portal.phonebookSourceFile || "demo-contacts", googleContacts: source.length, googlePhones: source.length }, target: { portalEntries: target.length, phoneBook: "Company" }, summary, actions, preview: { google: rows, nfon: target }, rows };
   }
 
   function createCtiCall(body) {
+    const timestamp = now();
     return {
       uuid: `demo-call-${Date.now()}`,
       extension: body?.caller || body?.extension || "202",
@@ -934,7 +1287,9 @@
       callee: body?.callee || body?.target || "+49 89 0000 2001",
       direction: "outbound",
       state: "answer",
-      startedAt: now(),
+      startedAt: timestamp,
+      updated: timestamp,
+      receivedAt: timestamp,
       durationMs: 0,
       team: "Demo",
     };
@@ -963,10 +1318,17 @@
     const link = document.createElement("a");
     link.href = url;
     link.download = filename;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    try {
+      document.body.append(link);
+      link.click();
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
+    } finally {
+      link.remove();
+    }
+    // Embedded browsers may consume the file after the click handler returns.
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   function parseJson(text) {

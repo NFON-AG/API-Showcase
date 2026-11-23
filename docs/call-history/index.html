@@ -1,18 +1,20 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="../appearance.js?v=b2ba19b928750eb3"></script>
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <title>NFON Call History API Demo</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="./styles.css?v=web-demo-20260622i">
+    <link rel="stylesheet" href="./styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="../appearance.css?v=b2ba19b928750eb3">
   </head>
-  <body>
+  <body data-nfon-app="call-history">
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="../index.html?v=web-demo-20260622g" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="../index.html" aria-label="Back to overview" title="Back to overview">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -20,99 +22,87 @@
           </svg>
         </a>
         <div>
-          <h1>NFON Call History API Demo</h1>
-          <p id="account-label">Prüft Konfiguration</p>
+        <h1>NFON Call History API Demo</h1>
+        <p id="account-label">Checking configuration</p>
         </div>
       </div>
       <div class="header-actions">
-        <button class="nav-button is-active" data-view="history" type="button">Rufliste</button>
-        <button class="nav-button" data-view="transcripts" type="button">Transcripts</button>
-        <button class="nav-button" data-view="crm" type="button">CRM Demo</button>
-        <button class="nav-button" data-view="setup" type="button">Setup</button>
-        <button class="icon-button" id="refresh-button" type="button" title="Aktualisieren" aria-label="Aktualisieren">↻</button>
-        <span class="connection" id="connection-state">Prüft</span>
+        <button class="nav-button is-active" data-view="history" type="button" data-i18n-key="history.history">Call history</button>
+        <button class="nav-button" data-view="transcripts" type="button" data-i18n-key="history.transcripts">Transcripts</button>
+        <button class="nav-button" data-view="crm" type="button" data-i18n-key="history.crmDemo">CRM Demo</button>
+        <button class="nav-button" data-view="setup" type="button" data-i18n-key="history.setup">Setup</button>
+        <button class="icon-button" id="refresh-button" type="button" title="Refresh" data-i18n-title="history.refresh" aria-label="Refresh" data-i18n-aria-label="history.refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button>
+        <span class="connection" id="connection-state">Checking</span>
       </div>
     </header>
 
     <main class="app-shell">
-      <section class="metrics" id="metrics" aria-label="Kennzahlen"></section>
-      <section class="analytics-panel" id="analytics-panel" aria-label="Auswertung"></section>
+      <section class="metrics" id="metrics" aria-label="Metrics" data-i18n-aria-label="history.metrics"></section>
       <section id="status-note" class="status-note" aria-live="polite"></section>
 
-      <section class="filter-panel panel" aria-label="Filter">
+      <section class="filter-panel panel" aria-label="Filters" data-i18n-aria-label="history.filters">
         <div class="filter-grid">
           <label data-filter-field="range">
-            <span class="filter-label-text">Zeitraum</span>
+            <span class="filter-label-text" data-i18n-key="history.period">Period</span>
             <select id="range-filter">
-              <option value="today">Heute</option>
-              <option value="7d">7 Tage</option>
-              <option value="30d">30 Tage</option>
+              <option value="today" data-i18n-key="history.today">Today</option>
+              <option value="7d" data-i18n-key="history.sevenDays">7 days</option>
+              <option value="30d" data-i18n-key="history.thirtyDays">30 days</option>
             </select>
           </label>
           <label data-filter-field="direction">
-            <span class="filter-label-text">Richtung</span>
+            <span class="filter-label-text" data-i18n-key="history.direction">Direction</span>
             <select id="direction-filter">
-              <option value="all">Alle Richtungen</option>
-              <option value="inbound">Eingehend</option>
-              <option value="outbound">Ausgehend</option>
-            </select>
-          </label>
-          <label data-filter-field="outcome">
-            <span class="filter-label-text">Ergebnis</span>
-            <select id="outcome-filter">
-              <option value="all">Alle Ergebnisse</option>
-              <option value="answered">Angenommen</option>
-              <option value="missed">Verpasst</option>
-              <option value="cancelled">Abgebrochen</option>
-              <option value="busy">Besetzt</option>
-              <option value="failed">Fehler</option>
+              <option value="all" data-i18n-key="history.allDirections">All directions</option>
+              <option value="inbound" data-i18n-key="history.inbound">Inbound</option>
+              <option value="outbound" data-i18n-key="history.outbound">Outbound</option>
             </select>
           </label>
           <label data-filter-field="transcript">
-            <span class="filter-label-text">Transkript</span>
+            <span class="filter-label-text" data-i18n-key="history.transcript">Transcript</span>
             <select id="transcript-filter">
-              <option value="all">Alle</option>
-              <option value="with">Ja</option>
-              <option value="without">Nein</option>
+              <option value="all" data-i18n-key="history.all">All</option>
+              <option value="with" data-i18n-key="history.yes">Yes</option>
+              <option value="without" data-i18n-key="history.no">No</option>
             </select>
           </label>
           <label data-filter-field="party">
-            <span class="filter-label-text">Teilnehmer</span>
-            <input id="party-filter" type="search" placeholder="Name, Nummer, Ticket">
+            <span class="filter-label-text" data-i18n-key="history.participant">Participant</span>
+            <input id="party-filter" type="search" placeholder="Name or number" data-i18n-placeholder="history.searchParty">
           </label>
           <label data-filter-field="queue">
-            <span class="filter-label-text">Queue</span>
-            <input id="queue-filter" type="search" placeholder="Queue">
+            <span class="filter-label-text" data-i18n-key="history.queue">Queue</span>
+            <input id="queue-filter" type="search" placeholder="Search queue" data-i18n-placeholder="history.searchQueue">
           </label>
         </div>
       </section>
 
-      <section class="view is-active" id="view-history" aria-label="Rufliste">
+      <section class="view is-active" id="view-history" aria-label="Call history" data-i18n-aria-label="history.history">
         <div class="history-grid">
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>Anrufliste</h2>
-                <p class="panel-subtitle" id="history-subtitle">Lade Call History</p>
+                <h2 data-i18n-key="history.callList">Call list</h2>
+                <p class="panel-subtitle" id="history-subtitle">Loading Call History</p>
               </div>
             </div>
-            <div class="history-list" role="table" aria-label="Anrufliste">
+            <div class="history-list" role="group" aria-label="Call list" data-i18n-aria-label="history.callList">
               <div class="history-list-header" role="row">
-                <span role="columnheader">Datum / Zeit</span>
-                <span role="columnheader">Status</span>
-                <span role="columnheader">Teilnehmer</span>
-                <span role="columnheader">Queue</span>
-                <span role="columnheader">Nebenstelle</span>
+                <span role="columnheader" data-i18n-key="history.dateTime">Date / time</span>
+                <span role="columnheader" data-i18n-key="history.status">Status</span>
+                <span role="columnheader" data-i18n-key="history.participant">Participant</span>
+                <span role="columnheader" data-i18n-key="history.queue">Queue</span>
+                <span role="columnheader" data-i18n-key="history.extension">Extension</span>
               </div>
-              <div id="calls-body" class="history-rows" role="rowgroup"></div>
+              <div id="calls-body" class="history-rows" ></div>
             </div>
           </section>
 
           <aside class="panel detail-panel">
             <div class="panel-header">
               <div>
-                <h2>Call-Detail</h2>
-                <p class="panel-subtitle" id="detail-subtitle">Kein Call ausgewählt</p>
+                <h2 data-i18n-key="history.callDetail">Call details</h2>
+                <p class="panel-subtitle" id="detail-subtitle">No call selected</p>
               </div>
             </div>
             <div id="call-detail"></div>
@@ -120,47 +110,29 @@
         </div>
       </section>
 
-      <section class="view" id="view-crm" aria-label="Mini CRM">
-        <div class="crm-layout">
-          <section class="panel crm-board">
-            <div class="panel-header">
-              <div>
-                <h2>Automatisierte Supportabrechnung</h2>
-                <p class="panel-subtitle">Jeder Call wird als Ticket geführt, dem Kundenkonto zugeordnet und abrechenbar vorbereitet.</p>
-              </div>
-            </div>
-            <div id="crm-summary" class="crm-summary"></div>
-            <div class="crm-ticket-header">
-              <span>Ticket</span>
-              <span>Kunde</span>
-              <span>Owner</span>
-              <span>Abrechnung</span>
-              <span>Status</span>
-            </div>
-            <div id="crm-ticket-list" class="crm-ticket-list"></div>
-          </section>
-        </div>
-        <div id="crm-account-detail"></div>
+      <section class="view" id="view-crm" aria-label="CRM Demo" data-i18n-aria-label="history.crmDemo">
+        <iframe id="crm-demo-frame" title="CRM Demo" data-i18n-title="history.crmDemo" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerpolicy="same-origin"></iframe>
       </section>
 
-      <section class="view" id="view-transcripts" aria-label="Transcripts">
+      <section class="view" id="view-transcripts" aria-label="Transcripts" data-i18n-aria-label="history.transcripts">
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>Transcript-Zuordnung</h2>
-              <p class="panel-subtitle">Calls mit Summary oder Transcript als Quelle für User- und Ticket-Mapping.</p>
+              <h2 data-i18n-key="history.transcriptMapping">Transcript mapping</h2>
+              <p class="panel-subtitle" data-i18n-key="history.transcriptMappingHint">View transcripts and summaries linked to each call.</p>
             </div>
           </div>
           <div id="transcript-grid" class="transcript-grid"></div>
         </section>
       </section>
 
-      <section class="view" id="view-setup" aria-label="Setup">
+      <section class="view" id="view-setup" aria-label="Setup" data-i18n-aria-label="history.setup">
+        <div data-appearance-settings></div>
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>Konfigurationsstatus</h2>
-              <p class="panel-subtitle">OAuth, API-Endpunkte und lokale Laufzeitdaten.</p>
+              <h2 data-i18n-key="history.configurationStatus">Configuration status</h2>
+              <p class="panel-subtitle" data-i18n-key="history.configurationHint">OAuth, API endpoints and local runtime data.</p>
             </div>
           </div>
           <div class="setup-grid">
@@ -168,13 +140,13 @@
             <div class="redirect-status" id="redirect-status"></div>
           </div>
         </section>
-        <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Anmeldung"></section>
+        <section class="panel auth-login-panel" id="auth-login-panel" aria-label="Sign in" data-i18n-aria-label="history.signIn"></section>
       </section>
     </main>
-    <div id="customer-record-modal"></div>
 
-    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
-    <script src="../i18n.js?v=v1.0.1-i18n"></script>
-    <script src="./app.js?v=web-demo-20260622i"></script>
+    <script src="./messages.js?v=b2ba19b928750eb3"></script>
+    <script src="../i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="../demo-runtime.js?v=b2ba19b928750eb3"></script>
+    <script src="./app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

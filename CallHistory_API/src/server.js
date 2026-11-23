@@ -4,10 +4,10 @@ const fsp = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
+const { loadEnvFile, parseEnvFlag, guardRequest, requestUrl, staticCacheControl, readPublicFile } = require("./server-safety.cjs");
 
 const ROOT = process.cwd();
 const PUBLIC_DIR = path.join(ROOT, "public");
-const FIXTURES_DIR = path.join(ROOT, "fixtures");
 const APP_CONFIG_NAME = "CallHistory_API";
 
 function resolveMaybeRelative(file) {
@@ -27,25 +27,6 @@ function configuredLocalConfigDir() {
   return fs.existsSync(fallback) ? fallback : "";
 }
 
-function loadEnvFile(envFile) {
-  if (!envFile || !fs.existsSync(envFile)) return false;
-  const text = fs.readFileSync(envFile, "utf8");
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const separator = trimmed.indexOf("=");
-    if (separator === -1) continue;
-    const key = trimmed.slice(0, separator).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || Object.hasOwn(process.env, key)) continue;
-    let value = trimmed.slice(separator + 1).trim();
-    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    process.env[key] = value;
-  }
-  return true;
-}
-
 function loadLocalEnv(appName) {
   const configDir = configuredLocalConfigDir();
   const candidates = [
@@ -53,7 +34,7 @@ function loadLocalEnv(appName) {
     path.join(ROOT, ".env"),
     configDir ? path.join(configDir, "env", `${appName}.env`) : "",
   ];
-  candidates.find(loadEnvFile);
+  candidates.find(file => loadEnvFile(file));
 }
 
 function dataDirForApp(appName, envName) {
@@ -63,14 +44,20 @@ function dataDirForApp(appName, envName) {
   return configDir ? path.join(configDir, "data", appName) : path.join(ROOT, "data");
 }
 
-loadLocalEnv(APP_CONFIG_NAME);
+function failConfiguration(error) {
+  console.error(`Configuration error: ${error.message}`);
+  process.exit(1);
+}
+
+try { loadLocalEnv(APP_CONFIG_NAME); }
+catch (error) { failConfiguration(error); }
 
 const DATA_DIR = dataDirForApp(APP_CONFIG_NAME, "CALLHISTORY_DATA_DIR");
 const TOKEN_FILE = path.join(DATA_DIR, "callhistory-token.json");
 const OAUTH_STATE_FILE = path.join(DATA_DIR, "callhistory-oauth-state.json");
 const DEFAULT_AUTH_URL = "https://sso.cloud-cfg.com/realms/login/protocol/openid-connect/auth";
 const DEFAULT_TOKEN_URL = "https://sso.cloud-cfg.com/realms/login/protocol/openid-connect/token";
-const DEFAULT_API_BASE_URL = "https://api.nfon.com/call-history";
+const DEFAULT_API_BASE_URL = "https://start.cloudya.com/api/callhistory";
 const DEFAULT_RECORDS_PATH = "/records";
 const DEFAULT_PORT = 3000;
 const DEFAULT_JSON_LIMIT = 512 * 1024;
@@ -78,6 +65,7 @@ const DEMO_CALL_HISTORY_CALLS_PER_DAY = 20;
 const csrfToken = crypto.randomBytes(32).toString("base64url");
 
 const MIME_TYPES = {
+  ".woff2": "font/woff2",
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
@@ -90,9 +78,7 @@ const MIME_TYPES = {
 };
 
 function envFlag(name, fallback = false) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+  return parseEnvFlag(name, process.env[name], fallback);
 }
 
 function trimTrailingSlash(value) {
@@ -135,12 +121,22 @@ function formatBytes(bytes) {
   return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
+function integerSetting(name, fallback, min, max) {
+  if (process.env[name] === undefined) return fallback;
+  const raw = process.env[name].trim();
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`Invalid integer configuration: ${name} (expected ${min}–${max})`);
+  }
+  return value;
+}
+
 function readConfig() {
   const port = Number(process.env.PORT || DEFAULT_PORT);
   const publicBaseUrl = trimTrailingSlash(process.env.CALLHISTORY_PUBLIC_BASE_URL || process.env.PUBLIC_BASE_URL || "http://localhost:3000");
   const config = {
     appName: process.env.APP_NAME || "nfon-callhistory-api-showcase",
-    appVersion: process.env.APP_VERSION || "0.1.0",
+    appVersion: process.env.APP_VERSION || "1.2.0",
     host: process.env.HOST || "127.0.0.1",
     port,
     publicBaseUrl,
@@ -152,7 +148,11 @@ function readConfig() {
     apiBaseUrl: process.env.CALLHISTORY_API_BASE_URL || DEFAULT_API_BASE_URL,
     callsPath: process.env.CALLHISTORY_CALLS_PATH || process.env.CALLHISTORY_RECORDS_PATH || DEFAULT_RECORDS_PATH,
     recordDetailsPath: process.env.CALLHISTORY_RECORD_DETAILS_PATH || process.env.CALLHISTORY_TRANSCRIPTS_PATH || `${DEFAULT_RECORDS_PATH}/{uuid}`,
-    limit: Number(process.env.CALLHISTORY_LIMIT || 50),
+    limit: integerSetting("CALLHISTORY_LIMIT", 100, 1, 500),
+    maxRequests: integerSetting("CALLHISTORY_MAX_REQUESTS", 100, 1, 1000),
+    maxRecords: integerSetting("CALLHISTORY_MAX_RECORDS", 10000, 1, 100000),
+    timeoutMs: integerSetting("CALLHISTORY_TIMEOUT_MS", 15000, 100, 2147483647),
+    pagingBudgetMs: integerSetting("CALLHISTORY_PAGING_BUDGET_MS", 30000, 250, 60000),
     queryParams: {
       start: process.env.CALLHISTORY_QUERY_START_PARAM || "from",
       end: process.env.CALLHISTORY_QUERY_END_PARAM || "to",
@@ -174,14 +174,25 @@ function readConfig() {
   return config;
 }
 
-const config = readConfig();
+let config;
+try { config = readConfig(); }
+catch (error) { failConfiguration(error); }
 const allowedOrigins = new Set([
   ...localhostOriginVariants(`http://localhost:${config.port}`),
   ...localhostOriginVariants(`http://127.0.0.1:${config.port}`),
   ...localhostOriginVariants(config.publicBaseUrl),
-  ...localhostOriginVariants(config.redirectUri),
   ...splitOrigins(config.allowedOrigin).flatMap(localhostOriginVariants),
 ]);
+let sessionGeneration = 0;
+// Public context identity, independent of credentials and account display text.
+// The boot nonce prevents a persisted session from reusing an old process's ID.
+const sessionRevisionBase = crypto.randomBytes(18).toString("base64url");
+let oauthGeneration = 0;
+let refreshInFlight = null;
+// Undefined means not loaded; null is an explicitly invalidated session.
+let sessionToken;
+let tokenMutationTail = Promise.resolve();
+const oauthStates = new Map();
 const userAgent = `${config.appName}/${config.appVersion}`;
 const runtimeSettings = {
   authMode: "env",
@@ -327,8 +338,16 @@ async function repairPrivateFileMode(file) {
 
 async function writePrivateJson(file, body) {
   await ensureDataDir();
-  await fsp.writeFile(file, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
-  await repairPrivateFileMode(file);
+  const candidate = path.join(path.dirname(file), `.${path.basename(file)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fsp.writeFile(candidate, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await fsp.chmod(candidate, 0o600);
+    // The rename is the commit. Do not add fallible persistence work after it.
+    await fsp.rename(candidate, file);
+  } catch (error) {
+    await fsp.rm(candidate, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function repairRuntimeFileModes() {
@@ -409,33 +428,105 @@ function normalizeToken(body, fallback = {}) {
 }
 
 function readStoredToken() {
+  if (sessionToken !== undefined) return sessionToken;
   if (config.envAccessToken) {
-    return normalizeToken({
+    sessionToken = normalizeToken({
       access_token: config.envAccessToken,
       refresh_token: config.envRefreshToken,
     }, { expiresAt: Date.now() + 60 * 60 * 1000, source: "env" });
+  } else {
+    sessionToken = safeReadJson(TOKEN_FILE, null);
   }
-  return safeReadJson(TOKEN_FILE, null);
+  return sessionToken;
 }
 
-async function writeStoredToken(token) {
-  await writePrivateJson(TOKEN_FILE, token);
+function queueTokenMutation(operation) {
+  const result = tokenMutationTail.then(operation);
+  tokenMutationTail = result.catch(() => {});
+  return result;
+}
+
+function requireSessionGeneration(generation) {
+  if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+}
+
+async function writeStoredToken(token, generation, { newSession = false } = {}) {
+  return queueTokenMutation(async () => {
+    let previousToken;
+    if (newSession) {
+      if (generation !== oauthGeneration) throw httpError(401, "OAuth login is no longer valid");
+      previousToken = readStoredToken();
+      // A new OAuth login owns a new generation, even without a prior logout.
+      // Hide the previous token while persisting so no request can refresh it
+      // under the new generation. Other tabs retain their single-use PKCE states.
+      generation = ++sessionGeneration;
+      sessionToken = null;
+    } else requireSessionGeneration(generation);
+    try {
+      await writePrivateJson(TOKEN_FILE, token);
+    } catch (error) {
+      // A failed replacement keeps the last committed session. A concurrent
+      // logout owns its invalidation and must never be undone by this catch.
+      if (newSession && generation === sessionGeneration) sessionToken = previousToken;
+      throw error;
+    }
+    if (generation !== sessionGeneration) {
+      // Logout invalidates memory immediately. Remove a write that completed
+      // afterwards before any queued logout or newer login may touch the file.
+      await fsp.rm(TOKEN_FILE, { force: true });
+      requireSessionGeneration(generation);
+    }
+    sessionToken = token;
+    return generation;
+  });
 }
 
 async function clearStoredToken() {
-  await Promise.allSettled([
-    fsp.rm(TOKEN_FILE, { force: true }),
-    fsp.rm(OAUTH_STATE_FILE, { force: true }),
-  ]);
+  sessionGeneration += 1;
+  oauthGeneration += 1;
+  oauthStates.clear();
+  sessionToken = null;
+  config.envAccessToken = "";
+  config.envRefreshToken = "";
+  await queueTokenMutation(async () => {
+    // Keep the queue until every deletion finishes, even when one fails early.
+    // A pending old deletion must never reach a later login's token file.
+    const removals = await Promise.allSettled([
+      fsp.rm(TOKEN_FILE, { force: true }),
+      fsp.rm(OAUTH_STATE_FILE, { force: true }),
+    ]);
+    const failure = removals.find(result => result.status === "rejected");
+    if (failure) throw failure.reason;
+  });
+}
+
+async function fetchUpstream(url, options = {}) {
+  return fetch(url, { ...options, signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(config.timeoutMs)]) : AbortSignal.timeout(config.timeoutMs) });
+}
+
+async function expireSession() {
+  await clearStoredToken();
+  throw httpError(401, "Login with NFON is required for live call history");
 }
 
 async function refreshAccessToken(token) {
+  const generation = sessionGeneration;
+  if (refreshInFlight?.generation === generation) return refreshInFlight.promise;
+  const pending = { generation };
+  pending.promise = performTokenRefresh(token, generation).finally(() => {
+    if (refreshInFlight === pending) refreshInFlight = null;
+  });
+  refreshInFlight = pending;
+  return pending.promise;
+}
+
+async function performTokenRefresh(token, generation) {
   if (!config.oauthConfigured || !token?.refreshToken) return token;
   const form = tokenRequestParams({
     grant_type: "refresh_token",
     refresh_token: token.refreshToken,
   });
-  const response = await fetch(config.tokenUrl, {
+  const response = await fetchUpstream(config.tokenUrl, {
     method: "POST",
     headers: {
       "Accept": "application/json",
@@ -446,21 +537,25 @@ async function refreshAccessToken(token) {
   });
   const body = await readResponseBody(response);
   if (!response.ok) {
-    throw new Error(`Token refresh failed with HTTP ${response.status}: ${formatApiError(body)}`);
+    if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+    if (response.status === 401 || body?.error === "invalid_grant") return expireSession();
+    throw new Error(`Token refresh failed with HTTP ${response.status}`);
   }
+  if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
   const nextToken = normalizeToken(body, token);
-  await writeStoredToken(nextToken);
+  await writeStoredToken(nextToken, generation);
   return nextToken;
 }
 
 async function getAccessToken() {
   const token = readStoredToken();
   if (!token?.accessToken) {
-    throw new Error("Login with NFON token is missing");
+    throw httpError(401, "Login with NFON is required for live call history");
   }
-  if (token.expiresAt && token.expiresAt - Date.now() < 45_000 && token.refreshToken && !config.envAccessToken) {
+  if (token.expiresAt && token.expiresAt - Date.now() < 45_000 && token.refreshToken) {
     return (await refreshAccessToken(token)).accessToken;
   }
+  if (token.expiresAt && token.expiresAt <= Date.now()) return expireSession();
   return token.accessToken;
 }
 
@@ -529,8 +624,21 @@ function officialApiFilters(filters) {
   return out;
 }
 
+function withinSignal(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
 async function liveCallHistory(filters) {
-  const accessToken = await getAccessToken();
+  const generation = sessionGeneration;
+  const deadline = Date.now() + config.pagingBudgetMs;
+  const budgetSignal = AbortSignal.timeout(config.pagingBudgetMs);
+  let accessToken = await withinSignal(getAccessToken(), budgetSignal);
+  let refreshed = false;
   const { start, end } = dateWindow(filters);
   const url = apiUrl(config.callsPath);
   url.searchParams.set(config.queryParams.start, String(unixSeconds(start)));
@@ -539,42 +647,110 @@ async function liveCallHistory(filters) {
   url.searchParams.set("sort", "desc");
   const apiFilters = officialApiFilters(filters);
   if (apiFilters.length) url.searchParams.set(config.queryParams.filter, apiFilters.join(","));
-  if (filters.party) url.searchParams.set(config.queryParams.search, filters.party);
-
-  const response = await fetch(url, {
-    headers: {
-      "Accept": "application/json",
-      "Authorization": `Bearer ${accessToken}`,
-      "User-Agent": userAgent,
-    },
-  });
-  const body = await readResponseBody(response);
-  if (!response.ok) {
-    throw new Error(`Call History API failed with HTTP ${response.status}: ${formatApiError(body)}`);
+  // Search locally after paging: phone formatting must not change the results.
+  const records = [];
+  const seen = new Set();
+  let offset = 0;
+  let complete = false;
+  let requests = 0;
+  while (records.length < config.maxRecords && requests < config.maxRequests && Date.now() < deadline) {
+    requests += 1;
+    url.searchParams.set("offset", String(offset));
+    let response;
+    try { response = await fetchUpstream(url, { signal: budgetSignal, headers: {
+      Accept: "application/json", Authorization: "Bearer " + accessToken, "User-Agent": userAgent
+    }}); } catch (error) {
+      if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+      if (records.length) break;
+      throw error;
+    }
+    if (generation !== sessionGeneration) {
+      response.body?.cancel().catch(() => {});
+      throw httpError(401, "Login with NFON is required for live call history");
+    }
+    // Authorization is decided by the status, even if its error body is unreadable.
+    if (response.status === 401) {
+      response.body?.cancel().catch(() => {});
+      const current = readStoredToken();
+      if (!refreshed && current?.refreshToken) {
+        refreshed = true;
+        accessToken = current.accessToken !== accessToken ? current.accessToken : (await withinSignal(refreshAccessToken(current), budgetSignal)).accessToken;
+        if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+        continue;
+      }
+      return expireSession();
+    }
+    if (!response.ok) {
+      response.body?.cancel().catch(() => {});
+      if (records.length && response.status !== 403) break;
+      throw new Error("Call History API failed with HTTP " + response.status);
+    }
+    let body;
+    try { body = await readResponseBody(response); } catch (error) {
+      if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+      if (records.length) break;
+      throw error;
+    }
+    if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live call history");
+    let page;
+    try {
+      page = extractList(body);
+      if (page.some(record => !record || typeof record !== "object" || Array.isArray(record))) {
+        throw new Error("Call History API returned an unexpected response");
+      }
+    }
+    catch (error) { if (records.length) break; throw error; }
+    let added = 0;
+    for (const record of page) {
+      const key = record.uuid || record.id || JSON.stringify(record);
+      if (seen.has(key)) continue;
+      seen.add(key); records.push(record); added += 1;
+    }
+    offset += page.length;
+    // The provider can cap page size. Only an empty page proves exhaustion;
+    // undocumented totals and short pages are not completeness guarantees.
+    if (!page.length) { complete = true; break; }
+    if (!added) break; // An upstream ignoring offset must not loop forever or claim completeness.
   }
-  return normalizeCalls(extractList(body), "callhistory-live");
+  const normalized = normalizeCalls(records.slice(0, config.maxRecords), "callhistory-live");
+  const calls = normalized.filter(call => call.startedAt);
+  return { calls, pagination: { complete, loaded: calls.length, limit: config.maxRecords }, invalidRecords: normalized.length - calls.length };
 }
 
 async function liveTranscript(transcriptId) {
-  const accessToken = await getAccessToken();
+  const generation = sessionGeneration;
+  let accessToken = await getAccessToken();
   const url = apiUrl(pathWithId(config.recordDetailsPath, transcriptId));
-  url.searchParams.set(config.queryParams.complete, "true");
-  const response = await fetch(url, {
-    headers: {
-      "Accept": "application/json",
-      "Authorization": `Bearer ${accessToken}`,
-      "User-Agent": userAgent,
-    },
-  });
-  const body = await readResponseBody(response);
-  if (!response.ok) {
-    throw new Error(`Transcript API failed with HTTP ${response.status}: ${formatApiError(body)}`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetchUpstream(url, {
+      headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}`, "User-Agent": userAgent },
+    });
+    if (generation !== sessionGeneration) {
+      response.body?.cancel().catch(() => {});
+      throw httpError(401, "Login with NFON is required for live transcript details");
+    }
+    if (response.status === 401) {
+      response.body?.cancel().catch(() => {});
+      const current = readStoredToken();
+      if (!attempt && current?.refreshToken) {
+        accessToken = current.accessToken !== accessToken ? current.accessToken : (await refreshAccessToken(current)).accessToken;
+        if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live transcript details");
+        continue;
+      }
+      return expireSession();
+    }
+    if (!response.ok) {
+      response.body?.cancel().catch(() => {});
+      throw new Error(`Transcript API failed with HTTP ${response.status}`);
+    }
+    const body = await readResponseBody(response);
+    if (generation !== sessionGeneration) throw httpError(401, "Login with NFON is required for live transcript details");
+    return normalizeTranscript(body, "callhistory-live");
   }
-  return normalizeTranscript(body, "callhistory-live");
 }
 
 function extractList(body) {
-  if (!body) return [];
+  if (!body) throw new Error("Call History API returned an unexpected response");
   if (Array.isArray(body)) return body;
   if (Array.isArray(body.items)) return body.items;
   if (Array.isArray(body.calls)) return body.calls;
@@ -582,7 +758,7 @@ function extractList(body) {
   if (Array.isArray(body.entries)) return body.entries;
   if (Array.isArray(body.data)) return body.data;
   if (Array.isArray(body.collection?.items)) return body.collection.items;
-  return [];
+  throw new Error("Call History API returned an unexpected response");
 }
 
 function pickField(item, keys, fallback = "") {
@@ -597,16 +773,16 @@ function normalizeParty(value, fallbackLabel = "") {
   if (!value || typeof value !== "object") {
     return {
       number: String(value || ""),
-      name: fallbackLabel || String(value || "Unbekannt"),
+      name: String(value || ""),
       email: "",
       type: "",
     };
   }
   return {
     number: String(pickField(value, ["number", "phoneNumber", "phone", "uri"], "")),
-    name: String(pickField(value, ["name", "displayName", "label"], fallbackLabel || value.number || "Unbekannt")),
+    name: String(pickField(value, ["name", "displayName", "label"], value.number || "")),
     email: String(pickField(value, ["email", "mail"], "")),
-    type: String(pickField(value, ["type", "kind", "destination_type"], "")),
+    type: String(pickField(value, ["service", "type", "kind", "destination_type"], "")),
     context: String(pickField(value, ["context"], "")),
   };
 }
@@ -615,16 +791,30 @@ function normalizeDirection(value) {
   const text = String(value || "").toLowerCase();
   if (["in", "incoming", "inbound", "eingehend"].includes(text)) return "inbound";
   if (["out", "outgoing", "outbound", "ausgehend"].includes(text)) return "outbound";
-  return text || "unknown";
+  return "unknown";
 }
 
 function normalizeOutcome(value) {
   const text = String(value || "").toLowerCase();
-  if (["answered", "answer", "connected", "completed", "ok", "angenommen"].includes(text)) return "answered";
-  if (["missed", "no_answer", "no-answer", "abandoned", "verpasst"].includes(text)) return "missed";
-  if (["cancelled", "canceled", "cancel"].includes(text)) return "cancelled";
-  if (["failed", "busy", "rejected", "blocked"].includes(text)) return text === "busy" ? "busy" : "failed";
-  return text || "unknown";
+  if (["answered"].includes(text)) return "answered";
+  if (["missed"].includes(text)) return "missed";
+  if (["cancelled"].includes(text)) return "cancelled";
+  return "unknown";
+}
+
+function safeIsoDate(value) {
+  if (!value) return "";
+  // Numeric epochs are accepted only when their magnitude unambiguously denotes
+  // modern Unix seconds or milliseconds. Ambiguous numbers remain undated.
+  const numeric = typeof value === "number" || /^\d{10,13}$/.test(String(value)) ? Number(value) : NaN;
+  const date = new Date(Number.isFinite(numeric) ? (numeric >= 1e9 && numeric < 1e11 ? numeric * 1000 : numeric >= 1e12 && numeric < 1e14 ? numeric : NaN) : value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
+function callQueue(item) {
+  const destinations = [item.callee, item.to, ...(Array.isArray(item.history) ? item.history.filter(hop => hop && typeof hop === "object").map(hop => hop.callee) : []), item.caller, item.from];
+  const queue = destinations.find(party => ["queue", "skill"].includes(String(party?.service || party?.destination_type || "").toLowerCase()));
+  return queue ? normalizeParty(queue) : null;
 }
 
 function normalizeCalls(items, source) {
@@ -646,31 +836,28 @@ function normalizeCalls(items, source) {
     const user = item.user || item.owner || item.agent || (direction === "outbound" ? from : to);
     return {
       id: String(pickField(item, ["id", "callId", "uuid", "conversationId"], `${source}-${index + 1}`)),
-      startedAt: startedAt ? new Date(startedAt).toISOString() : new Date().toISOString(),
-      endedAt: endedAt ? new Date(endedAt).toISOString() : "",
+      startedAt: safeIsoDate(startedAt),
+      endedAt: safeIsoDate(endedAt),
+      queue: source === "demo" && item.queue ? normalizeParty(item.queue) : callQueue(item),
       direction,
       outcome,
       durationSeconds,
       from,
       to,
       user: normalizeParty(user, "User"),
-      transcriptId: String(pickField(item, ["transcriptId", "transcript_id", "summaryId"], transcription ? item.uuid : "")),
+      transcriptId: transcription?.available === false ? "" : String(pickField(item, ["transcriptId", "transcript_id", "summaryId"], transcription?.available === true ? item.uuid : "")),
       summary: String(pickField(item, ["summary", "callSummary", "note"], transcription?.summary || "")),
       contact: item.contact || null,
-      ticket: item.ticket || null,
       tags: Array.isArray(item.tags) ? item.tags : [
         transcription?.available ? "transcription" : "",
         item.trunk_code ? `trunk ${item.trunk_code}` : "",
       ].filter(Boolean),
       source,
+      ...(source === "demo" && item.demoTemplate === "call-history-v1" ? { demoTemplate: item.demoTemplate } : {}),
       rawType: item.type || "",
-      transcriptionAvailable: Boolean(transcription?.available),
+      transcriptionAvailable: transcription ? transcription.available === true : Boolean(item.transcriptId || item.transcript_id),
     };
   });
-}
-
-function loadFixture(fileName, fallback) {
-  return safeReadJson(path.join(FIXTURES_DIR, fileName), fallback);
 }
 
 function loadDemoCalls() {
@@ -678,17 +865,14 @@ function loadDemoCalls() {
 }
 
 function loadDemoTranscript(transcriptId) {
-  const transcripts = [
-    ...createDemoCallHistoryData().transcripts,
-    ...loadFixture("demo-transcripts.json", []),
-  ];
+  const transcripts = createDemoCallHistoryData().transcripts;
   const found = transcripts.find((item) => String(item.id) === String(transcriptId));
   if (!found) {
     return {
       ok: false,
       id: transcriptId,
       source: "demo",
-      summary: "Für diesen Demo-Call ist kein Transcript hinterlegt.",
+      summary: "No transcript is available for this demo call.",
       text: "",
       topics: [],
     };
@@ -744,12 +928,13 @@ function createDemoCallHistoryData() {
       const outcome = answered
         ? "answered"
         : direction === "outbound" && seededDemoPick(index * 11 + dayOffset, 100) < 55
-          ? "busy"
+          ? "cancelled"
           : "missed";
       const durationSeconds = outcome === "answered"
         ? 65 + seededDemoPick(index * 37 + dayOffset * 19, 870)
         : 0;
       const startedAt = demoCallHistoryStartedAt(date, index, dayOffset);
+      if (startedAt.getTime() + durationSeconds * 1000 > today.getTime()) continue;
       const id = `demo-call-${demoDayKey(startedAt).replaceAll("-", "")}-${String(index + 1).padStart(3, "0")}`;
       const hasTranscript = outcome === "answered"
         && seededDemoPick(index * 41 + dayOffset * 23, 100) < (direction === "inbound" ? 72 : 46);
@@ -784,6 +969,8 @@ function demoCallAt({ id, startedAt, direction, outcome, transcriptId, contactNa
   return {
     id,
     relativeMinutesAgo,
+    queue: { name: queue, number: "", service: "queue" },
+    demoTemplate: "call-history-v1",
     startedAt: startedAt.toISOString(),
     endedAt,
     direction,
@@ -797,41 +984,28 @@ function demoCallAt({ id, startedAt, direction, outcome, transcriptId, contactNa
     durationSeconds,
     outcome,
     transcriptId,
-    summary: `${contactName} · ${queue} · Demo-Anlage`,
+    summary: `${contactName} · ${queue} · Demo system`,
     contact: company ? { name: contactName, company, email } : null,
-    ticket: outcome === "missed"
-      ? null
-      : {
-        id: `NFON-${id.slice(-7).toUpperCase()}`,
-        title: `${queue} Demo Vorgang`,
-        status: outcome === "answered" ? "open" : "pending",
-      },
     tags: ["demo", queue.toLowerCase().replaceAll(" ", "-")],
     source: "demo",
   };
 }
 
 function demoCallHistoryTranscript(call) {
-  const customerName = call.contact?.name || call.from.name;
-  const company = call.contact?.company || "Demo-Anlage";
+  const customerName = call.contact?.name || (call.direction === "outbound" ? call.to.name : call.from.name);
+  const company = call.contact?.company || "Demo system";
   return {
     ok: true,
     id: call.transcriptId,
     callId: call.id,
-    language: "de",
+    language: "en",
     confidence: 0.89 + seededDemoPick(call.relativeMinutesAgo, 9) / 100,
-    summary: `${customerName} wurde als Demo-Call ausgewertet und dem Konto ${company} zugeordnet. Ticket, Owner und Abrechnung wurden vorbereitet.`,
+    summary: `${customerName} from ${company} discussed the current service request. The next steps were documented.`,
     text: [
-      `${customerName}: Wir brauchen eine kurze Rueckmeldung zum aktuellen Vorgang.`,
-      `${call.user.name}: Ich pruefe den Status und dokumentiere die naechsten Schritte.`,
-      "System: Transcript, Ticketvorschlag und CRM-Zuordnung wurden automatisch vorbereitet.",
+      `${customerName}: We need an update on the current service request.`,
+      `${call.user.name}: I will check the status and document the next steps.`,
     ].join("\n"),
-    topics: ["Demo", "Call History", call.user.name, call.contact?.company || "Unbekannt"],
-    ticketSuggestion: {
-      id: call.ticket?.id || "NFON-DEMO",
-      title: call.ticket?.title || "Demo Ticket",
-      priority: call.outcome === "missed" ? "hoch" : "normal",
-    },
+    topics: ["Demo", "Call History", call.user.name, call.contact?.company || "Unknown"],
     assignee: { name: call.user.name, email: call.user.email },
   };
 }
@@ -844,15 +1018,6 @@ function demoCallHistoryStartedAt(date, index, dayOffset) {
     seededDemoPick(index * 47 + dayOffset, 60),
     0,
   );
-  const current = new Date();
-  if (dayOffset === 0 && startedAt > current) {
-    const minutesSinceBusinessStart = Math.max(20, (current.getHours() - 8) * 60 + current.getMinutes());
-    const minutesBack = 5 + seededDemoPick(index * 53 + dayOffset, Math.min(540, minutesSinceBusinessStart));
-    const sameDayStart = new Date(current);
-    sameDayStart.setHours(0, 0, 0, 0);
-    const adjusted = new Date(current.getTime() - minutesBack * 60000);
-    return adjusted < sameDayStart ? sameDayStart : adjusted;
-  }
   return startedAt;
 }
 
@@ -896,17 +1061,19 @@ function normalizeTranscript(body, source) {
   const transcriptEntries = Array.isArray(transcription?.transcript) ? transcription.transcript : [];
   const transcriptText = transcriptEntries
     .filter((entry) => entry?.event === "speech" && entry.text)
-    .map((entry) => `${entry.source || "unknown"}: ${entry.text}`)
+    .map((entry) => {
+      const party = entry.source === "caller" ? item.caller : entry.source === "callee" ? item.callee : null;
+      return `${party?.name || party?.number || entry.source || ""}: ${entry.text}`;
+    })
     .join("\n");
   return {
     ok: true,
     id: String(pickField(item, ["id", "transcriptId", "uuid"], "")),
     source,
-    language: String(pickField(item, ["language", "locale"], transcription?.language_autodetect ? "auto" : "de")),
+    language: String(pickField(item, ["language", "locale"], transcription?.language_autodetect ? "auto" : "")),
     summary: String(pickField(item, ["summary", "callSummary"], transcription?.summary || "")),
     text: String(pickField(item, ["text", "content"], transcriptText)),
     topics: Array.isArray(item?.topics) ? item.topics : [],
-    ticketSuggestion: item?.ticketSuggestion || null,
     assignee: item?.assignee || null,
     confidence: Number(pickField(item, ["confidence"], 0)) || 0,
     transcript: transcriptEntries,
@@ -914,12 +1081,23 @@ function normalizeTranscript(body, source) {
   };
 }
 
+function phoneSearchDigits(value) {
+  return String(value || "").replace(/\(0\)/g, "").replace(/^\s*00/, "+").replace(/\D/g, "");
+}
+function phoneSearchMatches(value, query) {
+  const haystack = phoneSearchDigits(value), needle = phoneSearchDigits(query);
+  if (!needle) return false;
+  return haystack.includes(needle) || (needle.startsWith("0") && needle.length >= 7 && haystack.includes(needle.slice(1)));
+}
+
 function filterCalls(calls, filters) {
   const { start, end } = dateWindow(filters);
   const party = filters.party.trim().toLowerCase();
+  const digits = party.replace(/\D/g, "");
+  const phoneSearch = /^[+\d\s()./-]+$/.test(party) && Boolean(digits);
   return calls.filter((call) => {
     const started = new Date(call.startedAt);
-    if (started < start || started > end) return false;
+    if (!call.startedAt || started < start || started > end) return false;
     if (filters.direction !== "all" && call.direction !== filters.direction) return false;
     if (filters.outcome !== "all" && call.outcome !== filters.outcome) return false;
     if (party) {
@@ -932,10 +1110,9 @@ function filterCalls(calls, filters) {
         call.user?.number,
         call.contact?.name,
         call.contact?.company,
-        call.ticket?.id,
-        call.ticket?.title,
       ].filter(Boolean).join(" ").toLowerCase();
-      if (!haystack.includes(party)) return false;
+      const phoneMatch = phoneSearch && [call.from?.number, call.to?.number, call.user?.number].some(value => phoneSearchMatches(value, party));
+      if (!haystack.includes(party) && !phoneMatch) return false;
     }
     return true;
   });
@@ -943,7 +1120,7 @@ function filterCalls(calls, filters) {
 
 function statusPayload() {
   const token = readStoredToken();
-  const authenticated = Boolean(token?.accessToken);
+  const authenticated = Boolean(token?.accessToken && (!token.expiresAt || token.expiresAt > Date.now() || token.refreshToken));
   return {
     ok: true,
     configured: config.configured,
@@ -951,8 +1128,10 @@ function statusPayload() {
     historyConfigured: config.historyConfigured,
     transcriptsConfigured: config.transcriptsConfigured,
     authenticated,
+    sessionRevision: `${sessionRevisionBase}:${sessionGeneration}`,
+    appId: "core-history",
     tokenExpiresAt: token?.expiresAt || 0,
-    account: authenticated ?  `${token.userName} (${token.userEmail})` : "Login erforderlich",
+    account: authenticated ? [token.userName, token.userEmail].filter(Boolean).join(" · ") : "",
     redirectUri: config.redirectUri,
     publicBaseUrl: config.publicBaseUrl,
     csrfToken,
@@ -980,30 +1159,27 @@ function applyBrowserLoginSettings(payload) {
     redirectUri: String(payload.redirectUri || "").trim(),
   };
   if (!next.clientId) {
-    const error = new Error("Client-ID ist erforderlich");
+    const error = new Error("Client ID is required");
     error.statusCode = 400;
     throw error;
   }
-  config.clientId = next.clientId || config.clientId;
   if (next.redirectUri) {
     let parsed;
     try {
       parsed = new URL(next.redirectUri);
     } catch {
-      const error = new Error("Redirect URI ist keine gültige URL");
+      const error = new Error("Redirect URI is not a valid URL");
       error.statusCode = 400;
       throw error;
     }
     if (!["http:", "https:"].includes(parsed.protocol) || parsed.hash) {
-      const error = new Error("Redirect URI muss HTTP/HTTPS sein und darf kein Fragment enthalten");
+      const error = new Error("Redirect URI must use HTTP/HTTPS and must not contain a fragment");
       error.statusCode = 400;
       throw error;
     }
     config.redirectUri = parsed.toString().replace(/\/$/, "");
-    for (const origin of localhostOriginVariants(config.redirectUri)) {
-      allowedOrigins.add(origin);
-    }
   }
+  config.clientId = next.clientId;
   config.envAccessToken = "";
   config.envRefreshToken = "";
   runtimeSettings.authMode = "browser";
@@ -1029,7 +1205,7 @@ function demoCallsPayload(filters, reason = "") {
   };
 }
 
-async function handleAuthLogin(req, res) {
+async function handleAuthLogin(req, res, url) {
   assertAllowedOrigin(req);
   const site = req.headers["sec-fetch-site"];
   if (site && !["same-origin", "same-site", "none"].includes(String(site))) {
@@ -1043,11 +1219,12 @@ async function handleAuthLogin(req, res) {
   const state = crypto.randomBytes(18).toString("base64url");
   const codeVerifier = base64Url(crypto.randomBytes(48));
   const codeChallenge = sha256Base64Url(codeVerifier);
-  await writePrivateJson(OAUTH_STATE_FILE, {
-    state,
-    codeVerifier,
-    createdAt: new Date().toISOString(),
-  });
+  for (const [key, entry] of oauthStates) if (Date.now() - entry.createdAt > 600000) oauthStates.delete(key);
+  if (oauthStates.size >= 10) oauthStates.delete(oauthStates.keys().next().value);
+  const theme = ["classic", "admin-portal"].includes(url.searchParams.get("theme")) ? url.searchParams.get("theme") : "";
+  const lang = ["en", "de", "fr", "es", "it", "nl", "pl", "pt", "sv", "da", "fi", "cs"].includes(url.searchParams.get("lang")) ? url.searchParams.get("lang") : "";
+  const cockpit = validatedCockpit(url.searchParams.get("cockpit"), url.origin);
+  oauthStates.set(state, { codeVerifier, createdAt: Date.now(), generation: oauthGeneration, theme, lang, cockpit });
 
   const authUrl = new URL(config.authUrl);
   authUrl.searchParams.set("response_type", "code");
@@ -1060,65 +1237,68 @@ async function handleAuthLogin(req, res) {
   sendRedirect(res, authUrl.toString());
 }
 
+function validatedCockpit(value, currentOrigin) {
+  if (!value) return "";
+  try {
+    const target = new URL(value);
+    const current = new URL(currentOrigin);
+    const loopback = hostname => ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+    if (!["http:", "https:"].includes(target.protocol) || target.username || target.password) return "";
+    if (target.origin !== current.origin && !(loopback(target.hostname) && loopback(current.hostname))) return "";
+    target.hash = "";
+    return target.href;
+  } catch { return ""; }
+}
+
+function authReturnPath(auth, preferences = {}) {
+  const query = new URLSearchParams({ auth });
+  if (preferences.theme) query.set("theme", preferences.theme);
+  if (preferences.lang) query.set("lang", preferences.lang);
+  if (preferences.cockpit) query.set("cockpit", preferences.cockpit);
+  return "/?" + query;
+}
+
+function sendAuthFailure(res, preferences) {
+  // Only validated presentation preferences cross origins; no token or provider text.
+  sendRedirect(res, authReturnPath("failed", preferences));
+}
+
 async function handleAuthCallback(req, res, url) {
-  if (url.searchParams.get("error")) {
-    sendError(req, res, 400, "Login with NFON returned an error", {
-      providerError: url.searchParams.get("error"),
-      providerDescription: url.searchParams.get("error_description") || "",
-    });
-    return;
-  }
-
-  const code = url.searchParams.get("code");
-  if (!code) {
-    sendError(req, res, 400, "OAuth callback is missing the authorization code");
-    return;
-  }
-
-  const storedState = safeReadJson(OAUTH_STATE_FILE, null);
   const returnedState = url.searchParams.get("state");
-  const stateAgeMs = storedState?.createdAt ? Date.now() - Date.parse(storedState.createdAt) : Infinity;
-  if (!storedState?.state || !storedState?.codeVerifier || !returnedState) {
-    sendError(req, res, 400, "OAuth state is missing or expired");
-    return;
+  const storedState = oauthStates.get(returnedState);
+  if (!storedState || storedState.generation !== oauthGeneration) { sendAuthFailure(res); return; }
+  if (Date.now() - storedState.createdAt > 600000) {
+    oauthStates.delete(returnedState);
+    sendAuthFailure(res, storedState); return;
   }
-  if (stateAgeMs > 10 * 60 * 1000) {
-    await fsp.rm(OAUTH_STATE_FILE, { force: true });
-    sendError(req, res, 400, "OAuth state expired");
-    return;
-  }
-  if (storedState.state !== returnedState) {
-    await fsp.rm(OAUTH_STATE_FILE, { force: true });
-    sendError(req, res, 400, "OAuth state did not match");
-    return;
-  }
+  oauthStates.delete(returnedState); // Single-use before any asynchronous exchange.
+  const code = url.searchParams.get("code");
+  if (url.searchParams.get("error") || !code) { sendAuthFailure(res, storedState); return; }
 
-  const form = tokenRequestParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: config.redirectUri,
-    code_verifier: storedState.codeVerifier,
-  });
-  const response = await fetch(config.tokenUrl, {
-    method: "POST",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": userAgent,
-    },
-    body: form,
-  });
-  const body = await readResponseBody(response);
-  if (!response.ok) {
-    sendError(req, res, 502, `Token exchange failed with HTTP ${response.status}`, {
-      providerError: formatApiError(body),
+  try {
+    const form = tokenRequestParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: config.redirectUri,
+      code_verifier: storedState.codeVerifier,
     });
-    return;
-  }
-
-  await writeStoredToken(normalizeToken(body));
-  await fsp.rm(OAUTH_STATE_FILE, { force: true });
-  sendRedirect(res, "/?auth=connected");
+    const response = await fetchUpstream(config.tokenUrl, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": userAgent,
+      },
+      body: form,
+    });
+    const body = await readResponseBody(response);
+    if (!response.ok || !body?.access_token || storedState.generation !== oauthGeneration) {
+      sendAuthFailure(res, storedState); return;
+    }
+    const generation = await writeStoredToken(normalizeToken(body), storedState.generation, { newSession: true });
+    requireSessionGeneration(generation);
+    sendRedirect(res, authReturnPath("connected", storedState));
+  } catch { sendAuthFailure(res, storedState); }
 }
 
 function isAuthCallbackRequest(url) {
@@ -1171,16 +1351,19 @@ async function handleApi(req, res, url) {
     }
 
     try {
-      const calls = filterCalls(await liveCallHistory(filters), filters);
+      const result = await liveCallHistory(filters);
+      const calls = filterCalls(result.calls, filters);
       sendJson(req, res, 200, {
         ok: true,
         source: "callhistory-live",
         generatedAt: new Date().toISOString(),
         filters,
         calls,
+        pagination: result.pagination,
+        invalidRecords: result.invalidRecords,
       });
     } catch (error) {
-      sendError(req, res, 502, "Live Call History request failed", {
+      sendError(req, res, error.statusCode || 502, error.statusCode === 401 ? "Login with NFON is required for live call history" : "Live Call History request failed", {
         source: "callhistory-live",
         reason: error.message,
       });
@@ -1204,7 +1387,7 @@ async function handleApi(req, res, url) {
     try {
       sendJson(req, res, 200, await liveTranscript(transcriptId));
     } catch (error) {
-      sendError(req, res, 502, "Live transcript request failed", {
+      sendError(req, res, error.statusCode || 502, error.statusCode === 401 ? "Login with NFON is required for live transcript details" : "Live transcript request failed", {
         source: "callhistory-live",
         reason: error.message,
       });
@@ -1212,20 +1395,6 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (url.pathname === "/api/assignment-preview" && req.method === "POST") {
-    const payload = await readRequestJson(req);
-    sendJson(req, res, 200, {
-      ok: true,
-      dryRun: true,
-      callId: payload.callId || "",
-      transcriptId: payload.transcriptId || "",
-      assignee: payload.assignee || null,
-      ticket: payload.ticket || null,
-      message: "Zuordnungsvorschau erstellt. Es wurde nichts an ein Ticket-System übertragen.",
-      createdAt: new Date().toISOString(),
-    });
-    return;
-  }
 
   sendError(req, res, 404, "API route not found");
 }
@@ -1241,22 +1410,21 @@ async function serveStatic(req, res, url) {
     return;
   }
 
-  const exists = fs.existsSync(filePath) && fs.statSync(filePath).isFile();
-  if (!exists) {
-    const ext = path.extname(filePath);
-    if (!ext || ext === ".html") {
-      filePath = path.join(PUBLIC_DIR, "index.html");
-    } else {
-      sendError(req, res, 404, "File not found");
-      return;
-    }
-  }
-
   const ext = path.extname(filePath);
-  const data = await fsp.readFile(filePath);
+  let data;
+  try { data = await readPublicFile(PUBLIC_DIR, filePath); }
+  catch (error) {
+    const forbidden = error.code === "EACCES";
+    if (forbidden || ["ENOENT", "ENOTDIR", "EISDIR", "ENAMETOOLONG"].includes(error.code)) {
+      sendError(req, res, forbidden ? 403 : 404, forbidden ? "Forbidden" : "File not found"); return;
+    }
+    throw error;
+  }
   res.writeHead(200, {
     "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
-    "Cache-Control": "no-store",
+    // The sandboxed CRM has an opaque origin. Only public font files are shared.
+    ...(ext === ".woff2" && pathname.startsWith("/assets/fonts/") ? { "Access-Control-Allow-Origin": "*" } : {}),
+    "Cache-Control": staticCacheControl(req.url),
   });
   if (req.method === "HEAD") {
     res.end();
@@ -1266,6 +1434,7 @@ async function serveStatic(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (!guardRequest(req, res, { framePaths: ["/crm-demo/", "/crm-demo/index.html", "/crm-demo/offline.html"] })) return;
   try {
     if (req.method === "OPTIONS") {
       assertAllowedOrigin(req);
@@ -1274,13 +1443,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const url = new URL(req.url, `http://${req.headers.host || `${config.host}:${config.port}`}`);
+    const url = requestUrl(req);
     if (req.method === "GET" && isAuthCallbackRequest(url)) {
-      await handleAuthCallback(req, res, url);
+      await handleAuthCallback(req, res, url).catch(() => sendAuthFailure(res));
       return;
     }
     if (url.pathname === "/auth/login" && req.method === "GET") {
-      await handleAuthLogin(req, res);
+      await handleAuthLogin(req, res, url);
       return;
     }
     if (url.pathname === "/auth/call-history/callback" && req.method === "GET") {

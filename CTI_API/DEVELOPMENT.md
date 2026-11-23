@@ -1,7 +1,7 @@
 # CTI API — Developer Notes
 
 Internal reference for developers working on or maintaining this app.
-For the public-facing overview, see `README.md`. For agent/AI guidance, see `AGENTS.md`.
+For the public-facing overview, see `README.md`. Repository maintenance conventions are in `AGENTS.md`.
 
 ## Configuration details
 
@@ -23,6 +23,10 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_CLIENT_SECRET_FILE=
 GOOGLE_REDIRECT_URI=http://localhost:3002/auth/google/callback
+NFON_ALLOW_REMOTE=false
+NFON_ALLOWED_HOSTS=
+NFON_PHONE_COUNTRY_CODE=
+NFON_PHONE_NATIONAL_PREFIX=
 CTI_ALLOW_REMOTE_CONTROL=false
 CTI_ALLOW_REMOTE_READ=false
 CTI_DATA_DIR=
@@ -53,11 +57,53 @@ match that registered value exactly.
 Cross-origin access is not broadly open. For local gateway tests,
 `CTI_ALLOWED_ORIGIN` can be set explicitly. Mutating control actions such as
 Click-to-Dial, restore, and Google sync also require a CSRF token from the local
-UI and are limited to local requests unless `CTI_ALLOW_REMOTE_CONTROL` is
-enabled intentionally. Private read routes for contacts, history, active calls,
-events, and backups stay local unless `CTI_ALLOW_REMOTE_READ` is enabled
-intentionally.
+UI and are local by default. Remote access requires all applicable gates: the shared
+`NFON_ALLOW_REMOTE=true`, explicit `NFON_ALLOWED_HOSTS`, an allowed
+`CTI_ALLOWED_ORIGIN`, and `CTI_ALLOW_REMOTE_CONTROL=true` for mutations or
+`CTI_ALLOW_REMOTE_READ=true` for private reads (including snapshots and events).
+Malformed app flags stop startup; malformed shared boundary flags reject requests
+with 503. Duplicate keys within an env file stop startup.
+
+`NFON_PHONE_COUNTRY_CODE` and `NFON_PHONE_NATIONAL_PREFIX` define optional
+national-to-international contact matching. For Italy, use country code `39`
+and an empty prefix; for Germany, `49` and `0`. Dialing accepts an internal
+extension of 1–6 digits or an explicit international number beginning with + or 00.
+
+At most four browser EventSource connections remain open. Further tabs poll the
+private `/api/snapshot` cache every three seconds and retry SSE after fifteen
+seconds. Snapshot polling does not create additional provider requests. All
+transports close on pagehide and reconnect after bfcache restoration.
 
 Without real credentials, the server still starts for syntax and UI checks.
 Live functions then return setup or credential guidance instead of performing
 API calls.
+
+## Demo mode and presentation
+
+`public/demo-runtime.js` is generated from the shared static adapter. On the local
+CTI pages it is inert until `demo=1` is present. The header Demo switch reloads
+into or out of that isolated browser context; API requests and EventSource are
+then served by synthetic data. Demo dialing, cancellation and contact edits do
+not reach the local backend or alter persisted live history. Setup credentials
+and backup restore stay read-only in this mode. Internal CTI links retain the
+query selection. The static download remains permanently synthetic.
+
+Shared appearance and language behavior comes from the repository's `shared/`
+sources. English is the first-visit default; explicit language choices are stored
+locally. All twelve menu languages cover templates, placeholders and feedback.
+Run `npm run sync:shared` at the repository root after changes to shared assets or
+catalogs; do not hand-edit generated copies.
+
+## History persistence
+
+History appends and restores share serialized persistence. Recovery distinguishes
+valid final JSONL records without a newline from truncated invalid fragments, and
+retry checks use records committed to disk. Restore merges records and preserves
+events received while the import is in progress. Storage failures must remain
+visible instead of reporting an unsuccessful write as persisted.
+
+The stored event identity includes a provider timestamp or the local receive
+timestamp when the provider omits one. It is not a provider replay identifier.
+Do not deduplicate timestamp-free repeated deliveries by comparing their payload
+alone: that could discard legitimate events. The documented event-identity limit
+and its effect on calculated call duration are described in `README.md`.

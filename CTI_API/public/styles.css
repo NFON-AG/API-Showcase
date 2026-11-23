@@ -432,8 +432,28 @@ button:disabled {
   font-weight: 700;
 }
 
+/* Axis labels remain HTML text so SVG scaling cannot change their rendered size. */
 .timeline-line-chart svg {
-  height: 188px;
+  display: block;
+  width: 100%;
+  height: 160px;
+}
+
+.timeline-axis {
+  position: relative;
+  height: 24px;
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.timeline-axis span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
 }
 
 .trend-bar-chart {
@@ -1625,7 +1645,7 @@ tr:last-child td {
 }
 
 .history-contact {
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 34px minmax(min-content, 1fr);
 }
 
 .history-group-row td {
@@ -2150,3 +2170,454 @@ tr:last-child td {
   }
 
 }
+
+/* Admin Portal component adapters, matched to the portal's list and form surfaces. */
+html[data-nfon-theme="admin-portal"] .metrics {
+  gap: 0;
+  margin-bottom: 0;
+  border: 0;
+  border-bottom: 1px solid #d7d9db;
+  background: #f5f6f7;
+}
+html[data-nfon-theme="admin-portal"] .metric {
+  min-width: 0;
+  min-height: 120px;
+  display: grid;
+  grid-template-rows: minmax(24px, auto) 32px minmax(24px, auto);
+  align-content: start;
+  padding: 24px;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+html[data-nfon-theme="admin-portal"] .metric-label {
+  color: #252626;
+  font-size: var(--nfon-type-body);
+  font-weight: 400;
+  text-transform: none;
+}
+html[data-nfon-theme="admin-portal"] .metric strong { font-size: var(--nfon-type-display); font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .metric-detail,
+html[data-nfon-theme="admin-portal"] .metric-change { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .panel { border: 0; box-shadow: none; }
+html[data-nfon-theme="admin-portal"] .panel-header {
+  min-height: 72px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #d7d9db;
+  gap: 24px;
+}
+html[data-nfon-theme="admin-portal"] .panel h2,
+html[data-nfon-theme="admin-portal"] .panel h3 {
+  font-size: var(--nfon-type-section);
+  font-weight: 400;
+  line-height: 24px;
+}
+html[data-nfon-theme="admin-portal"] .panel-header input {
+  width: min(600px, 65%);
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #afb1b3;
+  background: #fff;
+  font-size: var(--nfon-type-section);
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .lower-grid { margin-top: 24px; }
+html[data-nfon-theme="admin-portal"] table { min-width: 580px; }
+html[data-nfon-theme="admin-portal"] th,
+html[data-nfon-theme="admin-portal"] td {
+  height: 44px;
+  padding: 8px 24px;
+  border-color: #d7d9db;
+  color: #252626;
+  font-size: var(--nfon-type-body);
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] th {
+  background: #fff;
+  font-size: var(--nfon-type-body);
+  font-weight: 400;
+  text-transform: none;
+}
+html[data-nfon-theme="admin-portal"] tbody tr:hover { background: #f5f6f7; }
+html[data-nfon-theme="admin-portal"] .extension-name,
+html[data-nfon-theme="admin-portal"] .history-time strong,
+html[data-nfon-theme="admin-portal"] .history-contact strong,
+html[data-nfon-theme="admin-portal"] .contact-main strong,
+html[data-nfon-theme="admin-portal"] .ranking-main strong,
+html[data-nfon-theme="admin-portal"] .quality-user-row strong { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .status-chip,
+html[data-nfon-theme="admin-portal"] .contact-badge,
+html[data-nfon-theme="admin-portal"] .auth-login-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 12px;
+  border: 1px solid #252626;
+  border-radius: 16px;
+  background: #fff;
+  color: #252626;
+  font-size: var(--nfon-type-caption);
+  font-weight: 400;
+  line-height: 18px;
+}
+html[data-nfon-theme="admin-portal"] .direction-chip {
+  border: 0;
+  background: transparent;
+  color: #252626;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .auth-login-panel,
+html[data-nfon-theme="admin-portal"] .setup-storage-panel,
+html[data-nfon-theme="admin-portal"] .contacts-panel {
+  margin: 24px var(--nfon-settings-inset);
+  box-shadow: 0 2px 2px rgba(37, 38, 38, .1);
+}
+html[data-nfon-theme="admin-portal"] .auth-login-head,
+html[data-nfon-theme="admin-portal"] .setup-storage-panel > .panel-header,
+html[data-nfon-theme="admin-portal"] .contacts-panel > .panel-header {
+  min-height: 56px;
+  padding: 16px var(--nfon-settings-inset);
+  border-bottom-color: #e6e9eb;
+}
+html[data-nfon-theme="admin-portal"] .auth-login-body,
+html[data-nfon-theme="admin-portal"] .storage-backup-grid,
+html[data-nfon-theme="admin-portal"] .contacts-source-grid { padding: 24px var(--nfon-settings-inset); gap: 24px; background: #fff; }
+html[data-nfon-theme="admin-portal"] .auth-login-body { grid-template-columns: minmax(0, 1fr); }
+html[data-nfon-theme="admin-portal"] .auth-login-body > * { min-width: 0; }
+html[data-nfon-theme="admin-portal"] .auth-mode-switch {
+  display: flex;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #d7d9db;
+  background: #f5f6f7;
+}
+html[data-nfon-theme="admin-portal"] .auth-mode-switch button {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 24px;
+  border: 0;
+  border-bottom: 4px solid transparent;
+  background: transparent;
+  color: #000;
+  font-size: var(--nfon-type-section);
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .auth-mode-switch button.is-active {
+  border-bottom-color: #3200c8;
+  background: transparent;
+  color: #000;
+}
+html[data-nfon-theme="admin-portal"] .auth-mode-switch button:hover { background: #e6e9eb; }
+html[data-nfon-theme="admin-portal"] .auth-login-card { padding: 24px 0 0; border: 0; }
+html[data-nfon-theme="admin-portal"] .auth-login-card > span,
+html[data-nfon-theme="admin-portal"] .browser-login-form label,
+html[data-nfon-theme="admin-portal"] .local-contact-form label,
+html[data-nfon-theme="admin-portal"] .dial-panel label {
+  color: #252626;
+  font-size: var(--nfon-type-body);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+html[data-nfon-theme="admin-portal"] .auth-login-card pre {
+  background: #f5f6f7;
+  border: 0;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .auth-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+html[data-nfon-theme="admin-portal"] .browser-login-form label,
+html[data-nfon-theme="admin-portal"] .local-contact-form label,
+html[data-nfon-theme="admin-portal"] .contacts-source-panel,
+html[data-nfon-theme="admin-portal"] .chart-panel,
+html[data-nfon-theme="admin-portal"] .ranking-main { min-width: 0; }
+html[data-nfon-theme="admin-portal"] .browser-login-form input,
+html[data-nfon-theme="admin-portal"] .local-contact-form input:not([type="file"]) {
+  min-height: 40px;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #afb1b3;
+  color: #000;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .contacts-source-panel,
+html[data-nfon-theme="admin-portal"] .contacts-list { border: 0; background: #fff; }
+html[data-nfon-theme="admin-portal"] .contacts-source-header { padding: 0 0 16px; }
+html[data-nfon-theme="admin-portal"] .contacts-status { padding: 16px 0 0; }
+html[data-nfon-theme="admin-portal"] .status-tile {
+  padding: 16px 0;
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid #e6e9eb;
+}
+html[data-nfon-theme="admin-portal"] .status-tile span,
+html[data-nfon-theme="admin-portal"] .status-tile strong,
+html[data-nfon-theme="admin-portal"] .panel-kicker,
+html[data-nfon-theme="admin-portal"] .quality-item span { font-weight: 400; text-transform: none; }
+html[data-nfon-theme="admin-portal"] .contact-row { padding: 16px 0; }
+html[data-nfon-theme="admin-portal"] .analytics-showcase {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  padding: 24px;
+}
+html[data-nfon-theme="admin-portal"] .analytics-showcase :is(.wide-panel, .active-panel) { grid-column: 1 / -1; }
+html[data-nfon-theme="admin-portal"] .analytics-showcase > .panel { box-shadow: 0 2px 2px rgba(37, 38, 38, .1); }
+html[data-nfon-theme="admin-portal"] .analytics-showcase .panel-header { min-height: 64px; padding: 16px 24px; flex-wrap: wrap; gap: 8px 16px; }
+html[data-nfon-theme="admin-portal"] .analytics-showcase .panel-kicker { overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .analytics-showcase :is(.leaderboard-panel, .mix-panel) { container: nfon-analytics-card / inline-size; }
+html[data-nfon-theme="admin-portal"] .daily-bars { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+html[data-nfon-theme="admin-portal"] .daily-stack { width: min(34px, 100%); }
+html[data-nfon-theme="admin-portal"] .analytics-showcase .table-wrap { max-width: 100%; }
+/* Break on usable content width, including expanded/collapsed sidebar space. */
+@container nfon-content (min-width: 760px) {
+  html[data-nfon-theme="admin-portal"] .analytics-showcase { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container nfon-content (min-width: 1200px) {
+  html[data-nfon-theme="admin-portal"] .analytics-showcase { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  html[data-nfon-theme="admin-portal"] .analytics-showcase .chart-panel.wide-panel { grid-column: span 2; }
+}
+@container nfon-analytics-card (max-width: 440px) {
+  html[data-nfon-theme="admin-portal"] .ranking-row { grid-template-columns: 24px minmax(0, 1fr) 24px; gap: 8px; }
+  html[data-nfon-theme="admin-portal"] .ranking-main { grid-column: 1 / -1; }
+  html[data-nfon-theme="admin-portal"] .ranking-main :is(strong, span),
+  html[data-nfon-theme="admin-portal"] .quality-user-row strong { white-space: normal; overflow-wrap: anywhere; }
+  html[data-nfon-theme="admin-portal"] .quality-user-row { grid-template-columns: 24px minmax(0, 1fr); gap: 4px 8px; }
+  html[data-nfon-theme="admin-portal"] .quality-user-row small { grid-column: 2; white-space: normal; }
+}
+html[data-nfon-theme="admin-portal"] .quality-item { background: #fff; border-color: #e6e9eb; }
+html[data-nfon-theme="admin-portal"] .quality-item strong { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .event-list { padding: 0 24px; }
+html[data-nfon-theme="admin-portal"] .event-item { min-height: 44px; padding: 16px 0; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .call-popup,
+html[data-nfon-theme="admin-portal"] .insight-popover {
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e6e9eb;
+  box-shadow: 0 3px 6px rgba(37, 38, 38, .2);
+}
+html[data-nfon-theme="admin-portal"] .call-popup-actions button,
+html[data-nfon-theme="admin-portal"] .modal-close { width: 40px; height: 40px; color: #525354; }
+html[data-nfon-theme="admin-portal"] .call-popup-kicker { padding-right: 80px; }
+html[data-nfon-theme="admin-portal"] .side-stack.is-modal .dial-panel {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+html[data-nfon-theme="admin-portal"] button:focus-visible,
+html[data-nfon-theme="admin-portal"] a:focus-visible,
+html[data-nfon-theme="admin-portal"] input:focus-visible,
+html[data-nfon-theme="admin-portal"] select:focus-visible { outline: 2px solid #3200c8; outline-offset: 3px; }
+@media (max-width: 1080px) {
+  html[data-nfon-theme="admin-portal"] .auth-form-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  html[data-nfon-theme="admin-portal"] .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  html[data-nfon-theme="admin-portal"] .metric { min-height: 84px; padding: 16px; }
+  html[data-nfon-theme="admin-portal"] .panel-header { padding: 16px; gap: 16px; }
+  html[data-nfon-theme="admin-portal"] .panel-header input { width: 100%; }
+  html[data-nfon-theme="admin-portal"] .auth-mode-switch button { padding: 8px 16px; }
+  html[data-nfon-theme="admin-portal"] .auth-login-panel,
+  html[data-nfon-theme="admin-portal"] .setup-storage-panel,
+  html[data-nfon-theme="admin-portal"] .contacts-panel { margin: 16px var(--nfon-settings-inset); }
+  html[data-nfon-theme="admin-portal"] .auth-login-body,
+  html[data-nfon-theme="admin-portal"] .storage-backup-grid,
+  html[data-nfon-theme="admin-portal"] .contacts-source-grid { padding: 16px var(--nfon-settings-inset); }
+  html[data-nfon-theme="admin-portal"] .analytics-showcase { padding: 16px; }
+  html[data-nfon-theme="admin-portal"] .contact-row { align-items: flex-start; }
+  html[data-nfon-theme="admin-portal"] .call-flow { gap: 8px; }
+  html[data-nfon-theme="admin-portal"] .event-item { grid-template-columns: 1fr; gap: 4px; }
+}
+
+
+/* CTI uses the shared four-role type scale and the same content inset in every panel. */
+html[data-nfon-theme="admin-portal"] {
+  --font-xs: var(--nfon-type-caption);
+  --font-sm: var(--nfon-type-caption);
+  --font-base: var(--nfon-type-body);
+  --font-md: var(--nfon-type-section);
+  --font-lg: var(--nfon-type-section);
+  --font-xl: var(--nfon-type-display);
+  --lh-body: 1.5;
+  --lh-tight: 1.25;
+}
+html[data-nfon-theme="admin-portal"] :is(.metric, .panel-header, .active-call, .status-tile, .quality-item, .contact-row, .call-person) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+html[data-nfon-theme="admin-portal"] :is(.panel-header, .panel-actions, .auth-form-actions, .active-call-footer) { flex-wrap: wrap; }
+html[data-nfon-theme="admin-portal"] .panel-header > * { min-width: 0; }
+html[data-nfon-theme="admin-portal"] :is(.panel-header input, .auth-mode-switch button, .contact-main strong, .ranking-main strong, .quality-user-row strong) {
+  font-size: var(--nfon-type-body);
+  line-height: 1.5;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] :is(.metric-detail, .metric-change, .panel-kicker, .chart-legend, .donut-legend, .daily-slot strong, .daily-slot > span, .bar-value, .ranking-main span, .quality-item > span, .quality-user-row small, .history-state-stack small, .contact-main span, .contact-main small, .upload-file-name, .popover-subline, .popover-metrics span, .mini-legend, .session-detail-grid span, .session-detail-grid b, .session-event-list time, .session-event-list strong, .session-event-list small, .call-popup-kicker) {
+  font-size: var(--nfon-type-caption);
+  line-height: 1.5;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] :is(.ghost-button, .upload-button, .contact-avatar, .history-avatar, .daily-slot strong, .bar-value, .event-title, .session-event-list strong, .session-detail-grid b) { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] :is(.metric strong, .quality-item > strong, .donut span, .call-avatar, .call-arrow) {
+  font-size: var(--nfon-type-display);
+  font-weight: 400;
+  line-height: 1.25;
+}
+html[data-nfon-theme="admin-portal"] :is(.popover-metrics b, .call-popup-summary, .call-popup-close, .call-popup-minimize) {
+  font-size: var(--nfon-type-section);
+  font-weight: 400;
+  line-height: 1.5;
+}
+html[data-nfon-theme="admin-portal"] .call-popup.is-minimized .call-popup-summary { padding-right: 96px; font-size: var(--nfon-type-body); }
+html[data-nfon-theme="admin-portal"] .metric-detail.comparison { flex-wrap: wrap; gap: 4px 8px; }
+html[data-nfon-theme="admin-portal"] .metric-previous { color: var(--muted); }
+html[data-nfon-theme="admin-portal"] .metric-change.positive { color: var(--nfon-success-text); }
+html[data-nfon-theme="admin-portal"] :is(.metric-detail.mixed, .metric-change.negative) { color: var(--nfon-danger-text); }
+html[data-nfon-theme="admin-portal"] :is(.line-chart, .trend-bar-chart, .donut-chart, .active-call, .empty-list, .quality-item) { padding: 24px; }
+html[data-nfon-theme="admin-portal"] .empty-list.compact { padding: 0; }
+html[data-nfon-theme="admin-portal"] .trend-bar-chart { gap: 16px; }
+html[data-nfon-theme="admin-portal"] .donut-chart { gap: 24px; }
+html[data-nfon-theme="admin-portal"] .donut { width: min(176px, 100%); height: auto; aspect-ratio: 1; }
+html[data-nfon-theme="admin-portal"] :is(.chart-legend, .donut-legend) { gap: 8px 16px; }
+html[data-nfon-theme="admin-portal"] :is(.chart-legend, .donut-legend) span { gap: 8px; }
+html[data-nfon-theme="admin-portal"] .legend-dot { width: 8px; height: 8px; flex: 0 0 8px; }
+html[data-nfon-theme="admin-portal"] .ranking-row { padding: 16px 24px; gap: 8px; }
+html[data-nfon-theme="admin-portal"] .ranking-main { gap: 4px; }
+html[data-nfon-theme="admin-portal"] .ranking-main :is(strong, span) { white-space: normal; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+html[data-nfon-theme="admin-portal"] .quality-item { gap: 8px; }
+html[data-nfon-theme="admin-portal"] .quality-users { margin-top: 0; }
+html[data-nfon-theme="admin-portal"] .quality-user-row b { width: 24px; height: 24px; }
+html[data-nfon-theme="admin-portal"] .quality-user-row small { white-space: normal; }
+html[data-nfon-theme="admin-portal"] .value-missed { color: var(--nfon-danger-text) !important; }
+html[data-nfon-theme="admin-portal"] .quality-item strong .value-inbound { color: var(--nfon-success-text); }
+html[data-nfon-theme="admin-portal"] .auth-login-card { padding-top: 0; }
+html[data-nfon-theme="admin-portal"] :is(.auth-login-head p, .auth-login-card p, .auth-form-actions span) { margin-top: 8px; }
+html[data-nfon-theme="admin-portal"] :is(.setup-summary, .contacts-status, .local-contact-form, .local-contact-name-grid) { gap: 16px; }
+html[data-nfon-theme="admin-portal"] .local-contact-form { padding-top: 16px; }
+html[data-nfon-theme="admin-portal"] .contacts-source-grid > .empty-list { padding: 0; }
+html[data-nfon-theme="admin-portal"] .contact-row { grid-template-columns: 40px minmax(0, 1fr) auto; gap: 16px; }
+html[data-nfon-theme="admin-portal"] .contact-avatar { width: 40px; height: 40px; }
+html[data-nfon-theme="admin-portal"] .contact-main { gap: 4px; }
+html[data-nfon-theme="admin-portal"] .contact-main :is(strong, span, small) { white-space: normal; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .contact-actions { max-width: 100%; }
+html[data-nfon-theme="admin-portal"] .history-contact { grid-template-columns: 32px minmax(min-content, 1fr); gap: 8px; }
+html[data-nfon-theme="admin-portal"] .history-avatar { width: 32px; height: 32px; }
+html[data-nfon-theme="admin-portal"] .upload-control { gap: 8px; }
+html[data-nfon-theme="admin-portal"] .upload-button { padding-inline: 8px; }
+html[data-nfon-theme="admin-portal"] .line-popover-contact { grid-template-columns: 40px minmax(0, 1fr); gap: 16px; }
+html[data-nfon-theme="admin-portal"] .insight-popover { padding: 24px; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] :is(.popover-subline, .popover-metrics span) { margin-top: 4px; }
+html[data-nfon-theme="admin-portal"] .popover-metrics { margin-top: 16px; }
+html[data-nfon-theme="admin-portal"] .mini-line { margin-top: 16px; }
+html[data-nfon-theme="admin-portal"] .mini-legend { flex-wrap: wrap; gap: 8px; }
+html[data-nfon-theme="admin-portal"] .mini-legend span { gap: 4px; }
+html[data-nfon-theme="admin-portal"] .mini-legend .legend-dot { width: 16px; height: 4px; flex-basis: 16px; }
+html[data-nfon-theme="admin-portal"] .session-detail-grid { grid-template-columns: 56px minmax(0, 1fr); gap: 8px; margin-top: 16px; }
+html[data-nfon-theme="admin-portal"] .session-event-list { margin-top: 16px; }
+html[data-nfon-theme="admin-portal"] .session-event-list li { gap: 4px 8px; }
+html[data-nfon-theme="admin-portal"] :is(.session-detail-grid b, .session-event-list strong, .session-event-list small, .line-popover-contact strong, .line-popover-contact span, .line-popover-contact small) { white-space: normal; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .dial-panel { padding-bottom: 24px; }
+html[data-nfon-theme="admin-portal"] .dial-panel label { margin: 24px 24px 0; }
+html[data-nfon-theme="admin-portal"] .dial-panel .primary-button { width: calc(100% - 48px); margin: 24px 24px 0; }
+html[data-nfon-theme="admin-portal"] .dial-panel .form-message { margin: 16px 24px 0; }
+html[data-nfon-theme="admin-portal"] .dial-panel .form-message:empty { display: none; }
+html[data-nfon-theme="admin-portal"] .modal-close { top: 16px; right: 16px; }
+html[data-nfon-theme="admin-portal"] .call-popup { padding: 24px; }
+html[data-nfon-theme="admin-portal"] .call-popup-actions { top: 16px; right: 16px; }
+html[data-nfon-theme="admin-portal"] :is(.call-popup-kicker, .call-popup-summary) { padding-right: 96px; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .call-flow { grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr); margin-top: 24px; gap: 16px; }
+html[data-nfon-theme="admin-portal"] .call-person { gap: 8px; }
+html[data-nfon-theme="admin-portal"] .call-person :is(strong, span, small) { white-space: normal; overflow-wrap: anywhere; }
+html[data-nfon-theme="admin-portal"] .call-avatar { width: min(80px, 100%); height: auto; aspect-ratio: 1; }
+@media (max-width: 760px) {
+  html[data-nfon-theme="admin-portal"] :is(.line-chart, .trend-bar-chart, .donut-chart, .active-call, .empty-list, .quality-item, .insight-popover, .call-popup) { padding: 16px; }
+  html[data-nfon-theme="admin-portal"] .analytics-showcase .panel-header { padding: 16px; }
+  html[data-nfon-theme="admin-portal"] .ranking-row { padding: 16px; }
+  html[data-nfon-theme="admin-portal"] :is(th, td) { padding-inline: 16px; }
+  html[data-nfon-theme="admin-portal"] .event-list { padding-inline: 16px; }
+  html[data-nfon-theme="admin-portal"] .contact-row { grid-template-columns: 40px minmax(0, 1fr); }
+  html[data-nfon-theme="admin-portal"] .contact-actions { grid-column: 2; justify-items: start; }
+  html[data-nfon-theme="admin-portal"] .dial-panel { padding-bottom: 16px; }
+  html[data-nfon-theme="admin-portal"] .dial-panel label { margin: 16px 16px 0; }
+  html[data-nfon-theme="admin-portal"] .dial-panel .primary-button { width: calc(100% - 32px); margin: 16px 16px 0; }
+  html[data-nfon-theme="admin-portal"] .dial-panel .form-message { margin: 16px 16px 0; }
+  html[data-nfon-theme="admin-portal"] .call-flow { gap: 8px; }
+}
+
+
+/* Classic keeps its appearance while nested settings fit the available width. */
+html[data-nfon-theme="classic"] :is(.auth-login-body, .auth-login-card, .contacts-source-grid, .storage-backup-grid) { min-width: 0; }
+html[data-nfon-theme="classic"] :is(.auth-login-body, .contacts-source-grid, .storage-backup-grid) > * { min-width: 0; }
+html[data-nfon-theme="classic"] .auth-login-card pre { max-width: min(760px, 100%); }
+html[data-nfon-theme="classic"] .auth-login-card p { overflow-wrap: anywhere; }
+html[data-nfon-theme="classic"] .auth-mode-switch { max-width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+html[data-nfon-theme="classic"] .auth-mode-switch button { min-width: 0; overflow-wrap: anywhere; }
+html[data-nfon-theme="classic"] .auth-form-actions { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  html[data-nfon-theme="classic"] .auth-form-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* Cockpit-led content typography: emphasis comes from hierarchy, not heavier data. */
+html[data-nfon-theme="admin-portal"] .app-shell :is(strong, b, th),
+html[data-nfon-theme="admin-portal"] :is(.insight-popover, .call-popup) :is(strong, b),
+html[data-nfon-theme="admin-portal"] :is(.history-time span, .history-state-stack small, .history-avatar, .contact-avatar, .contact-badge, .browser-login-form small, .event-title) { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .timeline-axis { font-size: var(--nfon-type-caption); font-weight: 400; }
+@container nfon-analytics-card (max-width: 359px) {
+  html[data-nfon-theme="admin-portal"] .quality-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Local audit: full names remain readable and Classic obeys the same containment rules. */
+.ranking-main :is(strong, span), .quality-user-row :is(strong, small),
+.history-contact :is(strong, span), .extension-name, .contact-main :is(strong, span, small) {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+.auth-login-head, .auth-form-actions, .storage-actions, .panel-header { flex-wrap: wrap; }
+.auth-login-head > *, .auth-form-grid > *, .auth-form-actions > *, .auth-mode-switch > *, .panel-header > * { min-width: 0; max-width: 100%; }
+.auth-login-card pre { max-width: 100%; overflow-x: auto; }
+.auth-mode-switch { flex-wrap: wrap; }
+.auth-mode-switch button { white-space: normal; overflow-wrap: anywhere; }
+.call-popup { max-width: calc(100vw - 24px); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.call-popup-kicker, .call-popup-summary { padding-right: 88px; overflow-wrap: anywhere; }
+.call-popup-actions { display: flex; gap: 8px; }
+[data-line-status]:focus-visible, [data-session-id]:focus-visible, [data-extension-row]:focus-visible { outline: 2px solid var(--nfon-blue, #2800c8); outline-offset: -2px; }
+@media (max-width: 480px) {
+  .app-header > *, .header-title-row, .header-actions, .auth-login-panel, .auth-login-card { min-width: 0; }
+  .app-header, .header-actions { flex-wrap: wrap; }
+  .auth-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .call-flow { grid-template-columns: minmax(0, 1fr); }
+  .call-arrow { transform: rotate(90deg); }
+  .call-person { min-width: 0; }
+  .call-person :is(strong, span, small) { white-space: normal; overflow-wrap: anywhere; }
+  .ranking-row { grid-template-columns: 24px minmax(0, 1fr) 24px; }
+  .ranking-main { grid-column: 1 / -1; }
+}
+.auth-login-card :is(h3, p), .auth-login-head :is(h2, p), .status-tile strong { overflow-wrap: anywhere; }
+.session-detail-grid b, .session-event-list :is(strong, small) { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+
+/* Small cards reserve a readable line for each name instead of squeezing it between counters. */
+:is(.leaderboard-panel, .mix-panel) { container: nfon-analytics-card / inline-size; }
+@container nfon-analytics-card (max-width: 560px) {
+  .ranking-row { grid-template-columns: 24px minmax(0, 1fr) 24px; }
+  .ranking-main { grid-column: 1 / -1; }
+  .quality-user-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .quality-user-row small { grid-column: 2; white-space: normal; }
+}
+.extensions-panel .extension-name { min-width: 160px; word-break: normal; overflow-wrap: break-word; }
+.ranking-main :is(strong, span), .quality-user-row :is(strong, small), .history-contact :is(strong, span) { word-break: normal; overflow-wrap: break-word; }
+[data-extension-detail]:focus-visible { outline: 2px solid var(--nfon-blue); outline-offset: -2px; }
+html[data-nfon-theme="classic"] .metric-previous { color: var(--muted); }
+html[data-nfon-theme="classic"] :is(.metric-detail.mixed, .metric-change.negative, .value-missed, .status-chip.missed) { color: var(--danger) !important; }
+html[data-nfon-theme="classic"] .quality-item strong .value-inbound { color: var(--accent-dark); }
+html[data-nfon-theme="classic"] :is(.status-chip.offline, .status-chip.unknown) { color: var(--muted); }
+html[data-nfon-theme="classic"] :is(button, a, input, select):focus-visible { outline: 2px solid var(--nfon-blue); outline-offset: 3px; }
+
+html:not([data-nfon-theme="admin-portal"]) .metric-change.positive { color: var(--accent-dark); }

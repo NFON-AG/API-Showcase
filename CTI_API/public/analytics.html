@@ -1,17 +1,19 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <title>NFON CTI API Demo</title>
-    <link rel="stylesheet" href="/styles.css">
+    <script src="/appearance.js?v=b2ba19b928750eb3"></script>
+    <link rel="stylesheet" href="/styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="/appearance.css?v=b2ba19b928750eb3">
   </head>
   <body>
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" data-i18n-aria-label="cti.back" title="Back to overview" data-i18n-title="cti.back">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -20,15 +22,15 @@
         </a>
         <div>
         <h1>NFON CTI API Demo</h1>
-        <p id="account-label">Nicht verbunden</p>
+        <p id="account-label">Not connected</p>
         </div>
       </div>
       <div class="header-actions">
-        <a class="nav-button" href="/">Übersicht</a>
-        <a class="nav-button is-active" href="/analytics.html" aria-current="page">Auswertungen</a>
-        <a class="nav-button" href="/setup.html">Setup</a>
-        <span class="connection" id="connection-state">Verbinde</span>
-        <label class="demo-switch" title="Demo-Daten zuschalten">
+        <a class="nav-button" href="/" data-i18n-key="cti.nav.overview">Overview</a>
+        <a class="nav-button is-active" href="/analytics.html" aria-current="page" data-i18n-key="cti.nav.analytics">Analytics</a>
+        <a class="nav-button" href="/setup.html" data-i18n-key="cti.nav.setup">Setup</a>
+        <span class="connection" id="connection-state">Connecting</span>
+        <label id="demo-control" class="demo-switch">
           <input id="demo-toggle" type="checkbox">
           <span>Demo</span>
         </label>
@@ -36,49 +38,49 @@
     </header>
 
     <main class="app-shell">
-      <section class="metrics" aria-label="Kennzahlen">
+      <section class="metrics" aria-label="Metrics" data-i18n-aria-label="cti.metrics">
         <div class="metric">
-          <span class="metric-label">Anrufe heute</span>
+          <span class="metric-label" data-i18n-key="cti.calls.today">Calls today</span>
           <strong id="metric-events">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Angenommen</span>
+          <span class="metric-label" data-i18n-key="cti.calls.answered">Answered</span>
           <strong id="metric-answered">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Aktive Calls</span>
+          <span class="metric-label" data-i18n-key="cti.calls.active">Active calls</span>
           <strong id="metric-active">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Nebenstellen</span>
+          <span class="metric-label" data-i18n-key="cti.extensions">Extensions</span>
           <strong id="metric-extensions">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Bereit</span>
+          <span class="metric-label" data-i18n-key="cti.ready">Ready</span>
           <strong id="metric-available">0</strong>
         </div>
       </section>
 
-      <section class="analytics-showcase" aria-label="Analytics">
+      <section class="analytics-showcase" aria-label="Analytics" data-i18n-aria-label="cti.nav.analytics">
         <div class="panel chart-panel wide-panel">
           <div class="panel-header">
-            <h2>Tagesverlauf</h2>
-            <span class="panel-kicker" id="timeline-kicker">Heute</span>
+            <h2 data-i18n-key="cti.analytics.timeline">Daily activity</h2>
+            <span class="panel-kicker" id="timeline-kicker">Today</span>
           </div>
           <div id="timeline-chart" class="line-chart timeline-line-chart"></div>
         </div>
 
         <div class="panel chart-panel">
           <div class="panel-header">
-            <h2>Trend</h2>
-            <span class="panel-kicker" id="trend-kicker">7 Tage</span>
+            <h2 data-i18n-key="cti.analytics.trend">Trend</h2>
+            <span class="panel-kicker" id="trend-kicker">7 days</span>
           </div>
           <div id="trend-chart" class="trend-bar-chart"></div>
         </div>
 
         <div class="panel chart-panel">
           <div class="panel-header">
-            <h2>Richtung</h2>
+            <h2 data-i18n-key="cti.direction">Direction</h2>
             <span class="panel-kicker" id="direction-kicker">Inbound / Outbound</span>
           </div>
           <div id="direction-chart" class="donut-chart"></div>
@@ -86,7 +88,7 @@
 
         <div class="panel leaderboard-panel">
           <div class="panel-header">
-            <h2>Team</h2>
+            <h2 data-i18n-key="cti.analytics.team">Team</h2>
             <span class="panel-kicker" id="team-kicker">Calls</span>
           </div>
           <div id="team-ranking" class="ranking-list"></div>
@@ -94,22 +96,23 @@
 
         <div class="panel mix-panel">
           <div class="panel-header">
-            <h2>Qualität</h2>
-            <span class="panel-kicker" id="quality-kicker">Heute</span>
+            <h2 data-i18n-key="cti.analytics.quality">Quality</h2>
+            <span class="panel-kicker" id="quality-kicker">Today</span>
           </div>
           <div id="quality-panel" class="quality-grid"></div>
         </div>
 
         <div class="panel active-panel">
           <div class="panel-header">
-            <h2>Aktive Calls</h2>
+            <h2 data-i18n-key="cti.calls.active">Active calls</h2>
           </div>
-          <div id="active-calls" class="empty-list">Keine aktiven Calls</div>
+          <div id="active-calls" class="empty-list">No active calls</div>
+          <div id="dial-message" class="form-message" role="status" aria-live="polite"></div>
         </div>
 
         <div class="panel history-panel wide-panel">
           <div class="panel-header">
-            <h2>Call History</h2>
+            <h2 data-i18n-key="cti.history">Call history</h2>
             <div class="panel-actions">
               <button class="ghost-button" id="export-csv" type="button">CSV</button>
               <button class="ghost-button" id="export-excel" type="button">Excel</button>
@@ -119,24 +122,28 @@
             <table>
               <thead>
                 <tr>
-                  <th>Zeit</th>
-                  <th>Status</th>
-                  <th>Richtung</th>
-                  <th>Von</th>
-                  <th>Zu</th>
+                  <th data-i18n-key="cti.time">Time</th>
+                  <th data-i18n-key="cti.export.status">Status</th>
+                  <th data-i18n-key="cti.direction">Direction</th>
+                  <th data-i18n-key="cti.from">From</th>
+                  <th data-i18n-key="cti.to">To</th>
                 </tr>
               </thead>
               <tbody id="history-body"></tbody>
             </table>
           </div>
+          <div class="panel-header"><span id="history-count"></span><button id="history-more" class="secondary-button" data-i18n-key="cti.history.more">Show more</button></div>
         </div>
       </section>
     </main>
 
     <div id="insight-popover" class="insight-popover" role="tooltip" hidden></div>
-    <div id="call-popup" class="call-popup" hidden></div>
+    <div id="call-popup" class="call-popup" role="region" aria-live="polite" aria-atomic="true" hidden></div>
 
-    <script src="/i18n.js?v=v1.0.1-i18n"></script>
-    <script src="/app.js"></script>
+    <script src="/messages.js?v=b2ba19b928750eb3"></script>
+    <script src="/i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="/phone-number.js?v=b2ba19b928750eb3"></script>
+    <script src="/demo-runtime.js?v=b2ba19b928750eb3" data-nfon-optional-demo="cti"></script>
+    <script src="/app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

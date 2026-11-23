@@ -1,6 +1,6 @@
 {
   "name": "nfon-cti-api-showcase",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Demo app for the NFON CTI API",
   "author": "NFON AG <integration@nfon.com>",
@@ -8,7 +8,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check public/app.js && node --check public/i18n.js",
+    "check": "node --check src/server.js && node --check public/phone-number.js && node --check public/app.js && node --check public/i18n.js",
     "test": "npm run check && node --test --test-concurrency=1 test/*.test.js"
   },
   "engines": {

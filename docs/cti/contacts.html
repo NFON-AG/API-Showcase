@@ -1,20 +1,20 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=./setup.html">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <title>NFON CTI API Demo</title>
-    <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="./styles.css">
-    <script>window.location.replace("./setup.html");</script>
+    <script src="../appearance.js?v=b2ba19b928750eb3"></script>
+    <link rel="stylesheet" href="./styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="../appearance.css?v=b2ba19b928750eb3">
+    <script>window.location.replace(new URL("setup.html" + window.location.search + window.location.hash, window.location.href).href);</script>
   </head>
-  <body>
+  <body data-nfon-app="cti">
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="../index.html?v=web-demo-20260622g" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="../index.html" aria-label="Back to overview" data-i18n-aria-label="cti.back" title="Back to overview" data-i18n-title="cti.back">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -22,15 +22,15 @@
           </svg>
         </a>
         <div>
-          <h1>NFON CTI API Demo</h1>
-          <p id="account-label">Nicht verbunden</p>
+        <h1>NFON CTI API Demo</h1>
+        <p id="account-label">Not connected</p>
         </div>
       </div>
       <div class="header-actions">
-        <a class="nav-button" href="./index.html">Übersicht</a>
-        <a class="nav-button" href="./analytics.html">Auswertungen</a>
-        <a class="nav-button is-active" href="./setup.html" aria-current="page">Setup</a>
-        <span class="connection" id="connection-state">Verbinde</span>
+        <a class="nav-button" href="./index.html" data-i18n-key="cti.nav.overview">Overview</a>
+        <a class="nav-button" href="./analytics.html" data-i18n-key="cti.nav.analytics">Analytics</a>
+        <a class="nav-button is-active" href="./setup.html" aria-current="page" data-i18n-key="cti.nav.setup">Setup</a>
+        <span class="connection" id="connection-state">Connecting</span>
       </div>
     </header>
 
@@ -38,30 +38,32 @@
       <section class="contacts-layout">
         <div class="panel contacts-list-panel">
           <div class="panel-header">
-            <h2>Google Kontakte</h2>
-            <input id="contact-filter" type="search" placeholder="Suchen">
+            <h2 data-i18n-key="cti.contacts.google">Google Contacts</h2>
+            <input id="contact-filter" type="search" placeholder="Search" data-i18n-placeholder="cti.search">
           </div>
           <div id="contacts-list" class="contacts-list"></div>
         </div>
 
         <aside class="panel contacts-side-panel">
           <div class="panel-header">
-            <h2>Optionales Modul</h2>
+            <h2 data-i18n-key="cti.contacts.optional">Optional module</h2>
           </div>
           <div id="contacts-status" class="contacts-status"></div>
           <div class="contacts-actions">
-            <a class="primary-button link-button" id="contacts-login" href="#demo-google-login">Verbinden</a>
-            <button class="secondary-button" id="contacts-sync" type="button">Synchronisieren</button>
-            <button class="secondary-button danger-button" id="contacts-disconnect" type="button">Trennen</button>
+            <a class="primary-button link-button" id="contacts-login" href="./auth/google/start" data-i18n-key="cti.contacts.connect">Connect</a>
+            <button class="secondary-button" id="contacts-sync" type="button" data-i18n-key="cti.contacts.sync">Synchronize</button>
+            <button class="secondary-button danger-button" id="contacts-disconnect" type="button" data-i18n-key="cti.contacts.disconnect">Disconnect</button>
           </div>
         </aside>
       </section>
     </main>
 
-    <div id="call-popup" class="call-popup" hidden></div>
+    <div id="call-popup" class="call-popup" role="region" aria-live="polite" aria-atomic="true" hidden></div>
 
-    <script src="../demo-runtime.js?v=web-demo-20260622i"></script>
-    <script src="../i18n.js?v=v1.0.1-i18n"></script>
-    <script src="./app.js"></script>
+    <script src="./messages.js?v=b2ba19b928750eb3"></script>
+    <script src="../i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="./phone-number.js?v=b2ba19b928750eb3"></script>
+    <script src="../demo-runtime.js?v=b2ba19b928750eb3"></script>
+    <script src="./app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

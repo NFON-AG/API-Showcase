@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en" data-nfon-theme="admin-portal">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#3200c8">
+  <title data-i18n="NFON · Vom Gespräch zum CRM-Eintrag">NFON · From call to CRM entry</title>
+  <link rel="stylesheet" href="styles.css?v=b2ba19b928750eb3">
+  <script src="locales/en.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/fr.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/es.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/it.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/nl.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/pl.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/pt.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/sv.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/da.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/fi.js?v=b2ba19b928750eb3" defer></script>
+  <script src="locales/cs.js?v=b2ba19b928750eb3" defer></script>
+  <script src="i18n.js?v=b2ba19b928750eb3" defer></script>
+  <script src="scenarios.js?v=b2ba19b928750eb3" defer></script>
+  <script src="demo-records.js?v=b2ba19b928750eb3" defer></script>
+  <script src="automation.js?v=b2ba19b928750eb3" defer></script>
+  <script src="analytics.js?v=b2ba19b928750eb3" defer></script>
+  <script src="app.js?v=b2ba19b928750eb3" defer></script>
+  <script src="bridge.js?v=b2ba19b928750eb3" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content" data-i18n="Zum Inhalt">Skip to content</a>
+  <main id="main-content">
+    <section class="intro" aria-labelledby="page-title">
+      <h1 id="page-title" data-i18n="Vom Gespräch zum CRM-Eintrag">From call to CRM entry</h1>
+      <span class="pill neutral" data-i18n="Demo">Demo</span>
+    </section>
+    <div class="view-navigation">
+      <div class="tab-bar main-tabs" role="tablist" aria-label="Demo view" data-i18n-aria-label="Demo-Ansicht">
+        <button id="view-examples" role="tab" aria-controls="workspace" aria-selected="true" type="button" data-i18n="Gesprächsbeispiele">Example calls</button>
+        <button id="view-analytics" role="tab" aria-controls="analytics-view" aria-selected="false" tabindex="-1" type="button" data-i18n="Auswertung">Analytics</button>
+      </div>
+      <div class="view-actions"><button id="capabilities-open" class="text-button" type="button" data-i18n="Funktionsumfang">Feature scope</button></div>
+    </div>
+    <section class="workspace" id="workspace" role="tabpanel" aria-labelledby="view-examples">
+      <aside class="case-panel" aria-labelledby="cases-heading">
+        <div class="section-heading"><h2 id="cases-heading" data-i18n="Beispielgespräche">Example calls</h2></div>
+        <nav id="case-list" aria-label="Select an example call" data-i18n-aria-label="Beispielgespräch auswählen"></nav>
+      </aside>
+      <div class="case-workspace">
+        <section class="case-context" aria-labelledby="case-heading">
+          <div><p id="case-customer" class="eyebrow"></p><h2 id="case-heading"></h2><p id="case-meta" class="caption"></p></div>
+          <button id="replay-flow" class="text-button" type="button" data-i18n="Ablauf wiederholen">Replay flow</button>
+        </section>
+        <ol class="workflow" id="automation-flow" aria-label="Automatic workflow" data-i18n-aria-label="Automatischer Ablauf"></ol>
+        <div id="automation-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div class="work-columns">
+          <section class="panel transcript-panel" aria-labelledby="transcript-heading">
+            <div class="panel-heading"><h2 id="transcript-heading">Call History API</h2><span class="pill" id="api-status"></span></div>
+            <div id="api-content" class="panel-content"></div>
+          </section>
+          <section class="panel crm-panel" aria-labelledby="crm-heading">
+            <div class="panel-heading"><h2 id="crm-heading" data-i18n="CRM-Aktivität">CRM activity</h2><span class="pill" id="crm-status"></span></div>
+            <div id="crm-content" class="panel-content"></div>
+          </section>
+        </div>
+      </div>
+    </section>
+    <section id="analytics-view" role="tabpanel" aria-labelledby="view-analytics" hidden>
+      <div class="analytics-heading"><div><h2><span data-i18n="Eine Woche Call History">One week of Call History</span></h2><p id="analytics-range" class="caption"></p></div></div>
+      <div id="analytics-metrics" class="analytics-metrics"></div>
+      <div class="analytics-charts">
+        <section class="panel" aria-labelledby="volume-heading">
+          <div class="panel-heading"><div><h2 id="volume-heading"><span data-i18n="Anrufe und Transkripte">Calls and transcripts</span></h2></div></div>
+          <div class="chart-body"><div id="daily-chart"></div></div>
+          <div id="analytics-details" class="day-details" aria-live="polite" tabindex="-1"></div>
+        </section>
+        <section class="panel" aria-labelledby="results-heading">
+          <div class="panel-heading"><div><h2 id="results-heading"><span data-i18n="Anrufergebnisse">Call outcomes</span></h2></div></div>
+          <div id="status-chart" class="chart-body status-chart"></div>
+        </section>
+      </div>
+      <details class="analytics-data"><summary><span data-i18n="Tageswerte">Daily totals</span></summary><div class="data-table-scroll" tabindex="0" role="region" aria-label="Daily totals for the example week" data-i18n-aria-label="Tageswerte der Beispielwoche"><table><thead><tr><th scope="col"><span data-i18n="Datum">Date</span></th><th scope="col"><span data-i18n="Anrufe">Calls</span></th><th scope="col"><span data-i18n="Angenommen">Answered</span></th><th scope="col"><span data-i18n="Verpasst">Missed</span></th><th scope="col"><span data-i18n="Abgebrochen">Cancelled</span></th><th scope="col"><span data-i18n="Transkripte">Transcripts</span></th></tr></thead><tbody id="analytics-table-body"></tbody></table></div></details>
+    </section>
+  </main>
+  <dialog id="capabilities-dialog" class="capabilities-dialog" aria-labelledby="capabilities-title">
+    <div class="capabilities-heading"><h2 id="capabilities-title" data-i18n="Funktionsumfang der Demo">Demo feature scope</h2><button id="capabilities-close" class="text-button" type="button" data-i18n="Schließen">Close</button></div>
+    <dl class="capabilities-list">
+      <div><dt>Call History API</dt><dd data-i18n="Gesprächsdaten, Transkript und Zusammenfassung.">Call data, transcript and summary.</dd></div>
+      <div><dt data-i18n="CRM-Integration">CRM integration</dt><dd data-i18n="Kontakt abgleichen, Gesprächsnotiz anlegen und Termine oder Erinnerungen mit eigener CRM-Logik ableiten.">Match the contact, create a call note and derive calendar entries or reminders through separate CRM logic.</dd></div>
+      <div><dt data-i18n="Demo">Demo</dt><dd data-i18n="Feste Simulation. Eine produktive CRM-Anbindung wird separat umgesetzt.">Fixed simulation. A production CRM connection is implemented separately.</dd></div>
+    </dl>
+    <a class="source-document" href="https://nfon-ag.github.io/Call-History-API/" target="_blank" rel="noopener noreferrer" data-i18n="Offizielle Call-History-API-Dokumentation ↗">Official Call History API documentation ↗</a>
+  </dialog>
+</body>
+</html>

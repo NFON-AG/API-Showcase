@@ -14,6 +14,11 @@ Never commit:
 - API keys or client secrets.
 - Customer, contact, call, transcript, or tenant data from real environments.
 - Local backup archives.
+- Screenshots, PDFs, logs and audit outputs containing real test-account data.
+
+Local verification folders are not automatically safe to publish. Review the
+actual staged files; a passing secret scan does not identify every customer name,
+telephone number or private screenshot.
 
 Run before sharing:
 
@@ -34,4 +39,7 @@ Report security issues to [integration@nfon.com](mailto:integration@nfon.com). D
 
 Before hosted or public operation, review deployment secrets, OAuth redirect registration, CORS origins, logging, rate limits, monitoring, and incident ownership.
 
-GitHub Pages can host only the static demo-data showcase. Live API access requires the local Node.js apps, NFON-side CORS support, or a separately reviewed backend proxy.
+GitHub Pages can host only the static demo-data showcase. The supplied live API
+flows require the local Node.js apps. Hosting a live backend is a separate
+deployment and security decision; the static demo does not become a live client
+through CORS configuration alone.

@@ -1,6 +1,6 @@
 {
   "name": "nfon-portal-api-showcase",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Demo app for the NFON Service Portal API",
   "author": "NFON AG <integration@nfon.com>",
@@ -8,8 +8,11 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check public/app.js && node --check public/i18n.js",
-    "test": "npm run check && node --test --test-concurrency=1 test/*.test.js"
+    "check": "node --check src/server.js && node --check public/app.js && node --check public/i18n.js && node --check public/pdf/callflow-pdf.js",
+    "test": "npm run check && node --test --test-concurrency=1 test/*.test.js",
+    "test:callflow:browser": "node test/callflow-routing-browser.cjs && node test/callflow-editor-browser.cjs && node test/callflow-canvas-browser.cjs && node test/dialog-browser.cjs",
+    "test:closure:browser": "node test/closure-browser.cjs",
+    "test:prepared:browser": "node test/prepared-mutation-browser.cjs"
   },
   "engines": {
     "node": ">=20"

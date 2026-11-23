@@ -33,5 +33,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Local-only design reference (not for upload)
-Design/
+# Local verification output
+output/playwright/
+output/independent-v12-audit-2026-11-04/
+.playwright-cli/
+
+# Local service ownership and logs contain runtime credentials/metadata.
+landing-services.json
+**/logs/

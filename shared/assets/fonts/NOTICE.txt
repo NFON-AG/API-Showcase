@@ -1,0 +1,6 @@
+Pangram Sans variable font
+
+Proprietary typeface by Pangram Pangram.
+This file comes from the project owner's locally supplied licensed brand assets.
+It is not extracted from the Admin Portal. Its license is separate from the
+showcase source code; no general font redistribution rights are granted here.

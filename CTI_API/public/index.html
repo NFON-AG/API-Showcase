@@ -1,17 +1,19 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>document.documentElement.classList.add("i18n-booting");setTimeout(() => document.documentElement.classList.remove("i18n-booting"), 1500);</script>
     <style>html.i18n-booting body{visibility:hidden}</style>
     <title>NFON CTI API Demo</title>
-    <link rel="stylesheet" href="/styles.css">
+    <script src="/appearance.js?v=b2ba19b928750eb3"></script>
+    <link rel="stylesheet" href="/styles.css?v=b2ba19b928750eb3">
+    <link rel="stylesheet" href="/appearance.css?v=b2ba19b928750eb3">
   </head>
   <body>
     <header class="app-header">
       <div class="header-title-row">
-        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" title="Back to overview">
+        <a class="home-icon-button" href="http://127.0.0.1:3010/" aria-label="Back to overview" data-i18n-aria-label="cti.back" title="Back to overview" data-i18n-title="cti.back">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M3 11.5 12 4l9 7.5"></path>
             <path d="M5.5 10.5V20h13v-9.5"></path>
@@ -20,15 +22,15 @@
         </a>
         <div>
         <h1>NFON CTI API Demo</h1>
-        <p id="account-label">Nicht verbunden</p>
+        <p id="account-label">Not connected</p>
         </div>
       </div>
       <div class="header-actions">
-        <a class="nav-button is-active" href="/" aria-current="page">Übersicht</a>
-        <a class="nav-button" href="/analytics.html">Auswertungen</a>
-        <a class="nav-button" href="/setup.html">Setup</a>
-        <span class="connection" id="connection-state">Verbinde</span>
-        <label class="demo-switch" title="Demo-Daten zuschalten">
+        <a class="nav-button is-active" href="/" aria-current="page" data-i18n-key="cti.nav.overview">Overview</a>
+        <a class="nav-button" href="/analytics.html" data-i18n-key="cti.nav.analytics">Analytics</a>
+        <a class="nav-button" href="/setup.html" data-i18n-key="cti.nav.setup">Setup</a>
+        <span class="connection" id="connection-state">Connecting</span>
+        <label id="demo-control" class="demo-switch">
           <input id="demo-toggle" type="checkbox">
           <span>Demo</span>
         </label>
@@ -36,25 +38,25 @@
     </header>
 
     <main class="app-shell">
-      <section class="metrics" aria-label="Kennzahlen">
+      <section class="metrics" aria-label="Metrics" data-i18n-aria-label="cti.metrics">
         <div class="metric">
-          <span class="metric-label">Anrufe heute</span>
+          <span class="metric-label" data-i18n-key="cti.calls.today">Calls today</span>
           <strong id="metric-events">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Angenommen</span>
+          <span class="metric-label" data-i18n-key="cti.calls.answered">Answered</span>
           <strong id="metric-answered">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Aktive Calls</span>
+          <span class="metric-label" data-i18n-key="cti.calls.active">Active calls</span>
           <strong id="metric-active">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Nebenstellen</span>
+          <span class="metric-label" data-i18n-key="cti.extensions">Extensions</span>
           <strong id="metric-extensions">0</strong>
         </div>
         <div class="metric">
-          <span class="metric-label">Bereit</span>
+          <span class="metric-label" data-i18n-key="cti.ready">Ready</span>
           <strong id="metric-available">0</strong>
         </div>
       </section>
@@ -62,17 +64,17 @@
       <section class="workspace-grid no-dial" id="dashboard-workspace">
         <div class="panel extensions-panel">
           <div class="panel-header">
-            <h2>Nebenstellen</h2>
-            <input id="extension-filter" type="search" placeholder="Suchen">
+            <h2 data-i18n-key="cti.extensions">Extensions</h2>
+            <input id="extension-filter" type="search" placeholder="Search" data-i18n-placeholder="cti.search">
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Nebenstelle</th>
-                  <th>Präsenz</th>
-                  <th>Leitung</th>
+                  <th data-i18n-key="cti.name">Name</th>
+                  <th data-i18n-key="cti.extension">Extension</th>
+                  <th data-i18n-key="cti.presence">Presence</th>
+                  <th data-i18n-key="cti.line">Line</th>
                   <th></th>
                 </tr>
               </thead>
@@ -82,20 +84,16 @@
         </div>
 
         <aside class="side-stack is-hidden" id="dial-stack">
-          <form class="panel dial-panel" id="dial-form" hidden>
+          <form class="panel dial-panel" id="dial-form" role="dialog" aria-modal="true" aria-labelledby="dial-heading" hidden>
             <div class="panel-header">
-              <h2>Click-to-Dial</h2>
+              <h2 id="dial-heading">Click-to-Dial</h2>
             </div>
-            <label>
-              Von
-              <select id="caller-select"></select>
+            <label><span data-i18n-key="cti.from">From</span><select id="caller-select"></select>
             </label>
-            <label>
-              Ziel
-              <input id="callee-input" autocomplete="off" placeholder="+49 oder Nebenstelle">
+            <label><span data-i18n-key="cti.destination">Destination</span><input id="callee-input" autocomplete="off" placeholder="Phone number or extension" data-i18n-placeholder="cti.dial.placeholder">
             </label>
-            <button class="primary-button" type="submit">Anruf starten</button>
-            <p class="form-message" id="dial-message"></p>
+            <button class="primary-button" type="submit" data-i18n-key="cti.dial.start">Start call</button>
+            <p class="form-message" id="dial-message" role="status" aria-live="polite"></p>
           </form>
         </aside>
       </section>
@@ -103,7 +101,7 @@
       <section class="workspace-grid lower-grid events-only-grid">
         <div class="panel events-panel">
           <div class="panel-header">
-            <h2>Live Events</h2>
+            <h2 data-i18n-key="cti.live.events">Live events</h2>
           </div>
           <ol id="events-list" class="event-list"></ol>
         </div>
@@ -111,9 +109,12 @@
     </main>
 
     <div id="insight-popover" class="insight-popover" role="tooltip" hidden></div>
-    <div id="call-popup" class="call-popup" hidden></div>
+    <div id="call-popup" class="call-popup" role="region" aria-live="polite" aria-atomic="true" hidden></div>
 
-    <script src="/i18n.js?v=v1.0.1-i18n"></script>
-    <script src="/app.js"></script>
+    <script src="/messages.js?v=b2ba19b928750eb3"></script>
+    <script src="/i18n.js?v=b2ba19b928750eb3"></script>
+    <script src="/phone-number.js?v=b2ba19b928750eb3"></script>
+    <script src="/demo-runtime.js?v=b2ba19b928750eb3" data-nfon-optional-demo="cti"></script>
+    <script src="/app.js?v=b2ba19b928750eb3"></script>
   </body>
 </html>

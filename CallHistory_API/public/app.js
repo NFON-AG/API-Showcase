@@ -1,8 +1,40 @@
-const ANALYTICS_SERIES = ["transcripts", "answered", "missed", "outbound"];
+// Explicit messages localize system text without translating API or customer data.
+function message(key, fallback, params = {}) {
+  const translated = window.NFON_I18N?.message?.(key, params);
+  const template = typeof translated === "string" && translated && translated !== key ? translated : fallback;
+  return template.replace(/\{(\w+)\}/g, (match, name) => Object.hasOwn(params, name) ? String(params[name]) : match);
+}
+
+function systemMessage(value) {
+  const known = {
+  "Client ID is required": "history.clientRequired",
+  "Redirect URI is not a valid URL": "history.invalidRedirect",
+  "Redirect URI must use HTTP/HTTPS and must not contain a fragment": "history.unsupportedRedirect",
+  "Login with NFON is required for live call history": "history.liveLoginRequired",
+  "Login with NFON is required for live transcript details": "history.transcriptLoginRequired",
+  "Live Call History request failed": "history.liveCallFailed",
+  "Live transcript request failed": "history.liveTranscriptFailed",
+  "Call History API is not fully configured.": "history.incompleteServerConfig",
+  "Failed to fetch": "history.networkError",
+  "fetch failed": "history.networkError",
+  "The operation was aborted due to timeout": "history.networkError",
+  "Transcript unavailable": "history.transcriptUnavailable",
+  "Transcript content is not available for this call.": "history.transcriptContentUnavailable"
+};
+  return known[value] ? message(known[value], value) : String(value || "");
+}
+
+function locale() {
+  const language = window.NFON_I18N?.getLanguage?.() || document.documentElement.lang || "en";
+  return language === "en" ? "en-GB" : language;
+}
+
+function storedValue(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function storeValue(key, value) { try { localStorage.setItem(key, value); } catch { /* Storage is optional. */ } }
+
 const DEFAULT_FILTERS = {
   range: "7d",
   direction: "all",
-  outcome: "all",
   party: "",
   transcript: "all",
   queue: "",
@@ -14,22 +46,18 @@ const state = {
   calls: [],
   source: "",
   reason: "",
+  pagination: null,
+  invalidRecords: 0,
+  loadedQuery: "",
+  loadedMode: "",
   selectedCallId: "",
   selectedTranscriptCallId: "",
-  crmAccountFilterKey: "",
   transcript: null,
   transcriptCache: new Map(),
-  assignmentPreview: null,
-  view: localStorage.getItem("callhistory-view") || "history",
-  crmModalCallId: "",
-  customerRecordsOpen: false,
-  customerRecordImagePreview: "",
-  analyticsSeries: readJsonStorage("callhistory-analytics-series", ANALYTICS_SERIES),
-  demoMode: localStorage.getItem("callhistory-demo-mode") === "1",
+  view: storedValue("callhistory-view") || "history",
+  demoMode: storedValue("callhistory-demo-mode") === "1",
   filters: { ...DEFAULT_FILTERS, ...readJsonStorage("callhistory-filters", DEFAULT_FILTERS) },
-  customerEdits: readJsonStorage("callhistory-crm-customers", {}),
-  customerRecords: readJsonStorage("callhistory-customer-records", []),
-  authLoginMode: localStorage.getItem("callhistory-auth-login-mode") || "",
+  authLoginMode: storedValue("callhistory-auth-login-mode") || "",
   authLoginMessage: "",
   authLoginError: "",
   csrfToken: "",
@@ -37,11 +65,17 @@ const state = {
   error: "",
 };
 
-const BILLING_RATE_EUR = 2.4;
-const TRANSCRIPT_ADMIN_MINUTES = 5;
-const MAX_CUSTOMER_IMAGE_BYTES = 1_200_000;
+// Keep in-progress text separate until the debounce applies the filter.
+const filterDrafts = { party: null, queue: null };
+
+let transcriptRequestSequence = 0;
+let callRequestSequence = 0;
+let callDataGeneration = 0;
+let statusRequestSequence = 0;
+let copyRequestSequence = 0;
+let copyWriteQueue = Promise.resolve();
+
 const HISTORY_RENDER_LIMIT = 80;
-const CRM_RENDER_LIMIT = 80;
 const TRANSCRIPT_RENDER_LIMIT = 60;
 
 const $ = (selector) => document.querySelector(selector);
@@ -54,12 +88,10 @@ const els = {
   refresh: $("#refresh-button"),
   demoToggle: $("#demo-toggle"),
   metrics: $("#metrics"),
-  analyticsPanel: $("#analytics-panel"),
   statusNote: $("#status-note"),
   filterPanel: $(".filter-panel"),
   rangeFilter: $("#range-filter"),
   directionFilter: $("#direction-filter"),
-  outcomeFilter: $("#outcome-filter"),
   transcriptFilter: $("#transcript-filter"),
   partyFilter: $("#party-filter"),
   queueFilter: $("#queue-filter"),
@@ -68,10 +100,6 @@ const els = {
   callsBody: $("#calls-body"),
   detailSubtitle: $("#detail-subtitle"),
   callDetail: $("#call-detail"),
-  crmSummary: $("#crm-summary"),
-  crmTicketList: $("#crm-ticket-list"),
-  crmAccountDetail: $("#crm-account-detail"),
-  customerRecordModal: $("#customer-record-modal"),
   transcriptGrid: $("#transcript-grid"),
   setupStatus: $("#setup-status"),
   redirectStatus: $("#redirect-status"),
@@ -96,22 +124,22 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function messageMarkup(key, fallback, params = {}) {
+  return `<span data-i18n-key="${escapeAttr(key)}" data-i18n-params="${escapeAttr(JSON.stringify(params))}">${escapeHtml(message(key, fallback, params))}</span>`;
+}
+
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
-function persistCustomerEdits() {
-  localStorage.setItem("callhistory-crm-customers", JSON.stringify(state.customerEdits));
-}
-
-function persistCustomerRecords() {
-  localStorage.setItem("callhistory-customer-records", JSON.stringify(customerRecords()));
-}
-
-async function apiJson(path, options = {}) {
+async function apiJson(path, options = {}, acceptResponse = () => true) {
+  const requestGeneration = callDataGeneration;
   if (isUnsafeRequest(options)) await ensureCsrfToken();
-  const response = await fetch(path, {
+  let response, body;
+  try { response = await fetch(path, {
     ...options,
+    // Listing can use the server's full 60-second budget, plus response overhead.
+    signal: options.signal || AbortSignal.timeout(path.startsWith("/api/calls?") ? 65000 : 45000),
     headers: {
       "Accept": "application/json",
       ...(options.body ? { "Content-Type": "application/json" } : {}),
@@ -119,9 +147,23 @@ async function apiJson(path, options = {}) {
       ...(options.headers || {}),
     },
   });
-  const body = await response.json();
-  rememberCsrfToken(body);
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    body = await response.json();
+  } catch (error) {
+    if (["TimeoutError", "AbortError"].includes(error.name)) throw new Error("Failed to fetch");
+    throw error;
+  }
+  const responseIsCurrent = requestGeneration === callDataGeneration && acceptResponse();
+  if (responseIsCurrent) rememberCsrfToken(body);
+  if (!response.ok) {
+    const error = new Error(body.error || `HTTP ${response.status}`); error.statusCode = response.status;
+    if (response.status === 401 && responseIsCurrent) {
+      error.invalidatedCallDataGeneration = callDataGeneration;
+      state.status = { ...state.status, authenticated: false, account: "" };
+      callDataGeneration += 1;
+      state.transcriptCache.clear();
+    }
+    throw error;
+  }
   return body;
 }
 
@@ -149,76 +191,150 @@ async function ensureCsrfToken() {
 }
 
 function queryForCalls() {
-  const outcome = state.view === "crm" ? state.filters.outcome : "all";
   const params = new URLSearchParams({
     mode: state.demoMode ? "demo" : "live",
     range: state.filters.range,
-    direction: state.filters.direction,
-    outcome,
+    direction: "all",
+    outcome: "all",
   });
-  if (state.filters.party) params.set("party", state.filters.party);
   return params.toString();
 }
 
+function phoneSearchDigits(value) {
+  return String(value || "").replace(/\(0\)/g, "").replace(/^\s*00/, "+").replace(/\D/g, "");
+}
+function phoneSearchMatches(value, query) {
+  const haystack = phoneSearchDigits(value), needle = phoneSearchDigits(query);
+  if (!needle) return false;
+  return haystack.includes(needle) || (needle.startsWith("0") && needle.length >= 7 && haystack.includes(needle.slice(1)));
+}
+
 function applyLocalFilters(calls) {
-  if (state.view !== "history") return calls;
-
   const transcriptFilter = state.filters.transcript || "all";
-  const queueFilter = normalizeLookup(state.filters.queue);
+  const queueFilter = normalizeLookup(filterDrafts.queue ?? state.filters.queue);
 
+  const party = String(filterDrafts.party ?? state.filters.party ?? "").trim().toLowerCase();
+  const digits = party.replace(/\D/g, "");
+  const phoneSearch = /^[+\d\s()./-]+$/.test(party) && Boolean(digits);
   return calls.filter((call) => {
+    if (state.filters.direction !== "all" && call.direction !== state.filters.direction) return false;
+    if (party) {
+      const parties = [call.from, call.to, call.user, call.contact];
+      const nameMatch = parties.some(value => [value?.name, value?.number, value?.company].some(text => String(text || "").toLowerCase().includes(party)));
+      const phoneMatch = phoneSearch && parties.some(value => phoneSearchMatches(value?.number, party));
+      if (!nameMatch && !phoneMatch) return false;
+    }
+    if (state.view !== "history") return true;
     if (transcriptFilter === "with" && !call.transcriptId) return false;
     if (transcriptFilter === "without" && call.transcriptId) return false;
-    if (queueFilter && !normalizeLookup(internalAssignment(call).queue).includes(queueFilter)) return false;
+    if (queueFilter && !normalizeLookup(call.queue?.name || call.queue?.number || "").includes(queueFilter)) return false;
     return true;
   });
 }
 
+function beginStatusRequest() {
+  return { sequence: ++statusRequestSequence, generation: callDataGeneration };
+}
+
+function isCurrentStatusRequest(request, error) {
+  return request.sequence === statusRequestSequence
+    && (request.generation === callDataGeneration
+      || (error?.invalidatedCallDataGeneration === request.generation
+        && callDataGeneration === request.generation + 1));
+}
+
+function adoptStatus(status, request) {
+  if (!isCurrentStatusRequest(request)) return false;
+  const previous = state.status;
+  const previousSource = requestedCallSource();
+  state.status = status;
+  if (previous && (previous.sessionRevision !== status.sessionRevision
+    || previous.authenticated !== status.authenticated || previousSource !== requestedCallSource())) {
+    clearCallData();
+    state.error = "";
+  }
+  rememberCsrfToken(status);
+  return true;
+}
+
 async function loadStatus() {
-  state.status = await apiJson("/api/status");
-  rememberCsrfToken(state.status);
+  const request = beginStatusRequest();
+  try {
+    return adoptStatus(await apiJson("/api/status"), request);
+  } catch (error) {
+    if (!isCurrentStatusRequest(request, error)) return false;
+    throw error;
+  }
 }
 
 function requestedCallSource() {
-  return state.demoMode ? "demo" : "callhistory-live";
+  // The server also serves demo calls when forced or not configured for live access.
+  return state.demoMode || state.status?.demoMode === true || state.status?.configured === false
+    ? "demo" : "callhistory-live";
 }
 
 function clearCallData(source = requestedCallSource()) {
+  copyRequestSequence += 1;
+  callDataGeneration += 1;
+  callRequestSequence += 1;
+  transcriptRequestSequence += 1;
+  state.loadedQuery = "";
+  state.loadedMode = "";
+  state.pagination = null;
+  state.invalidRecords = 0;
+  state.transcriptCache.clear();
   state.rawCalls = [];
   state.calls = [];
   state.source = source;
   state.reason = "";
   state.selectedCallId = "";
   state.selectedTranscriptCallId = "";
-  state.crmModalCallId = "";
+
   state.transcript = null;
-  state.assignmentPreview = null;
+
 }
 
-async function loadCalls() {
-  state.loading = true;
-  state.error = "";
-  if (state.source && state.source !== requestedCallSource()) {
+async function loadCalls(force = false) {
+  if (state.view === "crm") { state.loading = false; render(); return; }
+  transcriptRequestSequence += 1;
+  state.transcript = null;
+  if (state.loadedMode && state.loadedMode !== requestedCallSource()) {
     clearCallData();
   }
+  const requestSequence = ++callRequestSequence;
+  const requestedSource = requestedCallSource();
+  const query = queryForCalls();
+  if (!force && state.loadedQuery === query) {
+    state.calls = applyLocalFilters(state.rawCalls);
+    reconcileCallSelection();
+    state.loading = false;
+    render();
+    await loadSelectedTranscript();
+    return;
+  }
+  const isCurrentRequest = () => requestSequence === callRequestSequence
+    && requestedSource === requestedCallSource();
+  state.loading = true;
+  state.error = "";
   render();
   try {
-    const payload = await apiJson(`/api/calls?${queryForCalls()}`);
+    const payload = await apiJson(`/api/calls?${query}`);
+    if (!isCurrentRequest()) return;
+    state.loadedQuery = query;
+    state.loadedMode = requestedSource;
+    state.pagination = payload.pagination || null;
+    state.invalidRecords = payload.invalidRecords || 0;
     state.rawCalls = payload.calls || [];
     state.calls = applyLocalFilters(state.rawCalls);
     state.source = payload.source || "";
     state.reason = payload.reason || "";
-    if (!state.calls.some((call) => call.id === state.selectedCallId)) {
-      state.selectedCallId = state.calls[0]?.id || "";
-    }
-    if (!state.calls.some((call) => call.id === state.selectedTranscriptCallId && call.transcriptId)) {
-      state.selectedTranscriptCallId = "";
-    }
-    state.assignmentPreview = null;
+    reconcileCallSelection();
+
     state.loading = false;
     render();
     await loadSelectedTranscript();
   } catch (error) {
+    if (!isCurrentRequest()) return;
     clearCallData();
     state.error = error.message;
     state.loading = false;
@@ -226,13 +342,37 @@ async function loadCalls() {
   }
 }
 
+function reconcileCallSelection() {
+  const previousCall = state.selectedCallId;
+  const previousTranscript = state.selectedTranscriptCallId;
+  if (!state.calls.some((call) => call.id === state.selectedCallId)) {
+    state.selectedCallId = state.calls[0]?.id || "";
+  }
+  if (!state.calls.some((call) => call.id === state.selectedTranscriptCallId && call.transcriptId)) {
+    state.selectedTranscriptCallId = "";
+  }
+  // A removed selection must stay invalid even if a later filter restores the
+  // same call. Filters that retain both selections preserve the pending copy.
+  if (previousCall !== state.selectedCallId || previousTranscript !== state.selectedTranscriptCallId) {
+    copyRequestSequence += 1;
+  }
+}
+
 async function loadAll() {
+  copyRequestSequence += 1;
   try {
-    await loadStatus();
+    if (!await loadStatus()) return;
   } catch (error) {
     state.error = error.message;
   }
-  await loadCalls();
+  // Explicit Refresh retries an unavailable detail; successful content remains
+  // cached for ordinary navigation. A fresh list alone cannot refresh this ID.
+  const call = selectedCall();
+  const transcript = cachedTranscriptForCall(call);
+  if (transcript && (transcript.available === false || !callTranscriptText(call))) {
+    state.transcriptCache.delete(transcriptCacheKey(call.transcriptId));
+  }
+  await loadCalls(true);
 }
 
 function selectedCall() {
@@ -240,6 +380,8 @@ function selectedCall() {
 }
 
 async function loadSelectedTranscript() {
+  if (state.view === "crm") return;
+  const requestSequence = ++transcriptRequestSequence;
   const call = selectedCall();
   state.transcript = null;
   if (!call?.transcriptId) {
@@ -247,26 +389,32 @@ async function loadSelectedTranscript() {
     return;
   }
   const cacheKey = transcriptCacheKey(call.transcriptId);
+  const isCurrentRequest = () => requestSequence === transcriptRequestSequence
+    && state.selectedCallId === call.id
+    && transcriptCacheKey(call.transcriptId) === cacheKey;
   if (state.transcriptCache.has(cacheKey)) {
     state.transcript = state.transcriptCache.get(cacheKey);
     renderSelectedCallContent();
     return;
   }
   try {
-    const transcript = await apiJson(`/api/transcripts/${encodeURIComponent(call.transcriptId)}?mode=${state.demoMode ? "demo" : "live"}`);
+    const transcript = await apiJson(`/api/transcripts/${encodeURIComponent(call.transcriptId)}?mode=${state.demoMode ? "demo" : "live"}`, {}, isCurrentRequest);
+    if (!isCurrentRequest()) return;
     state.transcriptCache.set(cacheKey, transcript);
     state.transcript = transcript;
   } catch (error) {
+    if (!isCurrentRequest()) return;
     state.transcript = { ok: false, error: error.message };
   }
   renderSelectedCallContent();
 }
 
 function formatDateTime(value) {
-  if (!value) return "-";
-  return new Intl.DateTimeFormat("de-DE", {
+  if (!value || !Number.isFinite(Date.parse(value))) return "-";
+  return new Intl.DateTimeFormat(locale(), {
     day: "2-digit",
     month: "2-digit",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
@@ -274,37 +422,29 @@ function formatDateTime(value) {
 
 function formatDuration(seconds, compact = false) {
   const total = Number(seconds || 0);
-  if (!total) return compact ? "0m" : "0:00";
+  if (!total) return "0:00";
   const minutes = Math.floor(total / 60);
   const secs = total % 60;
-  if (compact) return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+  if (compact) return new Intl.NumberFormat(locale(), { style: "unit", unit: "minute", unitDisplay: "short" }).format(minutes) + " " + new Intl.NumberFormat(locale(), { style: "unit", unit: "second", unitDisplay: "short" }).format(secs);
   return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
-function formatCurrency(value) {
-  return new Intl.NumberFormat("de-DE", {
-    style: "currency",
-    currency: "EUR",
-    maximumFractionDigits: 2,
-  }).format(Number(value || 0));
 }
 
 function directionLabel(direction) {
   return {
-    inbound: "Eingehend",
-    outbound: "Ausgehend",
-    unknown: "Unbekannt",
+    inbound: message("history.inbound", "Inbound"),
+    outbound: message("history.outbound", "Outbound"),
+    unknown: message("history.unknown", "Unknown"),
   }[direction] || direction;
 }
 
 function outcomeLabel(outcome) {
   return {
-    answered: "Angenommen",
-    missed: "Verpasst",
-    cancelled: "Abgebrochen",
-    busy: "Besetzt",
-    failed: "Fehler",
-    unknown: "Unbekannt",
+    answered: message("history.answered", "Answered"),
+    missed: message("history.missed", "Missed"),
+    cancelled: message("history.cancelled", "Cancelled"),
+    busy: message("history.busy", "Busy"),
+    failed: message("history.error", "Error"),
+    unknown: message("history.unknown", "Unknown"),
   }[outcome] || outcome;
 }
 
@@ -329,31 +469,56 @@ function cachedTranscriptForCall(call) {
   return state.transcriptCache.get(transcriptCacheKey(call.transcriptId)) || null;
 }
 
-function callTranscriptSummary(call) {
+function isGeneratedDemo(call) {
+  return call?.source === "demo" && call?.demoTemplate === "call-history-v1";
+}
+
+function demoTranscriptParams(call) {
+  return { customer: call.contact?.name || customerParty(call).name || message("history.customer", "Customer"), company: call.contact?.company || message("history.demoAccount", "Demo account"), agent: call.user?.name || message("history.demoAgent", "Demo agent"), queue: internalParty(call).name || "Demo" };
+}
+
+function callSummaryContent(call) {
   const transcript = cachedTranscriptForCall(call);
-  return cleanSummaryText(transcript?.summary || call?.summary || "Summary noch nicht geladen.");
+  if (isGeneratedDemo(call)) {
+    return transcript?.ok
+      ? message("history.demoTranscriptSummary", "{customer} from {company} discussed the current service request. The next steps were documented.", demoTranscriptParams(call))
+      : "";
+  }
+  return cleanSummaryText(transcript?.summary) || cleanSummaryText(call?.summary);
+}
+
+function callTranscriptSummary(call) {
+  return callSummaryContent(call) || (isGeneratedDemo(call)
+    ? message("history.demoCallSummary", "{customer} · {queue} · Demo system", demoTranscriptParams(call))
+    : message("history.summaryPending", "Summary has not been loaded yet."));
 }
 
 function callTranscriptText(call) {
   const transcript = cachedTranscriptForCall(call);
+  if (isGeneratedDemo(call) && transcript?.ok) {
+    return message("history.demoTranscriptText", "{customer}: We need a brief update on the current case.\n{agent}: I will check the status and document the next steps.", demoTranscriptParams(call));
+  }
+  if (Array.isArray(transcript?.transcript) && transcript.transcript.length) {
+    return transcript.transcript.filter(entry => entry.event === "speech" && entry.text).map(entry => {
+      const party = entry.source === "caller" ? call.from : entry.source === "callee" ? call.to : null;
+      const label = party?.name || party?.number || (entry.source === "caller" ? message("history.caller", "Caller") : entry.source === "callee" ? message("history.callee", "Recipient") : message("history.unknown", "Unknown"));
+      return `${label}: ${entry.text}`;
+    }).join("\n");
+  }
   return transcript?.text || "";
 }
 
 function cleanSummaryText(value) {
-  return String(value || "")
-    .replace(/^#+\s*/g, "")
-    .replace(/^[^\p{L}\p{N}]+/u, "")
-    .replace(/^Zusammenfassung\s*[-:]\s*/i, "")
-    .trim();
+  return String(value || "").trim();
 }
 
 function aiTranscriptBadge(call, modifier = "", showEmpty = true, forcePopover = false) {
-  if (!call?.transcriptId) return showEmpty ? `<span class="transcript-empty">Keins</span>` : "";
+  if (!call?.transcriptId) return showEmpty ? `<span class="transcript-empty">${messageMarkup("history.none", "None")}</span>` : "";
   const hasPopover = forcePopover || !modifier.split(/\s+/).includes("is-corner");
   const summary = callTranscriptSummary(call);
   const className = `ai-transcript-badge${modifier ? ` ${modifier}` : ""}`;
   return `
-    <span class="${className}" ${hasPopover ? `tabindex="0"` : ""} aria-label="Transcript verfügbar"${hasPopover ? "" : ` title="Transcript verfügbar"`}>
+    <span class="${className}" ${hasPopover && !forcePopover ? `tabindex="0"` : ""} data-i18n-aria-label="history.transcriptAvailable" aria-label="${escapeAttr(message("history.transcriptAvailable", "Transcript available"))}"${hasPopover ? "" : ` data-i18n-title="history.transcriptAvailable" title="${escapeAttr(message("history.transcriptAvailable", "Transcript available"))}"`}>
       <svg class="transcript-badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
         <rect x="4" y="3.5" width="12.5" height="17" rx="2.2" fill="#00d981"></rect>
         <rect x="6.6" y="7" width="7.3" height="1.6" rx="0.8" fill="#ffffff"></rect>
@@ -361,36 +526,82 @@ function aiTranscriptBadge(call, modifier = "", showEmpty = true, forcePopover =
         <rect x="6.6" y="13" width="5" height="1.6" rx="0.8" fill="#ffffff"></rect>
         <path d="M18.7 11l0.85 2.2 2.2 0.85-2.2 0.85-0.85 2.2-0.85-2.2-2.2-0.85 2.2-0.85z" fill="#202426"></path>
       </svg>
-      ${hasPopover ? `<span class="transcript-summary-popover" role="tooltip">
-        <strong>Transcript-Zusammenfassung</strong>
-        <span>${escapeHtml(summary)}</span>
-        <small>${escapeHtml(call.transcriptId)}</small>
+      ${hasPopover ? `<span class="transcript-summary-popover" role="tooltip" aria-hidden="true">
+        <strong>${messageMarkup("history.transcriptSummary", "Transcript summary")}</strong>
+        <span data-i18n-ignore>${escapeHtml(summary)}</span>
+        <small data-i18n-ignore>${escapeHtml(call.transcriptId)}</small>
       </span>` : ""}
     </span>
   `;
 }
 
+function fitTranscriptPopover(badge) {
+  const popover = badge?.querySelector(".transcript-summary-popover");
+  if (!popover) return;
+  const viewport = window.visualViewport;
+  const inset = 8, gap = 7;
+  let left = (viewport?.offsetLeft || 0) + inset;
+  let top = (viewport?.offsetTop || 0) + inset;
+  let right = (viewport ? viewport.offsetLeft + viewport.width : window.innerWidth) - inset;
+  let bottom = (viewport ? viewport.offsetTop + viewport.height : window.innerHeight) - inset;
+  for (let parent = badge.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    const clipsX = /^(auto|scroll|hidden|clip)$/.test(style.overflowX);
+    const clipsY = /^(auto|scroll|hidden|clip)$/.test(style.overflowY);
+    if (!clipsX && !clipsY) continue;
+    const box = parent.getBoundingClientRect();
+    if (clipsX) {
+      left = Math.max(left, box.left + parent.clientLeft + inset);
+      right = Math.min(right, box.left + parent.clientLeft + parent.clientWidth - inset);
+    }
+    if (clipsY) {
+      top = Math.max(top, box.top + parent.clientTop + inset);
+      bottom = Math.min(bottom, box.top + parent.clientTop + parent.clientHeight - inset);
+    }
+  }
+  const anchor = badge.getBoundingClientRect();
+  if (right - left < 32 || bottom - top < 32 || anchor.bottom < top || anchor.top > bottom) {
+    popover.style.visibility = "hidden";
+    return;
+  }
+  popover.style.visibility = "";
+  popover.style.maxWidth = `${Math.floor(right - left)}px`;
+  popover.style.maxHeight = "none";
+  const natural = popover.getBoundingClientRect();
+  const below = Math.max(0, bottom - anchor.bottom - gap);
+  const above = Math.max(0, anchor.top - top - gap);
+  const flip = natural.height > below && above > below;
+  popover.style.maxHeight = `${Math.floor(Math.max(32, flip ? above : below))}px`;
+  const box = popover.getBoundingClientRect();
+  popover.style.left = `${Math.max(left, Math.min(anchor.left, right - box.width)) - anchor.left}px`;
+  const desiredTop = flip ? anchor.top - gap - box.height : anchor.bottom + gap;
+  popover.style.top = `${Math.max(top, Math.min(desiredTop, bottom - box.height)) - anchor.top}px`;
+}
+
+function fitVisibleTranscriptPopovers() {
+  document.querySelectorAll(".ai-transcript-badge:hover, .ai-transcript-badge:focus-visible").forEach(fitTranscriptPopover);
+}
+
 function transcriptCopyText(call) {
+  const summary = callSummaryContent(call);
   return [
-    `Transcript: ${call.transcriptId || "-"}`,
-    `Call: ${formatDateTime(call.startedAt)}`,
+    `${message("history.transcript", "Transcript")}: ${call.transcriptId || "-"}`,
+    `${message("history.call", "Call")}: ${formatDateTime(call.startedAt)}`,
     "",
-    "Zusammenfassung",
-    callTranscriptSummary(call),
-    "",
-    "Transkript",
-    callTranscriptText(call) || "Transcript-Text noch nicht geladen.",
+    ...(summary ? [message("history.summary", "Summary"), summary, ""] : []),
+    message("history.transcript", "Transcript"),
+    callTranscriptText(call),
   ].join("\n");
 }
 
 function copyPayload(call, kind) {
-  if (kind === "summary") return callTranscriptSummary(call);
-  if (kind === "transcript") return callTranscriptText(call) || "Transcript-Text noch nicht geladen.";
+  if (kind === "summary") return callSummaryContent(call);
+  if (kind === "transcript") return callTranscriptText(call);
   return transcriptCopyText(call);
 }
 
 function normalizeLookup(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9+]/g, "");
+  return String(value || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}+]/gu, "");
 }
 
 function customerParty(call) {
@@ -401,325 +612,39 @@ function internalParty(call) {
   return call.direction === "outbound" ? call.from || {} : call.to || {};
 }
 
-function isGenericPartyName(value) {
-  return ["anrufer", "ziel", "unbekannt", "unknown"].includes(String(value || "").trim().toLowerCase());
-}
-
-function crmCustomer(call) {
-  const party = customerParty(call);
-  const contact = call.contact || {};
-  const context = party.context && party.context !== "global" ? party.context : "";
-  const fallbackName = party.name || party.number || "Unbekannter Kontakt";
-  const hasKnownIdentity = Boolean(contact.company || contact.name || contact.email || (party.name && !isGenericPartyName(party.name)));
-  const base = {
-    key: normalizeLookup(contact.email || party.number || party.name || call.id),
-    name: contact.name || fallbackName,
-    company: contact.company || (context ? `Konto ${context}` : hasKnownIdentity ? "Direktkunde" : "Neukunde"),
-    number: party.number || "",
-    email: contact.email || party.email || "",
-    context,
-    rate: BILLING_RATE_EUR,
-    imageData: "",
-    visualColor: "#f0f4f3",
-  };
-  const edit = state.customerEdits[base.key] || {};
-  const rate = Number(edit.rate ?? base.rate);
-  return {
-    ...base,
-    ...edit,
-    key: base.key,
-    name: edit.name || base.name,
-    company: edit.company || base.company,
-    number: edit.number || base.number,
-    email: edit.email || base.email,
-    rate: Number.isFinite(rate) ? rate : BILLING_RATE_EUR,
-    imageData: edit.imageData || "",
-    visualColor: edit.visualColor || base.visualColor,
-  };
-}
-
-function crmTicketStatus(call) {
-  if (call.outcome === "answered") return "billable";
-  if (call.direction === "inbound") return "callback";
-  return "review";
-}
-
-function crmTicketStatusLabel(status) {
-  return {
-    billable: "Abrechenbar",
-    callback: "Rückruf",
-    review: "Prüfen",
-  }[status] || "Prüfen";
-}
-
-function billableMinutes(call) {
-  if (call.outcome !== "answered") return 0;
-  return Math.max(1, Math.ceil(Number(call.durationSeconds || 0) / 60));
-}
-
-function crmSummaryText(call, customer = crmCustomer(call)) {
-  const transcriptSummary = callTranscriptSummary(call);
-  if (transcriptSummary && transcriptSummary !== "Summary noch nicht geladen.") return transcriptSummary;
-  const direction = directionLabel(call.direction);
-  const outcome = outcomeLabel(call.outcome).toLowerCase();
-  const duration = Number(call.durationSeconds || 0)
-    ? `Dauer ${formatDuration(call.durationSeconds, true)}`
-    : "keine abrechenbare Gesprächsdauer";
-  const owner = call.user?.name || internalParty(call).name || "Team";
-  return `${direction}-Call mit ${customer.name || "Kontakt"} wurde als ${outcome} erkannt. ${duration}; Zuordnung zu ${owner} und Abrechnungsvorschlag automatisch vorbereitet.`;
-}
-
-function crmTicketTitle(call, customer) {
-  if (call.ticket?.title) return call.ticket.title;
-  if (call.outcome === "answered") return `Supportzeit ${customer.name || "Kunde"}`;
-  if (call.direction === "inbound") return `Rückruf ${customer.name || "Kunde"}`;
-  return `Call Review ${customer.name || "Kunde"}`;
-}
-
-function ticketDisplayId(value) {
-  return String(value || "").replace(/^SUP-/i, "Ticket-");
-}
-
-function ticketSequenceMap() {
-  return new Map([...state.calls]
-    .sort((a, b) => new Date(a.startedAt) - new Date(b.startedAt) || String(a.id).localeCompare(String(b.id)))
-    .map((call, index) => [call.id, index + 1]));
-}
-
-function buildCrmTickets() {
-  const sequence = ticketSequenceMap();
-  return state.calls.map((call) => {
-    const customer = crmCustomer(call);
-    const owner = call.user?.name || internalParty(call).name || "Unassigned";
-    const minutes = billableMinutes(call);
-    const status = crmTicketStatus(call);
-    const ticketId = ticketDisplayId(call.ticket?.id || `Ticket-${String(sequence.get(call.id) || 0).padStart(5, "0")}`);
-    return {
-      call,
-      id: ticketId,
-      title: crmTicketTitle(call, customer),
-      customer,
-      owner,
-      minutes,
-      amount: minutes * customer.rate,
-      status,
-      summary: crmSummaryText(call, customer),
-      automated: call.direction === "inbound" ? "Auto-Ticket aus eingehendem Call" : "Servicezeit aus Call History",
-    };
-  });
-}
-
-function crmTicketForCall(call) {
-  if (!call) return null;
-  return buildCrmTickets().find((ticket) => ticket.call.id === call.id) || null;
-}
-
-function crmAccounts(tickets = buildCrmTickets()) {
-  const accounts = new Map();
-  tickets.forEach((ticket) => {
-    const key = ticket.customer.key || ticket.id;
-    const current = accounts.get(key) || {
-      ...ticket.customer,
-      calls: 0,
-      tickets: 0,
-      billableMinutes: 0,
-      amount: 0,
-      open: 0,
-      lastCall: ticket.call.startedAt,
-    };
-    current.calls += 1;
-    current.tickets += 1;
-    current.billableMinutes += ticket.minutes;
-    current.amount += ticket.amount;
-    if (ticket.status !== "billable") current.open += 1;
-    if (new Date(ticket.call.startedAt) > new Date(current.lastCall)) current.lastCall = ticket.call.startedAt;
-    accounts.set(key, current);
-  });
-  return [...accounts.values()].sort((a, b) => b.amount - a.amount || b.calls - a.calls);
-}
-
-function customerRecords() {
-  if (!Array.isArray(state.customerRecords)) return [];
-  return state.customerRecords
-    .filter((record) => record && typeof record === "object")
-    .map((record) => ({
-      id: String(record.id || ""),
-      company: String(record.company || "").trim(),
-      name: String(record.name || "").trim(),
-      email: String(record.email || "").trim(),
-      number: String(record.number || "").trim(),
-      rate: Number(record.rate || 0),
-      note: String(record.note || "").trim(),
-      imageData: String(record.imageData || ""),
-      createdAt: String(record.createdAt || ""),
-    }))
-    .filter((record) => record.id && (record.company || record.name || record.email || record.number));
-}
-
-function createCustomerRecordId() {
-  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-  return `customer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function customerInitials(customer) {
-  const source = customer.company || customer.name || customer.number || "K";
-  return source
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
-}
-
-function customerVisual(customer, sizeClass = "") {
-  const classes = ["customer-visual", sizeClass].filter(Boolean).join(" ");
-  if (customer.imageData) {
-    return `<span class="${escapeAttr(classes)}"><img src="${escapeAttr(customer.imageData)}" alt=""></span>`;
-  }
-  return `<span class="${escapeAttr(classes)}" style="background:${escapeAttr(customer.visualColor || "#f0f4f3")}">${escapeHtml(customerInitials(customer))}</span>`;
-}
-
-function customerEditValue(customer, field) {
-  const edit = state.customerEdits[customer.key] || {};
-  return edit[field] ?? customer[field] ?? "";
+function rangeLabel() {
+  return { today: message("history.today", "Today"), "7d": message("history.sevenDays", "7 days"), "30d": message("history.thirtyDays", "30 days") }[state.filters.range] || state.filters.range;
 }
 
 function sourceLabel() {
-  if (state.source === "callhistory-live") return "Live-Daten";
-  if (state.source === "demo-fallback") return "Demo-Fallback";
-  return "Demo-Daten";
+  if (!state.demoMode && state.status && !state.status.authenticated && !["demo", "demo-fallback"].includes(state.source)) return message("history.loginRequired", "Sign in required");
+  if (state.source === "callhistory-live") return message("history.liveData", "Live data");
+  if (state.source === "demo-fallback") return message("history.demoFallback", "Demo fallback");
+  return message("history.demoData", "Demo data");
 }
 
 function callMetrics() {
   const total = state.calls.length;
   const missed = state.calls.filter((call) => call.outcome === "missed").length;
   const answered = state.calls.filter((call) => call.outcome === "answered").length;
-  const duration = state.calls.reduce((sum, call) => sum + Number(call.durationSeconds || 0), 0);
+  const duration = state.calls.filter(call => call.outcome === "answered").reduce((sum, call) => sum + Math.max(0, Number(call.durationSeconds) || 0), 0);
   const transcripts = state.calls.filter((call) => call.transcriptId).length;
-  const crmTickets = buildCrmTickets();
-  const autoCustomerRecords = crmAccounts(crmTickets).length;
-  const manualCustomerRecords = customerRecords().length;
-  const billableMinutesTotal = crmTickets.reduce((sum, ticket) => sum + ticket.minutes, 0);
-  const billableAmount = crmTickets.reduce((sum, ticket) => sum + ticket.amount, 0);
-  return {
-    total,
-    missed,
-    answered,
-    average: answered ? Math.round(duration / answered) : 0,
-    transcripts,
-    tickets: crmTickets.length,
-    customerRecords: autoCustomerRecords + manualCustomerRecords,
-    autoCustomerRecords,
-    manualCustomerRecords,
-    billableMinutesTotal,
-    billableAmount,
-  };
-}
-
-function localDateKey(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function shortDateLabel(value) {
-  return new Intl.DateTimeFormat("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-  }).format(value);
-}
-
-function analyticsDays() {
-  const latest = state.calls.reduce((max, call) => {
-    const date = new Date(call.startedAt);
-    return Number.isNaN(date.getTime()) || date <= max ? max : date;
-  }, new Date());
-  const end = new Date(latest.getFullYear(), latest.getMonth(), latest.getDate());
-  const days = [];
-  for (let offset = 6; offset >= 0; offset -= 1) {
-    const date = new Date(end);
-    date.setDate(end.getDate() - offset);
-    days.push({
-      key: localDateKey(date),
-      label: shortDateLabel(date),
-      total: 0,
-      answered: 0,
-      missed: 0,
-      outbound: 0,
-      transcripts: 0,
-      amount: 0,
-    });
-  }
-  const byDay = new Map(days.map((day) => [day.key, day]));
-  buildCrmTickets().forEach((ticket) => {
-    const day = byDay.get(localDateKey(ticket.call.startedAt));
-    if (!day) return;
-    day.total += 1;
-    if (ticket.call.outcome === "answered") day.answered += 1;
-    if (["missed", "cancelled", "failed"].includes(ticket.call.outcome)) day.missed += 1;
-    if (ticket.call.direction === "outbound") day.outbound += 1;
-    if (ticket.call.transcriptId) day.transcripts += 1;
-    day.amount += ticket.amount;
-  });
-  return days;
-}
-
-function linePoints(days, key, max, width = 520, height = 134) {
-  const left = 18;
-  const right = width - 12;
-  const top = 16;
-  const bottom = height - 28;
-  const step = days.length > 1 ? (right - left) / (days.length - 1) : 0;
-  return days.map((day, index) => {
-    const value = Number(day[key] || 0);
-    return {
-      x: Math.round(left + step * index),
-      y: Math.round(bottom - (value / max) * (bottom - top)),
-      value,
-    };
-  });
-}
-
-function pointsAttr(points) {
-  return points.map((point) => `${point.x},${point.y}`).join(" ");
-}
-
-function smoothLinePath(points) {
-  if (!points.length) return "";
-  if (points.length === 1) return `M${points[0].x} ${points[0].y}`;
-  return points.slice(1).reduce((path, point, index) => {
-    const previous = points[index];
-    const midX = (previous.x + point.x) / 2;
-    return `${path} C ${midX} ${previous.y}, ${midX} ${point.y}, ${point.x} ${point.y}`;
-  }, `M${points[0].x} ${points[0].y}`);
-}
-
-function areaLinePath(points, baseline = 106) {
-  if (!points.length) return "";
-  const first = points[0];
-  const last = points[points.length - 1];
-  return `${smoothLinePath(points)} L ${last.x} ${baseline} L ${first.x} ${baseline} Z`;
+  return { total, missed, answered, average: answered ? Math.round(duration / answered) : 0, transcripts };
 }
 
 function render() {
   renderControls();
   renderHeader();
   renderMetrics();
-  renderAnalytics();
   renderStatusNote();
   renderActiveViewContent();
-  renderCustomerRecordsModal();
   renderView();
 }
 
 function renderActiveViewContent() {
   clearInactiveViewContent();
   if (state.view === "crm") {
-    renderCrm();
+    renderCrmDemo();
   } else if (state.view === "transcripts") {
     renderTranscripts();
   } else if (state.view === "setup") {
@@ -732,24 +657,21 @@ function renderActiveViewContent() {
 }
 
 function renderSelectedCallContent() {
-  if (state.view === "crm") {
-    renderCrm();
-  } else if (state.view === "transcripts") {
+  const focusedCallId = document.activeElement?.dataset?.callId;
+  const focusedPanel = document.activeElement?.classList?.contains?.("transcript-detail-card");
+  if (state.view === "transcripts") {
     renderTranscripts();
   } else if (state.view === "history") {
     renderDetail();
   }
+  if (focusedPanel) focusCallSelection(state.selectedTranscriptCallId, true);
+  if (focusedCallId) [...document.querySelectorAll("[data-call-id]")].find(node => node.dataset.callId === focusedCallId)?.focus({ preventScroll: true });
 }
 
 function clearInactiveViewContent() {
   if (state.view !== "history") {
     els.callsBody.innerHTML = "";
     els.callDetail.innerHTML = "";
-  }
-  if (state.view !== "crm") {
-    els.crmSummary.innerHTML = "";
-    els.crmTicketList.innerHTML = "";
-    els.crmAccountDetail.innerHTML = "";
   }
   if (state.view !== "transcripts") {
     els.transcriptGrid.innerHTML = "";
@@ -762,13 +684,12 @@ function clearInactiveViewContent() {
 }
 
 function renderControls() {
-  els.demoToggle.checked = state.demoMode;
+  if (els.demoToggle) els.demoToggle.checked = state.demoMode;
   els.rangeFilter.value = state.filters.range;
   els.directionFilter.value = state.filters.direction;
-  els.outcomeFilter.value = state.filters.outcome;
   els.transcriptFilter.value = state.filters.transcript || "all";
-  els.partyFilter.value = state.filters.party;
-  els.queueFilter.value = state.filters.queue || "";
+  els.partyFilter.value = filterDrafts.party ?? state.filters.party;
+  els.queueFilter.value = filterDrafts.queue ?? (state.filters.queue || "");
   renderFilterContext();
 }
 
@@ -778,7 +699,7 @@ function renderFilterContext() {
   const visibleFieldsByView = {
     history: new Set(["range", "direction", "transcript", "party", "queue"]),
     transcripts: new Set(["range", "direction", "party"]),
-    crm: new Set(["range", "direction", "outcome", "party"]),
+    crm: new Set(),
     setup: new Set(),
   };
   const visibleFields = visibleFieldsByView[state.view] || visibleFieldsByView.history;
@@ -788,16 +709,38 @@ function renderFilterContext() {
 
   const partyLabel = els.filterPanel.querySelector('[data-filter-field="party"] .filter-label-text');
   const isNumberSearch = state.view === "history" || state.view === "transcripts";
-  if (partyLabel) partyLabel.textContent = isNumberSearch ? "Rufnummer" : "Teilnehmer";
-  els.partyFilter.placeholder = isNumberSearch ? "Rufnummer suchen" : "Name, Nummer, Ticket";
-  els.queueFilter.placeholder = "Queue suchen";
+  if (partyLabel) {
+    partyLabel.dataset.i18nKey = isNumberSearch ? "history.phoneNumber" : "history.participant";
+    partyLabel.textContent = isNumberSearch ? message("history.phoneNumber", "Phone number") : message("history.participant", "Participant");
+  }
+  els.partyFilter.dataset.i18nPlaceholder = isNumberSearch ? "history.searchNumber" : "history.searchParty";
+  els.partyFilter.placeholder = isNumberSearch ? message("history.searchNumber", "Search phone number") : message("history.searchParty", "Name or number");
+  els.queueFilter.dataset.i18nPlaceholder = "history.searchQueue";
+  els.queueFilter.placeholder = message("history.searchQueue", "Search queue");
 }
 
 function renderHeader() {
+  els.connection.removeAttribute("data-status-mode");
+  els.connection.setAttribute("data-i18n-ignore", "");
+  const fixedDemo = state.view === "crm";
+  els.refresh.hidden = fixedDemo;
+  if (els.demoToggle) els.demoToggle.closest("label").hidden = fixedDemo;
+  if (fixedDemo) {
+    els.account.textContent = message("history.fixedCrmDemo", "Transcript integration · Demo");
+    els.connection.className = "connection";
+    els.connection.textContent = "Demo";
+    els.connection.setAttribute("data-status-mode", "demo");
+    els.connection.removeAttribute("title");
+    return;
+  }
+  const staticDemo = window.NFON_WEB_ONLY_DEMO || window.location.protocol === "file:";
   const status = state.status;
-  els.account.textContent = status
-    ? `${status.account || "NFON User"} · ${sourceLabel()}`
-    : "Call History wird geprüft";
+  const account = status?.authenticated
+    ? `<span data-i18n-ignore>${escapeHtml(status.account || message("history.nfonUser", "NFON user"))}</span>`
+    : messageMarkup("history.loginRequired", "Sign in required");
+  els.account.innerHTML = staticDemo ? messageMarkup("history.demoData", "Demo data") : status
+    ? (!status.authenticated && !state.demoMode && !["demo", "demo-fallback"].includes(state.source) ? account : `${account} · ${escapeHtml(sourceLabel())}`)
+    : messageMarkup("history.checkingHistory", "Checking Call History");
 
   const authLogin = $("#auth-login");
   const authLogout = $("#auth-logout");
@@ -811,196 +754,84 @@ function renderHeader() {
 
   els.connection.className = "connection";
   els.connection.removeAttribute("title");
-  if (state.error) {
-    els.connection.textContent = "Fehler";
+  if (!status?.authenticated && !state.demoMode && !["demo", "demo-fallback"].includes(state.source)) {
+    els.connection.textContent = message("history.loginRequired", "Sign in required");
+    els.connection.setAttribute("data-status-mode", "setup");
+  } else if (state.error) {
+    els.connection.textContent = message("history.error", "Error");
     els.connection.classList.add("is-error");
-    els.connection.title = state.error;
+    els.connection.title = systemMessage(state.error);
   } else if (state.loading) {
-    els.connection.textContent = "Prüft";
+    els.connection.textContent = message("history.checking", "Checking");
   } else if (state.source === "callhistory-live") {
-    els.connection.textContent = "Bereit";
+    els.connection.textContent = message("history.ready", "Ready");
     els.connection.classList.add("is-online");
-  } else if (state.source === "demo-fallback" || !status?.configured) {
+  } else if (!staticDemo && !state.demoMode && !status?.configured && !["demo", "demo-fallback"].includes(state.source)) {
     els.connection.textContent = "Setup";
     els.connection.classList.add("is-warning");
-    els.connection.title = state.reason || "Call History API ist noch nicht vollständig konfiguriert.";
+    els.connection.title = state.reason || message("history.configurationIncomplete", "Call History API configuration is incomplete.");
   } else {
     els.connection.textContent = "Demo";
-    els.connection.classList.add("is-warning");
+    els.connection.setAttribute("data-status-mode", "demo");
+    if (state.source === "demo-fallback" && state.reason) els.connection.title = systemMessage(state.reason);
   }
+}
+
+function callDataState() {
+  if (state.loading) return ["history.loadingCalls", "Loading calls"];
+  if (state.status && !state.status.authenticated && !state.demoMode && !["demo", "demo-fallback"].includes(state.source)) return ["history.loginRequired", "Sign in required"];
+  if (state.error) return requestedCallSource() === "demo"
+    ? ["history.demoCallFailed", "Demo call list could not be loaded"]
+    : ["history.liveCallFailed", "Live Call History request failed"];
+  return null;
 }
 
 function renderMetrics() {
-  if (state.view === "setup") {
-    els.metrics.hidden = true;
-    els.metrics.innerHTML = "";
-    return;
-  }
-
-  els.metrics.hidden = false;
+  els.metrics.hidden = state.view === "setup" || state.view === "crm" || Boolean(callDataState());
+  if (els.metrics.hidden) { els.metrics.innerHTML = ""; return; }
   const metrics = callMetrics();
-  const customerRecordDetail = `${metrics.autoCustomerRecords} autom. · ${metrics.manualCustomerRecords} manuell`;
   const items = [
-    ["Calls", metrics.total, `${metrics.answered} angenommen`],
-    ["Tickets", metrics.tickets, `${formatCurrency(metrics.billableAmount)} abrechenbar`],
-    ["Kundensätze", metrics.customerRecords, customerRecordDetail, "customer-records"],
-    ["Ø Dauer", formatDuration(metrics.average, true), `${metrics.answered} angenommene Calls`],
-    ["Transcripts", metrics.transcripts, `${metrics.missed} verpasst`],
+    [message("history.calls", "Calls"), metrics.total, message("history.answeredCount", "{count} answered", { count: metrics.answered })],
+    [message("history.missedCalls", "Missed calls"), metrics.missed, ""],
+    [message("history.averageDuration", "Average duration"), formatDuration(metrics.average, true), message("history.answeredCalls", "{count} answered calls", { count: metrics.answered })],
+    [message("history.transcripts", "Transcripts"), metrics.transcripts, ""],
   ];
-  if (state.view === "crm") {
-    items.splice(2, 0, ["Abrechenbar", formatCurrency(metrics.billableAmount), `${metrics.billableMinutesTotal} Minuten`]);
-  }
-  els.metrics.innerHTML = items.map(([label, value, detail, action]) => {
-    const tag = action ? "button" : "div";
-    const actionAttrs = action ? ` type="button" data-metric-action="${escapeAttr(action)}" aria-label="${escapeAttr(`${label}: ${value}. Kundensatz anlegen`)}"` : "";
-    return `
-    <${tag} class="metric ${action ? "metric-button" : ""}"${actionAttrs}>
-      <span class="metric-label">${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
-      <span class="metric-detail">${escapeHtml(detail)}</span>
-    </${tag}>
-  `;
-  }).join("");
-}
-
-function renderAnalytics() {
-  if (!els.analyticsPanel) return;
-  if (state.view !== "crm" || state.loading || !state.calls.length) {
-    els.analyticsPanel.hidden = true;
-    els.analyticsPanel.innerHTML = "";
-    return;
-  }
-
-  const metrics = callMetrics();
-  const days = analyticsDays();
-  const maxCalls = Math.max(1, ...days.flatMap((day) => [day.answered, day.missed, day.outbound, day.transcripts]));
-  const maxTotal = Math.max(1, ...days.map((day) => day.total));
-  const answeredPoints = linePoints(days, "answered", maxCalls);
-  const missedPoints = linePoints(days, "missed", maxCalls);
-  const outboundPoints = linePoints(days, "outbound", maxCalls);
-  const transcriptPoints = linePoints(days, "transcripts", maxCalls);
-  const labelPoints = linePoints(days, "total", maxTotal);
-  const automationMinutes = metrics.transcripts * TRANSCRIPT_ADMIN_MINUTES;
-  const answerRate = metrics.total ? Math.round((metrics.answered / metrics.total) * 100) : 0;
-  const activeSeries = Array.isArray(state.analyticsSeries)
-    ? state.analyticsSeries.filter((key) => ANALYTICS_SERIES.includes(key))
-    : [...ANALYTICS_SERIES];
-  if (!activeSeries.length) activeSeries.push("transcripts");
-  const series = [
-    ["transcripts", "Transkription", transcriptPoints, "#7146f2", "purple"],
-    ["answered", "Angenommen", answeredPoints, "#00d981", "green"],
-    ["missed", "Nicht angenommen", missedPoints, "#f36b5b", "coral"],
-    ["outbound", "Ausgehend", outboundPoints, "#3513cf", "blue"],
-  ];
-  const visibleSeries = series
-    .filter(([key]) => activeSeries.includes(key))
-    .map(([key, label, points, color, colorClass]) => ({
-      key,
-      label,
-      points,
-      color,
-      colorClass,
-      width: key === "transcripts" ? 4 : 3.5,
-    }));
-
-  els.analyticsPanel.hidden = false;
-  els.analyticsPanel.innerHTML = `
-    <div class="analytics-header">
-      <div>
-        <span class="panel-kicker">Auswertung</span>
-      </div>
-      <p>${escapeHtml(metrics.tickets)} Tickets · ${escapeHtml(formatCurrency(metrics.billableAmount))} abrechenbar · ${escapeHtml(automationMinutes)} Min. Nacharbeit vermieden</p>
-    </div>
-    <div class="analytics-showcase">
-      <div class="analytics-chart wide-panel">
-        <div class="panel-header">
-          <h3>Call-Verlauf</h3>
-          <span class="panel-kicker">${escapeHtml(answerRate)}% angenommen</span>
-        </div>
-        <div class="line-chart">
-          <svg viewBox="0 0 520 134" aria-hidden="true">
-            <defs>
-              ${visibleSeries.map((item) => `
-                <linearGradient id="callhistory-${escapeAttr(item.key)}-fill" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0%" stop-color="${escapeAttr(item.color)}" stop-opacity="0.16"></stop>
-                  <stop offset="58%" stop-color="${escapeAttr(item.color)}" stop-opacity="0.07"></stop>
-                  <stop offset="100%" stop-color="${escapeAttr(item.color)}" stop-opacity="0"></stop>
-                </linearGradient>
-              `).join("")}
-            </defs>
-            <path d="M18 106H508" stroke="#d8e0df"></path>
-            <path d="M18 64H508" stroke="#edf1f0"></path>
-            ${visibleSeries.map((item) => `
-              <path d="${areaLinePath(item.points)}" fill="url(#callhistory-${escapeAttr(item.key)}-fill)"></path>
-            `).join("")}
-            ${visibleSeries.map((item) => `
-              <path d="${smoothLinePath(item.points)}" fill="none" stroke="${escapeAttr(item.color)}" stroke-width="${item.width}" stroke-linecap="round" stroke-linejoin="round"></path>
-            `).join("")}
-            ${days.map((day, index) => `<text x="${labelPoints[index].x}" y="128" text-anchor="middle">${escapeHtml(day.label)}</text>`).join("")}
-          </svg>
-          <div class="chart-legend">
-            ${series.map(([key, label, , , colorClass]) => `
-              <button class="analytics-toggle ${activeSeries.includes(key) ? "is-active" : ""}" type="button" data-analytics-series="${escapeAttr(key)}" aria-pressed="${activeSeries.includes(key) ? "true" : "false"}">
-                <i class="legend-dot ${escapeAttr(colorClass)}"></i>${escapeHtml(label)}
-              </button>
-            `).join("")}
-            <button class="analytics-toggle ${activeSeries.length === ANALYTICS_SERIES.length ? "is-active" : ""}" type="button" data-analytics-series="all" aria-pressed="${activeSeries.length === ANALYTICS_SERIES.length ? "true" : "false"}">Alle</button>
-          </div>
-        </div>
-      </div>
-      <div class="analytics-chart">
-        <div class="panel-header">
-          <h3>Tickets</h3>
-          <span class="panel-kicker">7 Tage</span>
-        </div>
-        <div class="daily-bars">
-          ${days.map((day) => {
-            const answeredHeight = Math.max(0, Math.round((day.answered / maxTotal) * 86));
-            const missedHeight = Math.max(0, Math.round((day.missed / maxTotal) * 86));
-            const outboundHeight = Math.max(0, Math.round((day.outbound / maxTotal) * 86));
-            return `
-              <div class="daily-slot" title="${escapeAttr(day.label)} · ${day.total} Tickets">
-                <strong>${day.total || ""}</strong>
-                <div class="daily-stack">
-                  <span class="bar-segment answered" style="height:${answeredHeight}px"></span>
-                  <span class="bar-segment missed" style="height:${missedHeight}px"></span>
-                  <span class="bar-segment outbound" style="height:${outboundHeight}px"></span>
-                </div>
-                <span>${escapeHtml(day.label)}</span>
-              </div>
-            `;
-          }).join("")}
-        </div>
-      </div>
-      <div class="analytics-chart insight-panel">
-        <div class="panel-header">
-          <h3>Abrechnung</h3>
-          <span class="panel-kicker">Showcase</span>
-        </div>
-        <div class="analytics-insights">
-          <div><span>Umsatz</span><strong>${escapeHtml(formatCurrency(metrics.billableAmount))}</strong></div>
-          <div><span>Minuten</span><strong>${escapeHtml(metrics.billableMinutesTotal)} abrechenbar</strong></div>
-          <div><span>Nacharbeit</span><strong>${escapeHtml(automationMinutes)} Min. gespart</strong></div>
-        </div>
-      </div>
-    </div>
-  `;
+  els.metrics.innerHTML = items.map(([label, value, detail]) => `<div class="metric"><span class="metric-label">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><span class="metric-detail">${escapeHtml(detail)}</span></div>`).join("");
 }
 
 function renderStatusNote() {
+  if (state.view === "crm") { els.statusNote.hidden = true; els.statusNote.innerHTML = ""; return; }
   els.statusNote.hidden = false;
+  if (!state.loading && !state.demoMode && !state.status?.authenticated && !["demo", "demo-fallback"].includes(state.source)) {
+    els.statusNote.className = "status-note";
+    els.statusNote.innerHTML = `<span>${messageMarkup("history.loginRequired", "Sign in required")}</span><button type="button" class="secondary-button" data-open-setup>${messageMarkup("history.setup", "Setup")}</button>`;
+    els.statusNote.querySelector("[data-open-setup]")?.addEventListener("click", () => { state.view = "setup"; render(); });
+    return;
+  }
   if (state.error) {
     els.statusNote.className = "status-note is-error";
-    els.statusNote.innerHTML = `<strong>Fehler.</strong><span>${escapeHtml(state.error)}</span>`;
+    els.statusNote.innerHTML = `<strong>${messageMarkup("history.errorPrefix", "Error.")}</strong><span>${escapeHtml(systemMessage(state.error))}</span>`;
     return;
   }
 
   if (state.loading) {
     els.statusNote.className = "status-note";
-    els.statusNote.innerHTML = "<strong>Call History wird geladen.</strong>";
+    els.statusNote.innerHTML = `<strong>${messageMarkup("history.loadingHistoryNote", "Loading Call History.")}</strong>`;
     return;
   }
 
+  if (state.source === "callhistory-live" && state.pagination?.complete === false) {
+    els.statusNote.className = "status-note is-warning";
+    els.statusNote.innerHTML = messageMarkup("history.partialHistory", "The call list is incomplete. Narrow the period or refresh before using the totals.")
+      + (state.invalidRecords ? messageMarkup("history.invalidDates", "Records without a valid date were excluded: {count}.", { count: state.invalidRecords }) : "");
+    return;
+  }
+
+  if (state.invalidRecords) {
+    els.statusNote.className = "status-note is-warning";
+    els.statusNote.innerHTML = messageMarkup("history.invalidDates", "Records without a valid date were excluded: {count}.", { count: state.invalidRecords });
+    return;
+  }
   if (state.source === "callhistory-live") {
     els.statusNote.hidden = true;
     els.statusNote.innerHTML = "";
@@ -1008,8 +839,8 @@ function renderStatusNote() {
   }
 
   els.statusNote.className = "status-note is-warning";
-  const title = state.source === "demo-fallback" ? "Demo-Fallback aktiv." : "Demo-Daten aktiv.";
-  const reason = state.reason || "Synthetische Call History mit Transcript- und Ticket-Beispielen.";
+  const title = state.source === "demo-fallback" ? message("history.demoFallbackActive", "Demo fallback active.") : message("history.demoActive", "Demo data active.");
+  const reason = systemMessage(state.reason) || message("history.demoHint", "Synthetic call history with transcript examples.");
   els.statusNote.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(reason)}</span>`;
 }
 
@@ -1017,9 +848,9 @@ function partyCell(call) {
   const from = call.from || {};
   const to = call.to || {};
   return `
-    <div class="party-stack">
-      <strong>${escapeHtml(from.name || from.number || "Unbekannt")} → ${escapeHtml(to.name || to.number || "Unbekannt")}</strong>
-      <span>${escapeHtml(from.number || "-")} → ${escapeHtml(to.number || "-")}</span>
+    <div class="party-stack" data-i18n-ignore>
+      <strong data-i18n-ignore>${escapeHtml(from.name || from.number || message("history.unknown", "Unknown"))} → ${escapeHtml(to.name || to.number || message("history.unknown", "Unknown"))}</strong>
+      <span data-i18n-ignore>${escapeHtml(from.number || "-")} → ${escapeHtml(to.number || "-")}</span>
     </div>
   `;
 }
@@ -1027,7 +858,7 @@ function partyCell(call) {
 function internalAssignment(call) {
   const user = call?.user || {};
   return {
-    queue: user.name || "Nicht erkannt",
+    queue: call?.queue?.name || call?.queue?.number || message("history.unrecognized", "Not identified"),
     extension: user.number || user.email || "-",
   };
 }
@@ -1038,88 +869,102 @@ function transcriptListLine(call) {
   return contact ? `${contact} · ${route}` : route;
 }
 
-function renderLimitNote(total, visible, label) {
+let historyVisibleLimit = HISTORY_RENDER_LIMIT;
+let transcriptVisibleLimit = TRANSCRIPT_RENDER_LIMIT;
+
+function renderLimitNote(total, visible, label, view) {
   if (total <= visible) return "";
   return `
     <div class="render-limit-note">
       <strong>${escapeHtml(label)}</strong>
-      <span>${visible} von ${total} Einträgen</span>
+      <button type="button" class="secondary-button" data-load-more="${view}">${messageMarkup("history.showMore", "Show more")}</button>
+      <span>${messageMarkup("history.visibleEntries", "{visible} of {total} entries", { visible, total })}</span>
     </div>
   `;
 }
 
 function renderCalls() {
-  const visibleCalls = state.calls.slice(0, HISTORY_RENDER_LIMIT);
-  els.historySubtitle.textContent = state.loading
-    ? "Lade Calls"
-    : `${state.calls.length} Calls · ${sourceLabel()} · Filter ${state.filters.range}`;
+  const visibleCalls = state.calls.slice(0, historyVisibleLimit);
+  const unavailable = callDataState();
+  els.historySubtitle.textContent = unavailable ? message(...unavailable)
+    : message("history.listSummary", "{count} calls · {source} · Period: {range}", { count: state.calls.length, source: sourceLabel(), range: rangeLabel() });
+  if (unavailable) {
+    els.callsBody.innerHTML = `<div class="empty-state">${messageMarkup(...unavailable)}</div>`;
+    return;
+  }
 
   if (!state.calls.length) {
     els.callsBody.innerHTML = `
-      <div class="empty-state">Keine Calls im aktuellen Filter.</div>
+      <div class="empty-state">${messageMarkup(!state.demoMode && !state.status?.authenticated && !["demo", "demo-fallback"].includes(state.source) ? "history.loginRequired" : "history.noCalls", "No calls match the current filters.")}</div>
     `;
     return;
   }
 
   els.callsBody.innerHTML = `
-    ${renderLimitNote(state.calls.length, visibleCalls.length, "Listenansicht")}
+    ${renderLimitNote(state.calls.length, visibleCalls.length, message("history.listView", "List view"), "history")}
     ${visibleCalls.map((call) => {
     const assignment = internalAssignment(call);
     return `
-    <button class="history-row ${call.transcriptId ? "has-ai-badge" : ""} ${call.id === state.selectedCallId ? "is-selected" : ""}" type="button" data-call-id="${escapeAttr(call.id)}" role="row">
+    <button class="history-row ${call.transcriptId ? "has-ai-badge" : ""} ${call.id === state.selectedCallId ? "is-selected" : ""}" type="button" data-i18n-ignore data-call-id="${escapeAttr(call.id)}" aria-label="${escapeAttr([formatDateTime(call.startedAt), directionLabel(call.direction), outcomeLabel(call.outcome), customerParty(call).name || customerParty(call).number].filter(Boolean).join(" · "))}" aria-pressed="${call.id === state.selectedCallId}">
       ${aiTranscriptBadge(call, "is-corner", false, true)}
-      <span class="history-cell" role="cell">
+      <span class="history-cell">
         <span class="time-cell">
           <strong>${escapeHtml(formatDateTime(call.startedAt))}</strong>
           <span>${escapeHtml(formatDuration(call.durationSeconds))}</span>
         </span>
       </span>
-      <span class="history-cell" role="cell">
+      <span class="history-cell">
         <div class="call-state-cell">
           ${directionBadge(call)}
           ${outcomeBadge(call)}
         </div>
       </span>
-      <span class="history-cell" role="cell">${partyCell(call)}</span>
-      <span class="history-cell" role="cell">
+      <span class="history-cell">${partyCell(call)}</span>
+      <span class="history-cell" data-label="${escapeAttr(message("history.queue", "Queue"))}">
         <div class="user-stack">
-          <strong>${escapeHtml(assignment.queue)}</strong>
+          <strong data-i18n-ignore>${escapeHtml(assignment.queue)}</strong>
         </div>
       </span>
-      <span class="history-cell" role="cell">
+      <span class="history-cell" data-label="${escapeAttr(message("history.extension", "Extension"))}">
         <div class="user-stack">
-          <strong>${escapeHtml(assignment.extension)}</strong>
+          <strong data-i18n-ignore>${escapeHtml(assignment.extension)}</strong>
         </div>
       </span>
     </button>
   `;
   }).join("")}
   `;
+  fitVisibleTranscriptPopovers();
+}
+
+function transcriptErrorMarkup(call) {
+  const failure = state.selectedCallId === call?.id && state.transcript?.ok === false ? state.transcript : null;
+  if (!failure) return "";
+  return `<p class="transcript-error" role="status">${messageMarkup("history.transcriptUnavailable", "Transcript unavailable")}: <span data-i18n-ignore>${escapeHtml(systemMessage(failure.error || "Transcript content is not available for this call."))}</span></p>`;
 }
 
 function renderDetail() {
   const call = selectedCall();
   if (!call) {
-    els.detailSubtitle.textContent = "Kein Call ausgewählt";
-    els.callDetail.innerHTML = `<div class="empty-state">Wähle einen Call aus der Rufliste.</div>`;
+    els.detailSubtitle.textContent = message("history.noSelection", "No call selected");
+    els.callDetail.innerHTML = `<div class="empty-state">${messageMarkup("history.selectCall", "Select a call from the call list.")}</div>`;
     return;
   }
 
   els.detailSubtitle.textContent = `${formatDateTime(call.startedAt)} · ${directionLabel(call.direction)} · ${outcomeLabel(call.outcome)}`;
-  const transcript = state.transcript;
-  const transcriptSummary = cleanSummaryText(transcript?.summary || call.summary || "");
-  const transcriptText = transcript?.text || "";
-  const preview = state.assignmentPreview;
-  const assignee = preview?.assignee || transcript?.assignee || call.user;
-  const assignment = internalAssignment({ ...call, user: assignee });
+  const transcript = cachedTranscriptForCall(call);
+  const transcriptSummary = callSummaryContent(call);
+  const transcriptText = callTranscriptText(call);
+  const assignee = transcript?.assignee || call.user;
+  const assignment = internalAssignment({ ...call, user: { ...assignee, ...call.user } });
   const transcriptSection = transcriptSummary || transcriptText ? `
     <div class="detail-section">
-      <h3>Summary</h3>
-      ${transcriptSummary ? `<p>${escapeHtml(transcriptSummary)}</p>` : ""}
-      ${transcriptText ? `<div class="transcript-text">${escapeHtml(transcriptText)}</div>` : ""}
+      <h3>${messageMarkup("history.summary", "Summary")}</h3>
+      ${transcriptSummary ? `<p data-i18n-ignore>${escapeHtml(transcriptSummary)}</p>` : ""}
+      ${transcriptText ? `<div class="transcript-text" data-i18n-ignore>${escapeHtml(transcriptText)}</div>` : ""}
       <div class="copy-actions">
-        ${transcriptSummary ? `<button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(call.id)}" data-copy-kind="summary">Summary kopieren</button>` : ""}
-        ${transcriptText ? `<button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(call.id)}" data-copy-kind="transcript">Transcript kopieren</button>` : ""}
+        ${transcriptSummary ? `<button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(call.id)}" data-copy-kind="summary">${messageMarkup("history.copySummary", "Copy summary")}</button>` : ""}
+        ${transcriptText ? `<button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(call.id)}" data-copy-kind="transcript">${messageMarkup("history.copyTranscript", "Copy transcript")}</button>` : ""}
       </div>
     </div>
   ` : "";
@@ -1127,321 +972,67 @@ function renderDetail() {
   els.callDetail.innerHTML = `
     <div class="call-route">
       <div class="party-card">
-        <span>Von</span>
-        <strong>${escapeHtml(call.from?.name || "Unbekannt")}</strong>
-        <p>${escapeHtml(call.from?.number || "-")}</p>
+        <span>${messageMarkup("history.from", "From")}</span>
+        <strong data-i18n-ignore>${escapeHtml(call.from?.name || message("history.unknown", "Unknown"))}</strong>
+        <p data-i18n-ignore>${escapeHtml(call.from?.number || "-")}</p>
       </div>
       <div class="route-arrow">→</div>
       <div class="party-card">
-        <span>Zu</span>
-        <strong>${escapeHtml(call.to?.name || "Unbekannt")}</strong>
-        <p>${escapeHtml(call.to?.number || "-")}</p>
+        <span>${messageMarkup("history.to", "To")}</span>
+        <strong data-i18n-ignore>${escapeHtml(call.to?.name || message("history.unknown", "Unknown"))}</strong>
+        <p data-i18n-ignore>${escapeHtml(call.to?.number || "-")}</p>
       </div>
     </div>
 
+    ${transcriptErrorMarkup(call)}
     ${transcriptSection}
 
     <div class="detail-section">
-      <h3>Zuordnung</h3>
+      <h3>${messageMarkup("history.assignment", "Assignment")}</h3>
       <div class="assignment-grid">
         <div class="assignment-card">
-          <span>Queue</span>
-          <strong>${escapeHtml(assignment.queue || "Offen")}</strong>
-          <p>interner Kontext</p>
+          <span>${messageMarkup("history.queue", "Queue")}</span>
+          <strong data-i18n-ignore>${escapeHtml(assignment.queue || message("history.open", "Open"))}</strong>
+          <p>${messageMarkup("history.internalContext", "Internal context")}</p>
         </div>
         <div class="assignment-card">
-          <span>Nebenstelle</span>
-          <strong>${escapeHtml(assignment.extension)}</strong>
-          <p>User-Extension</p>
+          <span>${messageMarkup("history.extension", "Extension")}</span>
+          <strong data-i18n-ignore>${escapeHtml(assignment.extension)}</strong>
+          <p>${messageMarkup("history.userExtension", "User extension")}</p>
         </div>
       </div>
-    </div>
-  `;
-}
-
-function customerEditorMarkup(customer) {
-  return `
-    <details class="customer-editor">
-      <summary>Kundensatz editieren</summary>
-      <form id="customer-edit-form" data-customer-key="${escapeAttr(customer.key)}">
-        <div class="panel-header">
-          <div>
-            <h3>Kundensatz editieren</h3>
-            <p class="panel-subtitle">Lokale CRM-Anreicherung. API-Daten bleiben unverändert.</p>
-          </div>
-        </div>
-        <div class="customer-form-grid">
-          <label>
-            Firma
-            <input name="company" type="text" value="${escapeAttr(customerEditValue(customer, "company"))}">
-          </label>
-          <label>
-            Kontakt
-            <input name="name" type="text" value="${escapeAttr(customerEditValue(customer, "name"))}">
-          </label>
-          <label>
-            E-Mail
-            <input name="email" type="email" value="${escapeAttr(customerEditValue(customer, "email"))}">
-          </label>
-          <label>
-            Rufnummer
-            <input name="number" type="text" value="${escapeAttr(customerEditValue(customer, "number"))}">
-          </label>
-          <label>
-            Satz EUR/Min.
-            <input name="rate" type="number" min="0" step="0.1" value="${escapeAttr(customerEditValue(customer, "rate"))}">
-          </label>
-          <label>
-            Fallback-Farbe
-            <input name="visualColor" type="color" value="${escapeAttr(customerEditValue(customer, "visualColor") || "#f0f4f3")}">
-            <span>Wird für Initialen und den Konto-Akzent genutzt, wenn kein Logo greift.</span>
-          </label>
-        </div>
-        <label class="image-upload">
-          Kundenbild / Logo
-          <input id="customer-image-input" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-          <span>PNG, JPG, WebP oder GIF lokal im Browser speichern</span>
-        </label>
-        <div class="customer-editor-actions">
-          <button class="primary-button" type="submit">Kundensatz speichern</button>
-          <button class="secondary-button" id="remove-customer-image" type="button" ${customer.imageData ? "" : "disabled"}>Bild entfernen</button>
-          <button class="secondary-button" id="reset-customer-record" type="button">Zurücksetzen</button>
-        </div>
-      </form>
-    </details>
-  `;
-}
-
-function renderCrm() {
-  if (!els.crmSummary || !els.crmTicketList || !els.crmAccountDetail) return;
-
-  const tickets = buildCrmTickets();
-  const accounts = crmAccounts(tickets);
-  const visibleTickets = state.crmAccountFilterKey
-    ? tickets.filter((ticket) => ticket.customer.key === state.crmAccountFilterKey)
-    : tickets;
-  if (state.crmAccountFilterKey && !visibleTickets.length) {
-    state.crmAccountFilterKey = "";
-  }
-  const listTickets = state.crmAccountFilterKey ? visibleTickets : tickets;
-  const modalTicket = state.crmModalCallId
-    ? tickets.find((ticket) => ticket.call.id === state.crmModalCallId) || null
-    : null;
-  if (state.crmModalCallId && !modalTicket) state.crmModalCallId = "";
-  const selected = modalTicket
-    || listTickets.find((ticket) => ticket.call.id === state.selectedCallId)
-    || tickets.find((ticket) => ticket.call.id === state.selectedCallId)
-    || listTickets[0]
-    || tickets[0]
-    || null;
-  const selectedAccount = selected
-    ? accounts.find((account) => account.key === selected.customer.key)
-    : accounts[0] || null;
-  const filterAccount = state.crmAccountFilterKey
-    ? accounts.find((account) => account.key === state.crmAccountFilterKey)
-    : null;
-
-  if (state.loading) {
-    els.crmSummary.innerHTML = `<div class="empty-state">CRM-Automation wird aus Call History gebaut.</div>`;
-    els.crmTicketList.innerHTML = "";
-    els.crmAccountDetail.innerHTML = "";
-    return;
-  }
-
-  if (!tickets.length) {
-    els.crmSummary.innerHTML = "";
-    els.crmTicketList.innerHTML = `<div class="empty-state">Keine Calls für CRM-Tickets im aktuellen Filter.</div>`;
-    els.crmAccountDetail.innerHTML = `<div class="empty-state">Keine Kundenkonten im aktuellen Filter.</div>`;
-    return;
-  }
-
-  const summaryTickets = listTickets.length ? listTickets : tickets;
-  const totalAmount = summaryTickets.reduce((sum, ticket) => sum + ticket.amount, 0);
-  const billableMinutesTotal = summaryTickets.reduce((sum, ticket) => sum + ticket.minutes, 0);
-  const inboundTickets = summaryTickets.filter((ticket) => ticket.call.direction === "inbound").length;
-  const transcriptSavings = summaryTickets.filter((ticket) => ticket.call.transcriptId).length * TRANSCRIPT_ADMIN_MINUTES;
-
-  const summaryItems = [
-    ["Auto-Tickets", summaryTickets.length, `${inboundTickets} aus eingehenden Calls`],
-    ["Kundenkonten", accounts.length, "automatisch gematcht"],
-    ["Abrechenbar", formatCurrency(totalAmount), `${billableMinutesTotal} Minuten`],
-    ["Nacharbeit gespart", `${transcriptSavings} Min.`, `${TRANSCRIPT_ADMIN_MINUTES} Min. je Transcript`],
-  ];
-
-  els.crmSummary.innerHTML = summaryItems.map(([label, value, detail]) => `
-    <div class="crm-stat">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
-      <small>${escapeHtml(detail)}</small>
-    </div>
-  `).join("");
-
-  const renderedTickets = summaryTickets.slice(0, CRM_RENDER_LIMIT);
-
-  els.crmTicketList.innerHTML = `
-    ${filterAccount ? `
-      <button class="crm-filter-clear" id="clear-crm-filter" type="button">
-        Kundenfilter: ${escapeHtml(filterAccount.company)} entfernen
-      </button>
-    ` : ""}
-    ${renderLimitNote(summaryTickets.length, renderedTickets.length, "Ticketliste")}
-    ${renderedTickets.map((ticket) => `
-    <button class="crm-ticket-row ${ticket.call.id === (state.crmModalCallId || state.selectedCallId) ? "is-selected" : ""}" type="button" data-crm-open-call-id="${escapeAttr(ticket.call.id)}">
-      ${aiTranscriptBadge(ticket.call, "is-corner", false)}
-      <span class="crm-ticket-id">
-        <strong>${escapeHtml(ticket.id)}</strong>
-        <small>${escapeHtml(formatDateTime(ticket.call.startedAt))}</small>
-      </span>
-      <span class="crm-customer">
-        ${customerVisual(ticket.customer)}
-        <span>
-          <strong>${escapeHtml(ticket.customer.company)}</strong>
-          <small>${escapeHtml(ticket.customer.name)} · ${escapeHtml(ticket.customer.number || "keine Nummer")}</small>
-        </span>
-      </span>
-      <span>
-        <strong>${escapeHtml(ticket.owner)}</strong>
-        <small>${escapeHtml(ticket.automated)}</small>
-      </span>
-      <span>
-        <strong>${escapeHtml(formatCurrency(ticket.amount))}</strong>
-        <small>${ticket.minutes ? `${ticket.minutes} Min. × ${formatCurrency(ticket.customer.rate)}` : "nicht abrechenbar"}</small>
-      </span>
-      <span>
-        <span class="chip is-${escapeAttr(ticket.status)}">${escapeHtml(crmTicketStatusLabel(ticket.status))}</span>
-      </span>
-      ${ticket.call.transcriptId ? `<span class="ticket-summary-popover" role="tooltip">
-        <strong>KI-Zusammenfassung</strong>
-        <span>${escapeHtml(ticket.summary)}</span>
-        <small>Transcript ${escapeHtml(ticket.call.transcriptId)} · Kunde, Ticket, Owner und Billing-Zeile wurden ohne manuelle Nacharbeit vorbereitet.</small>
-      </span>` : ""}
-    </button>
-  `).join("")}`;
-
-  if (!modalTicket || !selected || !selectedAccount) {
-    els.crmAccountDetail.innerHTML = "";
-    return;
-  }
-
-  const relatedTickets = tickets
-    .filter((ticket) => ticket.customer.key === selected.customer.key)
-    .sort((a, b) => new Date(b.call.startedAt) - new Date(a.call.startedAt));
-  const previousTickets = relatedTickets.filter((ticket) => ticket.call.id !== selected.call.id);
-  const selectedTranscriptText = callTranscriptText(selected.call);
-  els.crmAccountDetail.innerHTML = `
-    <div class="crm-modal-layer" data-crm-modal-close>
-      <article class="crm-modal" role="dialog" aria-modal="true" aria-labelledby="crm-modal-title">
-        <button class="modal-close-button" type="button" data-crm-modal-close aria-label="Ticket schließen">×</button>
-        <div class="crm-modal-grid">
-          <section class="crm-modal-main">
-            <div class="account-hero" style="box-shadow: inset 4px 0 0 ${escapeAttr(selected.customer.visualColor || "#f0f4f3")}">
-              ${customerVisual(selected.customer, "is-large")}
-              <div>
-                <span>Kunde</span>
-                <strong>${escapeHtml(selectedAccount.company)}</strong>
-                <p>${escapeHtml(selectedAccount.name)} · ${escapeHtml(selectedAccount.number || "keine Nummer")}</p>
-              </div>
-            </div>
-
-            <div class="crm-ticket-detail">
-              <div class="panel-header">
-                <div>
-                  <span class="panel-kicker">Aktuelles Ticket</span>
-                  <h2 id="crm-modal-title">${escapeHtml(selected.id)}</h2>
-                  <p class="panel-subtitle">${escapeHtml(selected.title)} · ${escapeHtml(formatDateTime(selected.call.startedAt))}</p>
-                </div>
-                <span class="chip is-${escapeAttr(selected.status)}">${escapeHtml(crmTicketStatusLabel(selected.status))}</span>
-              </div>
-              <p>${escapeHtml(selected.summary)}</p>
-              ${selected.call.transcriptId ? `
-                <details class="crm-transcript-block">
-                  <summary>Komplette Transkription</summary>
-                  <div class="transcript-text">${escapeHtml(selectedTranscriptText || "Transkript wird geladen.")}</div>
-                  ${selectedTranscriptText ? `
-                    <button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(selected.call.id)}" data-copy-kind="transcript">Transkript kopieren</button>
-                  ` : ""}
-                </details>
-              ` : ""}
-              <div class="crm-modal-kpis">
-                <div>
-                  <span>Owner</span>
-                  <strong>${escapeHtml(selected.owner)}</strong>
-                </div>
-                <div>
-                  <span>Abrechnung</span>
-                  <strong>${escapeHtml(formatCurrency(selected.amount))}</strong>
-                  <small>${selected.minutes ? `${selected.minutes} Min. × ${formatCurrency(selected.customer.rate)}` : "nicht abrechenbar"}</small>
-                </div>
-                <div>
-                  <span>Call</span>
-                  <strong>${escapeHtml(directionLabel(selected.call.direction))}</strong>
-                  <small>${escapeHtml(outcomeLabel(selected.call.outcome))}</small>
-                </div>
-              </div>
-            </div>
-
-            ${customerEditorMarkup(selected.customer)}
-          </section>
-
-          <aside class="crm-modal-history">
-            <div class="panel-header">
-              <div>
-                <span class="panel-kicker">Konto-Historie</span>
-                <h3>${escapeHtml(relatedTickets.length)} Tickets</h3>
-              </div>
-            </div>
-            <div class="account-kpis">
-              <div>
-                <span>Umsatz</span>
-                <strong>${escapeHtml(formatCurrency(selectedAccount.amount))}</strong>
-              </div>
-              <div>
-                <span>Letzter Call</span>
-                <strong>${escapeHtml(formatDateTime(selectedAccount.lastCall))}</strong>
-              </div>
-            </div>
-            <div class="related-ticket-list">
-              ${previousTickets.length ? previousTickets.map((ticket) => `
-                <button class="related-ticket-row" type="button" data-crm-modal-call-id="${escapeAttr(ticket.call.id)}">
-                  <strong>${escapeHtml(ticket.id)}</strong>
-                  <span>${escapeHtml(formatDateTime(ticket.call.startedAt))} · ${escapeHtml(crmTicketStatusLabel(ticket.status))}</span>
-                  <small>${escapeHtml(formatCurrency(ticket.amount))} · ${ticket.minutes} Min.</small>
-                </button>
-              `).join("") : `<div class="empty-state">Noch keine vergangenen Tickets für dieses Konto.</div>`}
-            </div>
-          </aside>
-        </div>
-      </article>
     </div>
   `;
 }
 
 function renderTranscripts() {
-  const transcriptCalls = state.calls.filter((call) => call.transcriptId);
-  if (!transcriptCalls.length) {
-    els.transcriptGrid.innerHTML = `<div class="empty-state">Keine Calls mit Transcript im aktuellen Filter.</div>`;
+  const unavailable = callDataState();
+  if (unavailable) {
+    els.transcriptGrid.innerHTML = `<div class="empty-state">${messageMarkup(...unavailable)}</div>`;
     return;
   }
-  const visibleTranscriptCalls = transcriptCalls.slice(0, TRANSCRIPT_RENDER_LIMIT);
+  const transcriptCalls = state.calls.filter((call) => call.transcriptId);
+  if (!transcriptCalls.length) {
+    els.transcriptGrid.innerHTML = `<div class="empty-state">${messageMarkup("history.noTranscriptCalls", "No calls with transcripts match the current filters.")}</div>`;
+    return;
+  }
+  const visibleTranscriptCalls = transcriptCalls.slice(0, transcriptVisibleLimit);
   const selectedTranscript = transcriptCalls.find((call) => call.id === state.selectedTranscriptCallId) || null;
-  const selectedTicket = crmTicketForCall(selectedTranscript);
-  const summary = selectedTranscript ? callTranscriptSummary(selectedTranscript) : "";
+  const summary = selectedTranscript ? callSummaryContent(selectedTranscript) : "";
   const transcriptText = selectedTranscript ? callTranscriptText(selectedTranscript) : "";
 
   els.transcriptGrid.innerHTML = `
-    <div class="transcript-list" aria-label="Transcripts">
-      ${renderLimitNote(transcriptCalls.length, visibleTranscriptCalls.length, "Transcript-Liste")}
+    <div class="transcript-list" aria-label="${escapeAttr(message("history.transcripts", "Transcripts"))}" data-i18n-aria-label="history.transcripts">
+      ${renderLimitNote(transcriptCalls.length, visibleTranscriptCalls.length, message("history.transcriptList", "Transcript list"), "transcripts")}
       ${visibleTranscriptCalls.map((call) => {
-        const ticket = crmTicketForCall(call);
         return `
-          <button class="transcript-list-row ${call.id === selectedTranscript?.id ? "is-selected" : ""}" type="button" data-call-id="${escapeAttr(call.id)}">
+          <button class="transcript-list-row ${call.id === selectedTranscript?.id ? "is-selected" : ""}" type="button" data-i18n-ignore data-call-id="${escapeAttr(call.id)}">
             <span>
-              <strong>${escapeHtml(call.contact?.company || call.from?.name || call.to?.name || "Call")}</strong>
-              <small>${escapeHtml(transcriptListLine(call))}</small>
+              <strong data-i18n-ignore>${escapeHtml(call.contact?.company || customerParty(call).name || message("history.call", "Call"))}</strong>
+              <small data-i18n-ignore>${escapeHtml(transcriptListLine(call))}</small>
             </span>
             <span>${escapeHtml(formatDateTime(call.startedAt))}</span>
             <span class="chip is-${escapeAttr(call.direction)}">${escapeHtml(directionLabel(call.direction))}</span>
-            <span class="chip">${escapeHtml(ticket?.id || "kein Ticket")}</span>
           </button>
         `;
       }).join("")}
@@ -1450,25 +1041,26 @@ function renderTranscripts() {
       <article class="transcript-detail-card">
       <div class="panel-header">
         <div>
-          <h3>${escapeHtml(selectedTranscript.contact?.company || selectedTranscript.from?.name || selectedTranscript.to?.name || "Transcript")}</h3>
-          <p class="panel-subtitle">${escapeHtml(transcriptListLine(selectedTranscript))} · ${escapeHtml(selectedTicket?.id || "kein Ticket")}</p>
+          <h3 data-i18n-ignore>${escapeHtml(selectedTranscript.contact?.company || customerParty(selectedTranscript).name || message("history.transcript", "Transcript"))}</h3>
+          <p class="panel-subtitle" data-i18n-ignore>${escapeHtml(transcriptListLine(selectedTranscript))}</p>
         </div>
       </div>
+      ${transcriptErrorMarkup(selectedTranscript)}
       <div class="transcript-preview">
-        <h3>Zusammenfassung</h3>
-        <p>${escapeHtml(summary)}</p>
+        ${summary ? `<h3>${messageMarkup("history.summary", "Summary")}</h3>
+        <p data-i18n-ignore>${escapeHtml(summary)}</p>
         <div class="copy-actions">
-          <button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(selectedTranscript.id)}" data-copy-kind="summary">Summary kopieren</button>
-        </div>
-        <h3>Transkript</h3>
-        <p class="transcript-preview-text">${escapeHtml(transcriptText || "Zum Laden auswählen. Danach kann der vollständige Transcript-Text kopiert werden.")}</p>
+          <button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(selectedTranscript.id)}" data-copy-kind="summary">${messageMarkup("history.copySummary", "Copy summary")}</button>
+        </div>` : ""}
+        <h3>${messageMarkup("history.transcript", "Transcript")}</h3>
+        <p class="transcript-preview-text" data-i18n-ignore>${escapeHtml(transcriptText || message("history.selectToLoadTranscript", "Select to load the full transcript, then copy its text."))}</p>
         <div class="copy-actions">
-          <button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(selectedTranscript.id)}" data-copy-kind="transcript">Transcript kopieren</button>
+          <button class="secondary-button" type="button" data-copy-call-id="${escapeAttr(selectedTranscript.id)}" data-copy-kind="transcript">${messageMarkup("history.copyTranscript", "Copy transcript")}</button>
         </div>
-        <p class="transcript-meta">Transcript-ID ${escapeHtml(selectedTranscript.transcriptId)}</p>
+        <p class="transcript-meta">${messageMarkup("history.transcriptId", "Transcript ID: {id}", { id: selectedTranscript.transcriptId })}</p>
       </div>
       </article>
-    ` : `<article class="transcript-detail-card is-empty"><div class="empty-state">Wähle links ein Transcript aus.</div></article>`}
+    ` : `<article class="transcript-detail-card is-empty"><div class="empty-state">${messageMarkup("history.selectTranscript", "Select a transcript from the list.")}</div></article>`}
   `;
 }
 
@@ -1485,38 +1077,63 @@ function renderSetup() {
   if (!els.setupStatus || !els.redirectStatus) return;
   const status = state.status;
   if (!status) {
-    els.setupStatus.innerHTML = `<div class="empty-state">Konfiguration wird geladen.</div>`;
+    els.setupStatus.innerHTML = `<div class="empty-state">${messageMarkup("history.loadingConfiguration", "Loading configuration.")}</div>`;
+    els.redirectStatus.innerHTML = "";
+    return;
+  }
+
+  if (window.NFON_WEB_ONLY_DEMO || window.location.protocol === "file:") {
+    els.setupStatus.innerHTML = `<p>${messageMarkup("history.demoData", "Demo data")}</p>`;
+    const hint = document.querySelector('[data-i18n-key="history.configurationHint"]');
+    if (hint) hint.hidden = true;
     els.redirectStatus.innerHTML = "";
     return;
   }
 
   els.setupStatus.innerHTML = [
-    statusField("OAuth", status.oauthConfigured, status.oauthConfigured ? "PKCE-Login konfiguriert" : "CALLHISTORY_CLIENT_ID fehlt"),
-    statusField("API Endpoint", status.historyConfigured, status.historyConfigured ? "konfiguriert" : "CALLHISTORY_API_BASE_URL / CALLS_PATH fehlen"),
-    statusField("Record Details", status.transcriptsConfigured, status.transcriptsConfigured ? "GET /records/{uuid}?complete=true" : "optional nicht gesetzt"),
-    statusField("Secret Discovery", status.secrets?.secretFileFound, status.secrets?.secretFileFound ? "lokale Secret-Datei gefunden" : "nur Env-Variablen"),
-    statusField("Token", status.authenticated, status.authenticated ? "serverseitig vorhanden" : "nicht verbunden"),
+    statusField("OAuth", status.oauthConfigured, status.oauthConfigured ? message("history.pkceConfigured", "PKCE login configured") : message("history.clientIdMissing", "CALLHISTORY_CLIENT_ID missing")),
+    statusField(message("history.apiEndpoint", "API endpoint"), status.historyConfigured, status.historyConfigured ? message("history.configured", "Configured") : message("history.endpointMissing", "CALLHISTORY_API_BASE_URL / CALLS_PATH missing")),
+    statusField(message("history.recordDetails", "Record details"), status.transcriptsConfigured, status.transcriptsConfigured ? "GET /records/{uuid}" : message("history.optionalUnset", "Optional, not set")),
+    statusField(message("history.credentialsSource", "Credentials source"), true, status.settings?.browserCredentialsActive ? message("history.browserConfig", "Browser configuration") : message("history.localConfig", "Local configuration")),
+    statusField("Token", status.authenticated, status.authenticated ? message("history.serverToken", "Available on the server") : message("history.notConnected", "Not connected")),
   ].join("");
 
   els.redirectStatus.innerHTML = `
     <div class="setup-field is-ok">
-      <span>Callback URL</span>
-      <strong><code>${escapeHtml(status.redirectUri || "nicht gesetzt")}</code></strong>
+      <span>${messageMarkup("history.callbackUrl", "Callback URL")}</span>
+      <strong><code>${escapeHtml(status.redirectUri || message("history.notSet", "Not set"))}</code></strong>
     </div>
     <div class="setup-field">
-      <span>Standalone</span>
-      <strong><code>npm start</code> im Ordner CallHistory_API</strong>
+      <span>${messageMarkup("history.standalone", "Standalone mode")}</span>
+      <strong>${messageMarkup("history.standaloneCommand", "npm start in the CallHistory_API folder")}</strong>
     </div>
     <div class="setup-field">
-      <span>Portvertrag</span>
-      <strong>Call History bleibt lokal auf Port 3000; Portal und CTI laufen daneben.</strong>
+      <span>${messageMarkup("history.portContract", "Local ports")}</span>
+      <strong>${messageMarkup("history.portHint", "Call History uses local port 3000; Portal and CTI run alongside it.")}</strong>
     </div>
   `;
+}
+
+// Retain the actual setup form during refresh so typing and focus survive.
+function replaceContentPreservingForm(container, markup, selector) {
+  const form = container.querySelector(selector);
+  const focused = form?.contains(document.activeElement) ? document.activeElement : null;
+  const selection = focused && typeof focused.selectionStart === "number"
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+  container.innerHTML = markup;
+  const replacement = container.querySelector(selector);
+  if (!form || !replacement) return;
+  replacement.replaceWith(form);
+  if (focused) {
+    focused.focus({ preventScroll: true });
+    if (selection) focused.setSelectionRange(...selection);
+  }
 }
 
 function renderAuthLoginPanel() {
   if (!els.authLoginPanel) return;
   const status = state.status || {};
+  if (window.NFON_WEB_ONLY_DEMO || window.location.protocol === "file:") { els.authLoginPanel.hidden = true; els.authLoginPanel.innerHTML = ""; return; }
   const mode = state.authLoginMode === "env" || state.authLoginMode === "browser"
     ? state.authLoginMode
     : status.oauthConfigured
@@ -1529,58 +1146,66 @@ function renderAuthLoginPanel() {
     "CALLHISTORY_CLIENT_ID=<CLIENT_ID>",
     "CALLHISTORY_REDIRECT_URI=http://localhost:3000",
   ].join("\n");
-  els.authLoginPanel.innerHTML = `
+  replaceContentPreservingForm(els.authLoginPanel, `
     <div class="auth-login-head">
       <div>
-        <h2>Anmeldung</h2>
-        <p>Call-History-Zugang konfigurieren und anschließend mit einem Cloudya Account anmelden.</p>
+        <h2>${messageMarkup("history.signIn", "Sign in")}</h2>
+        <p>${messageMarkup("history.signInHint", "Configure Call History access, then sign in with a Cloudya account.")}</p>
       </div>
-      <span class="auth-login-state ${authStateClass}">${status.authenticated ? "OAuth verbunden" : status.oauthConfigured ? "OAuth bereit" : "Login erforderlich"}</span>
+      <span class="auth-login-state ${authStateClass}">${status.authenticated ? message("history.oauthConnected", "OAuth connected") : status.oauthConfigured ? message("history.oauthReady", "OAuth ready") : message("history.loginRequired", "Sign in required")}</span>
     </div>
     <div class="auth-login-body">
-      <div class="auth-mode-switch" role="tablist" aria-label="Anmeldeart">
-        <button class="${envActive ? "is-active" : ""}" type="button" data-auth-mode="env">Login via .env</button>
-        <button class="${browserActive ? "is-active" : ""}" type="button" data-auth-mode="browser">Login via Browser</button>
+      <div class="auth-mode-switch" role="tablist" data-i18n-aria-label="history.signInMethod" aria-label="${escapeAttr(message("history.signInMethod", "Sign-in method"))}">
+        <button class="${envActive ? "is-active" : ""}" type="button" data-auth-mode="env">${messageMarkup("history.envLogin", "Sign in via .env")}</button>
+        <button class="${browserActive ? "is-active" : ""}" type="button" data-auth-mode="browser">${messageMarkup("history.browserLogin", "Sign in via browser")}</button>
       </div>
       ${envActive ? `
         <section class="auth-login-card is-active">
-          <span>Lokale Konfiguration</span>
-          <h3>OAuth Secret-Datei aktiv</h3>
-          <p>Lege im Ordner <strong>CallHistory_API</strong> eine Datei <strong>.env</strong> an. Der Server liest sie beim Start automatisch.</p>
+          <span>${messageMarkup("history.localConfig", "Local configuration")}</span>
+          <h3>${messageMarkup("history.localConfig", "Local configuration")}</h3>
+          <p>${messageMarkup("history.envFileHint", "A .env file in CallHistory_API is loaded automatically when the server starts.")}</p>
           <pre>${escapeHtml(envExample)}</pre>
-          <p>Auth-URL, Token-URL, Scope und Call-History-Endpunkte sind vorbelegt. Redirect bleibt lokal standardmäßig <strong>http://localhost:3000</strong>.</p>
+          <p>${messageMarkup("history.defaultEndpointsHint", "Auth URL, token URL, scope and Call History endpoints are preset. The default local redirect is http://localhost:3000.")}</p>
         </section>
       ` : `
         <form class="auth-login-card browser-login-form" id="callhistory-browser-login-form">
-          <span>Browser-Konfiguration</span>
-          <h3>Zugangsdaten für diese Sitzung setzen</h3>
+          <span>${messageMarkup("history.browserConfig", "Browser configuration")}</span>
+          <h3>${messageMarkup("history.sessionCredentials", "Set credentials for this session")}</h3>
           <div class="auth-form-grid">
-            <label>Client ID <small>Pflichtfeld für OAuth Login</small><input name="clientId" type="text" autocomplete="username" required></label>
-            <label>Redirect URI <small>leer lassen für localhost:3000</small><input name="redirectUri" type="url" value="${escapeAttr(status.redirectUri || "http://localhost:3000")}" placeholder="http://localhost:3000"></label>
+            <label>Client ID <small>${messageMarkup("history.clientIdRequired", "Required for OAuth sign-in")}</small><input name="clientId" type="text" autocomplete="username" required></label>
+            <label>Redirect URI <small>${messageMarkup("history.redirectHint", "Leave empty for localhost:3000")}</small><input name="redirectUri" type="url" value="${escapeAttr(status.redirectUri || "http://localhost:3000")}" placeholder="http://localhost:3000"></label>
           </div>
           <div class="auth-form-actions">
-            <button class="primary-button" type="submit">Zugang setzen</button>
-            <span>Danach den NFON OAuth-Login über den Login-Button starten.</span>
+            <button class="primary-button" type="submit">${messageMarkup("history.setCredentials", "Set credentials")}</button>
+            <span>${messageMarkup("history.startLoginHint", "Then start NFON OAuth sign-in using the sign-in button.")}</span>
           </div>
         </form>
       `}
       <section class="auth-login-card auth-cloudya-login">
-        <span>Cloudya Login</span>
-        <h3>Login mit Cloudya Account</h3>
-        <p>Nach der Konfiguration verbindet der OAuth-Login diese lokale Showcase-App mit einem Cloudya Account.</p>
+        <span>${messageMarkup("history.cloudyaLogin", "Cloudya sign-in")}</span>
+        <h3>${messageMarkup("history.cloudyaSignIn", "Sign in with a Cloudya account")}</h3>
+        <p>${messageMarkup("history.cloudyaHint", "Once configured, OAuth connects this local showcase app to a Cloudya account.")}</p>
         <div class="auth-setup-actions">
-          <a class="primary-button auth-link ${status.oauthConfigured && !status.authenticated ? "is-primary" : ""}" id="auth-login" href="/auth/login" ${!status.oauthConfigured || status.authenticated ? "hidden" : ""}>Login starten</a>
-          <button class="secondary-button auth-link" id="auth-logout" type="button" ${status.authenticated ? "" : "hidden"}>Logout</button>
+          <a class="primary-button auth-link ${status.oauthConfigured && !status.authenticated ? "is-primary" : ""}" id="auth-login" href="/auth/login" ${!status.oauthConfigured || status.authenticated ? "hidden" : ""}>${messageMarkup("history.startLogin", "Start sign-in")}</a>
+          <button class="secondary-button auth-link" id="auth-logout" type="button" ${status.authenticated ? "" : "hidden"}>${messageMarkup("history.signOut", "Sign out")}</button>
         </div>
       </section>
-      ${state.authLoginMessage ? `<p class="form-message success">${escapeHtml(state.authLoginMessage)}</p>` : ""}
-      ${state.authLoginError ? `<p class="form-message error">${escapeHtml(state.authLoginError)}</p>` : ""}
+      ${state.authLoginMessage ? `<p class="form-message success">${messageMarkup(state.authLoginMessage, state.authLoginMessage === "history.settingConfiguration" ? "Applying configuration" : "Browser configuration is set for this session. Sign-in is ready.")}</p>` : ""}
+      ${state.authLoginError ? `<p class="form-message error">${escapeHtml(systemMessage(state.authLoginError))}</p>` : ""}
     </div>
-  `;
+  `, "#callhistory-browser-login-form");
+  const loginLink = document.getElementById("auth-login");
+  const cockpit = window.NFON_APPEARANCE?.getCockpitUrl?.() || "";
+  if (loginLink) loginLink.href = "/auth/login?" + new URLSearchParams({
+    theme: document.documentElement.dataset.nfonTheme === "classic" ? "classic" : "admin-portal",
+    lang: window.NFON_I18N?.getLanguage?.() || "en",
+    ...(cockpit ? { cockpit } : {}),
+  });
 }
 
 async function submitCallHistoryBrowserLogin(form) {
-  state.authLoginMessage = "Konfiguration wird gesetzt";
+  const request = beginStatusRequest();
+  state.authLoginMessage = "history.settingConfiguration";
   state.authLoginError = "";
   renderAuthLoginPanel();
   const data = new FormData(form);
@@ -1589,110 +1214,44 @@ async function submitCallHistoryBrowserLogin(form) {
       method: "POST",
       body: JSON.stringify(Object.fromEntries(data.entries())),
     });
-    state.status = result.status;
-    state.authLoginMessage = "Browser-Konfiguration wurde für diese Sitzung gesetzt. Jetzt Login starten.";
+    if (!adoptStatus(result.status, request)) return;
+    state.authLoginMessage = "history.configurationSet";
     await loadAll();
   } catch (error) {
+    if (!isCurrentStatusRequest(request, error)) return;
     state.authLoginMessage = "";
     state.authLoginError = error.message;
     renderAuthLoginPanel();
   }
 }
 
-function renderCustomerRecordsModal() {
-  if (!els.customerRecordModal) return;
-  if (!state.customerRecordsOpen) {
-    els.customerRecordModal.innerHTML = "";
-    return;
+let crmParentPaused = false;
+
+// The fixed showcase receives presentation/visibility only, never history or session data.
+function renderCrmDemo() {
+  const frame = document.getElementById("crm-demo-frame");
+  if (!frame) return;
+  const theme = document.documentElement.dataset.nfonTheme === "classic" ? "classic" : "admin-portal";
+  const lang = window.NFON_I18N?.getLanguage?.() || document.documentElement.lang || "en";
+  if (!frame.getAttribute("src")) {
+    frame.src = `./crm-demo/${window.location.protocol === "file:" ? "offline.html" : "index.html"}?${new URLSearchParams({ theme, lang })}`;
+  } else {
+    frame.contentWindow?.postMessage({ type: "nfon:crm-demo:appearance", theme, lang, active: state.view === "crm" && !crmParentPaused }, "*");
   }
+}
 
-  const metrics = callMetrics();
-  const records = customerRecords();
-  els.customerRecordModal.innerHTML = `
-    <div class="crm-modal-layer" data-customer-record-close>
-      <article class="crm-modal customer-records-modal" role="dialog" aria-modal="true" aria-labelledby="customer-record-title">
-        <button class="modal-close-button" type="button" data-customer-record-close aria-label="Kundensätze schließen">×</button>
-        <div class="customer-records-grid">
-          <section class="customer-records-form">
-            <div class="panel-header">
-              <div>
-                <span class="panel-kicker">Kundensatz</span>
-                <h2 id="customer-record-title">Kunden anlegen</h2>
-                <p class="panel-subtitle">${escapeHtml(metrics.autoCustomerRecords)} automatisch erkannt · ${escapeHtml(metrics.manualCustomerRecords)} Datensätze gespeichert</p>
-              </div>
-            </div>
-            <form id="customer-record-form">
-              <label class="customer-image-drop">
-                <input id="customer-record-image-input" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-                <span class="customer-image-preview">
-                  ${state.customerRecordImagePreview ? `<img src="${escapeAttr(state.customerRecordImagePreview)}" alt="">` : `<strong>Bild</strong>`}
-                </span>
-                <span>
-                  <strong>Kundenbild / Logo</strong>
-                  <small>PNG, JPG, WebP oder GIF bis 1,2 MB</small>
-                </span>
-              </label>
-              <div class="customer-form-grid">
-                <label>
-                  Firma
-                  <input name="company" type="text" autocomplete="organization" required>
-                </label>
-                <label>
-                  Kontakt
-                  <input name="name" type="text" autocomplete="name">
-                </label>
-                <label>
-                  E-Mail
-                  <input name="email" type="email" autocomplete="email">
-                </label>
-                <label>
-                  Rufnummer
-                  <input name="number" type="tel" autocomplete="tel">
-                </label>
-                <label>
-                  Satz EUR/Min.
-                  <input name="rate" type="number" min="0" step="0.1" value="${escapeAttr(BILLING_RATE_EUR)}">
-                </label>
-                <label>
-                  Notiz
-                  <input name="note" type="text" placeholder="z. B. SLA, Vertrag, Ansprechpartner">
-                </label>
-              </div>
-              <div class="customer-editor-actions">
-                <button class="primary-button" type="submit">Kundensatz speichern</button>
-              </div>
-            </form>
-          </section>
-
-          <aside class="customer-records-list" aria-label="Gespeicherte Kundensätze">
-            <div class="panel-header">
-              <div>
-                <span class="panel-kicker">Gespeichert</span>
-                <h3>Datensätze</h3>
-                <p class="panel-subtitle">${escapeHtml(records.length)} ${records.length === 1 ? "Datensatz" : "Datensätze"} gespeichert</p>
-              </div>
-            </div>
-            <div class="manual-customer-list">
-              ${records.length ? records.map((record) => `
-                <article class="manual-customer-row">
-                  ${record.imageData ? `<span class="customer-visual"><img src="${escapeAttr(record.imageData)}" alt=""></span>` : `<span class="customer-visual">${escapeHtml(customerInitials(record))}</span>`}
-                  <div>
-                    <strong>${escapeHtml(record.company || record.name)}</strong>
-                    <span>${escapeHtml([record.name, record.email, record.number].filter(Boolean).join(" · ") || "ohne Kontaktdaten")}</span>
-                    ${record.note ? `<small>${escapeHtml(record.note)}</small>` : ""}
-                  </div>
-                  <button class="secondary-button" type="button" data-delete-customer-record="${escapeAttr(record.id)}">Löschen</button>
-                </article>
-              `).join("") : `<div class="empty-state">Noch keine Datensätze.</div>`}
-            </div>
-          </aside>
-        </div>
-      </article>
-    </div>
-  `;
+function receiveCrmDemoMessage(event) {
+  const frame = document.getElementById("crm-demo-frame");
+  if (!frame || event.source !== frame.contentWindow || ![window.location.origin, "null"].includes(event.origin)) return;
+  if (event.data?.type === "nfon:crm-demo:ready") renderCrmDemo();
+  if (event.data?.type === "nfon:crm-demo:height" && Number.isFinite(event.data.height)) {
+    frame.style.height = Math.max(600, Math.min(20000, Math.ceil(event.data.height))) + "px";
+  }
 }
 
 function renderView() {
+  const frame = document.getElementById("crm-demo-frame");
+  frame?.contentWindow?.postMessage({ type: "nfon:crm-demo:visibility", active: state.view === "crm" && !crmParentPaused }, "*");
   document.querySelectorAll(".view").forEach((view) => {
     view.classList.toggle("is-active", view.id === `view-${state.view}`);
   });
@@ -1700,119 +1259,39 @@ function renderView() {
     button.classList.toggle("is-active", button.dataset.view === state.view);
   });
   if (els.filterPanel) {
-    els.filterPanel.hidden = state.view === "setup";
+    els.filterPanel.hidden = state.view === "setup" || state.view === "crm";
   }
 }
 
 function persistFilters() {
-  localStorage.setItem("callhistory-filters", JSON.stringify(state.filters));
+  storeValue("callhistory-filters", JSON.stringify(state.filters));
 }
 
 function setSelectedCall(callId) {
   if (!callId || state.selectedCallId === callId) return;
+  copyRequestSequence += 1;
   state.selectedCallId = callId;
-  state.assignmentPreview = null;
+  state.transcript = null;
+
   render();
+  focusCallSelection(callId);
   loadSelectedTranscript();
 }
 
-async function previewAssignment() {
-  const call = selectedCall();
-  if (!call) return;
-  const body = JSON.stringify({
-    callId: call.id,
-    transcriptId: call.transcriptId,
-    assignee: state.transcript?.assignee || call.user,
-    ticket: state.transcript?.ticketSuggestion || crmTicketForCall(call) || call.ticket,
-  });
-  try {
-    state.assignmentPreview = await apiJson("/api/assignment-preview", { method: "POST", body });
-    renderDetail();
-  } catch (error) {
-    state.assignmentPreview = { error: error.message };
-    renderDetail();
+function focusCallSelection(callId, transcript = false) {
+  const selector = transcript ? ".transcript-list-row" : ".history-row";
+  const row = [...document.querySelectorAll(selector)].find(node => node.dataset.callId === callId);
+  row?.focus({ preventScroll: true });
+  const panel = document.querySelector(transcript ? ".transcript-detail-card" : ".detail-panel");
+  if (panel && window.matchMedia?.("(max-width: 1439px)").matches) {
+    panel.onkeydown = event => {
+      if (event.key === "Tab" && event.shiftKey && event.target === panel) {
+        event.preventDefault();
+        [...document.querySelectorAll(selector)].find(node => node.dataset.callId === callId)?.focus();
+      }
+    };
+    panel.tabIndex = -1; panel.focus({ preventScroll: true }); panel.scrollIntoView({ block: "start", behavior: "auto" });
   }
-}
-
-function saveCustomerForm(form) {
-  const key = form.dataset.customerKey;
-  if (!key) return;
-  const formData = new FormData(form);
-  const current = state.customerEdits[key] || {};
-  const rate = Number(formData.get("rate"));
-  state.customerEdits[key] = {
-    ...current,
-    company: String(formData.get("company") || "").trim(),
-    name: String(formData.get("name") || "").trim(),
-    email: String(formData.get("email") || "").trim(),
-    number: String(formData.get("number") || "").trim(),
-    rate: Number.isFinite(rate) && rate >= 0 ? rate : BILLING_RATE_EUR,
-    visualColor: String(formData.get("visualColor") || "#f0f4f3"),
-  };
-  persistCustomerEdits();
-  render();
-}
-
-function removeCustomerImage(key) {
-  if (!key || !state.customerEdits[key]) return;
-  delete state.customerEdits[key].imageData;
-  persistCustomerEdits();
-  render();
-}
-
-function resetCustomerRecord(key) {
-  if (!key) return;
-  delete state.customerEdits[key];
-  persistCustomerEdits();
-  render();
-}
-
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    if (!file) {
-      resolve("");
-      return;
-    }
-    if (file.size > MAX_CUSTOMER_IMAGE_BYTES) {
-      reject(new Error("Das Bild ist zu groß. Bitte nutze ein Bild bis ca. 1,2 MB."));
-      return;
-    }
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result || "")));
-    reader.addEventListener("error", () => reject(new Error("Das Bild konnte nicht gelesen werden.")));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function saveManualCustomerRecord(form) {
-  const formData = new FormData(form);
-  const rate = Number(formData.get("rate"));
-  const file = form.querySelector('input[name="image"]')?.files?.[0] || null;
-  let imageData = state.customerRecordImagePreview;
-  if (file) imageData = await readImageFile(file);
-  const record = {
-    id: createCustomerRecordId(),
-    company: String(formData.get("company") || "").trim(),
-    name: String(formData.get("name") || "").trim(),
-    email: String(formData.get("email") || "").trim(),
-    number: String(formData.get("number") || "").trim(),
-    rate: Number.isFinite(rate) && rate >= 0 ? rate : BILLING_RATE_EUR,
-    note: String(formData.get("note") || "").trim(),
-    imageData,
-    createdAt: new Date().toISOString(),
-  };
-  if (!record.company && !record.name && !record.email && !record.number) return;
-  state.customerRecords = [record, ...customerRecords()];
-  state.customerRecordImagePreview = "";
-  persistCustomerRecords();
-  form.reset();
-  render();
-}
-
-function deleteManualCustomerRecord(id) {
-  state.customerRecords = customerRecords().filter((record) => record.id !== id);
-  persistCustomerRecords();
-  render();
 }
 
 async function copyToClipboard(text) {
@@ -1842,38 +1321,63 @@ function showCopyToast(message) {
 }
 
 async function copyCallPart(callId, kind) {
+  const sequence = ++copyRequestSequence;
   const call = state.calls.find((item) => item.id === callId);
-  if (!call) return;
-  await copyToClipboard(copyPayload(call, kind));
-}
-
-function storeCustomerImage(input) {
-  const form = input.closest("#customer-edit-form");
-  const key = form?.dataset.customerKey;
-  const file = input.files?.[0];
-  if (!key || !file) return;
-  if (file.size > MAX_CUSTOMER_IMAGE_BYTES) {
-    window.alert("Das Bild ist zu groß. Bitte nutze ein Bild bis ca. 1,2 MB.");
-    input.value = "";
-    return;
+  if (!call) return false;
+  const generation = callDataGeneration;
+  const cacheKey = transcriptCacheKey(call.transcriptId);
+  const source = requestedCallSource();
+  const selection = { call: state.selectedCallId, transcript: state.selectedTranscriptCallId, view: state.view };
+  const isCurrentAction = () => sequence === copyRequestSequence
+    && selection.call === state.selectedCallId && selection.transcript === state.selectedTranscriptCallId
+    && selection.view === state.view;
+  const isCurrentRequest = () => isCurrentAction() && generation === callDataGeneration
+    && source === requestedCallSource() && cacheKey === transcriptCacheKey(call.transcriptId);
+  if (call.transcriptId && !cachedTranscriptForCall(call)) {
+    let transcript;
+    try {
+      transcript = await apiJson(`/api/transcripts/${encodeURIComponent(call.transcriptId)}?mode=${state.demoMode ? "demo" : "live"}`, {}, isCurrentRequest);
+    } catch (error) {
+      // An otherwise current 401 invalidates its own generation. Report that
+      // login error, but discard failures from a previously cleared context.
+      const invalidatedHere = isCurrentAction() && error.invalidatedCallDataGeneration === generation
+        && callDataGeneration === generation + 1 && source === requestedCallSource()
+        && cacheKey === transcriptCacheKey(call.transcriptId);
+      if (!isCurrentRequest() && !invalidatedHere) return false;
+      throw error;
+    }
+    if (!isCurrentRequest()) return false;
+    if (!transcript.ok) throw new Error(message("history.transcriptContentUnavailable", "Transcript content is not available for this call."));
+    state.transcriptCache.set(cacheKey, transcript);
   }
-  const reader = new FileReader();
-  reader.addEventListener("load", () => {
-    state.customerEdits[key] = {
-      ...(state.customerEdits[key] || {}),
-      imageData: String(reader.result || ""),
-    };
-    persistCustomerEdits();
-    render();
+  if ((kind === "summary" && !callSummaryContent(call)) || (kind !== "summary" && !callTranscriptText(call))) {
+    throw new Error(message("history.transcriptContentUnavailable", "Transcript content is not available for this call."));
+  }
+  const payload = copyPayload(call, kind);
+  // Serialize native writes too: a write already accepted by the browser cannot
+  // be cancelled, but it must complete before a newer successful copy writes.
+  const write = copyWriteQueue.then(async () => {
+    if (!isCurrentRequest()) return false;
+    try { await copyToClipboard(payload); }
+    catch (error) { if (!isCurrentRequest()) return false; throw error; }
+    return isCurrentRequest();
   });
-  reader.readAsDataURL(file);
+  copyWriteQueue = write.catch(() => {});
+  return write;
 }
 
 function bindEvents() {
+  const fitHoveredSummary = event => fitTranscriptPopover(event.target.closest?.(".ai-transcript-badge"));
+  document.addEventListener("pointerover", fitHoveredSummary);
+  document.addEventListener("focusin", fitHoveredSummary);
+  document.addEventListener("scroll", fitVisibleTranscriptPopovers, true);
+  window.addEventListener("resize", fitVisibleTranscriptPopovers);
+  window.visualViewport?.addEventListener("resize", fitVisibleTranscriptPopovers);
+  window.visualViewport?.addEventListener("scroll", fitVisibleTranscriptPopovers);
   els.refresh.addEventListener("click", loadAll);
-  els.demoToggle.addEventListener("change", () => {
+  els.demoToggle?.addEventListener("change", () => {
     state.demoMode = els.demoToggle.checked;
-    localStorage.setItem("callhistory-demo-mode", state.demoMode ? "1" : "0");
+    storeValue("callhistory-demo-mode", state.demoMode ? "1" : "0");
     clearCallData();
     loadCalls();
   });
@@ -1888,22 +1392,18 @@ function bindEvents() {
     persistFilters();
     loadCalls();
   });
-  els.outcomeFilter.addEventListener("change", () => {
-    state.filters.outcome = els.outcomeFilter.value;
-    persistFilters();
-    loadCalls();
-  });
   els.transcriptFilter.addEventListener("change", () => {
     state.filters.transcript = els.transcriptFilter.value;
     persistFilters();
     loadCalls();
   });
-
   let partyTimer = 0;
   els.partyFilter.addEventListener("input", () => {
+    filterDrafts.party = els.partyFilter.value;
     clearTimeout(partyTimer);
     partyTimer = setTimeout(() => {
-      state.filters.party = els.partyFilter.value.trim();
+      state.filters.party = filterDrafts.party.trim();
+      filterDrafts.party = null;
       persistFilters();
       loadCalls();
     }, 220);
@@ -1911,97 +1411,67 @@ function bindEvents() {
 
   let queueTimer = 0;
   els.queueFilter.addEventListener("input", () => {
+    filterDrafts.queue = els.queueFilter.value;
     clearTimeout(queueTimer);
     queueTimer = setTimeout(() => {
-      state.filters.queue = els.queueFilter.value.trim();
+      state.filters.queue = filterDrafts.queue.trim();
+      filterDrafts.queue = null;
       persistFilters();
       loadCalls();
     }, 220);
   });
 
   document.addEventListener("click", (event) => {
+    const more = event.target.closest("[data-load-more]");
+    if (more) {
+      const view = more.dataset.loadMore;
+      const previous = view === "history" ? historyVisibleLimit : transcriptVisibleLimit;
+      if (view === "history") { historyVisibleLimit += HISTORY_RENDER_LIMIT; renderCalls(); }
+      else { transcriptVisibleLimit += TRANSCRIPT_RENDER_LIMIT; renderTranscripts(); }
+      const container = view === "history" ? els.callsBody : els.transcriptGrid;
+      container.querySelectorAll("[data-call-id]")[previous]?.focus({ preventScroll: false });
+      return;
+    }
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
       const nextView = viewButton.dataset.view;
       if (state.view === nextView) return;
+      copyRequestSequence += 1;
       state.view = nextView;
-      if (state.view !== "crm") state.crmModalCallId = "";
-      localStorage.setItem("callhistory-view", state.view);
+      storeValue("callhistory-view", state.view);
       render();
-      if (state.view !== "setup") loadCalls();
+      if (state.view === "history" || state.view === "transcripts") loadCalls();
       return;
     }
-
-    const metricAction = event.target.closest("[data-metric-action]");
-    if (metricAction?.dataset.metricAction === "customer-records") {
-      state.customerRecordsOpen = true;
-      renderCustomerRecordsModal();
-      return;
-    }
-
-    if (event.target.matches("[data-customer-record-close]") || event.target.closest("button[data-customer-record-close]")) {
-      state.customerRecordsOpen = false;
-      state.customerRecordImagePreview = "";
-      renderCustomerRecordsModal();
-      return;
-    }
-
-    const deleteCustomerRecord = event.target.closest("[data-delete-customer-record]");
-    if (deleteCustomerRecord) {
-      deleteManualCustomerRecord(deleteCustomerRecord.dataset.deleteCustomerRecord);
-      return;
-    }
-
-    if (event.target.matches("[data-crm-modal-close]") || event.target.closest(".modal-close-button")) {
-      state.crmModalCallId = "";
-      renderCrm();
-      return;
-    }
-
     const copyButton = event.target.closest("[data-copy-call-id]");
     if (copyButton) {
       const originalText = copyButton.textContent;
       copyCallPart(copyButton.dataset.copyCallId, copyButton.dataset.copyKind || "all")
-        .then(() => {
-          copyButton.textContent = "Kopiert";
-          showCopyToast("In die Zwischenablage kopiert");
+        .then((copied) => {
+          if (!copied) return;
+          copyButton.textContent = message("history.copied", "Copied");
+          showCopyToast(message("history.copiedToClipboard", "Copied to clipboard"));
           setTimeout(() => { copyButton.textContent = originalText; }, 1200);
         })
         .catch((error) => {
-          copyButton.textContent = "Nicht kopiert";
+          copyButton.textContent = message("history.notCopied", "Not copied");
           copyButton.title = error.message;
         });
-      return;
-    }
-
-    const analyticsToggle = event.target.closest("[data-analytics-series]");
-    if (analyticsToggle) {
-      const key = analyticsToggle.dataset.analyticsSeries;
-      const active = Array.isArray(state.analyticsSeries)
-        ? state.analyticsSeries.filter((item) => ANALYTICS_SERIES.includes(item))
-        : [...ANALYTICS_SERIES];
-      if (key === "all") {
-        state.analyticsSeries = [...ANALYTICS_SERIES];
-      } else if (ANALYTICS_SERIES.includes(key)) {
-        state.analyticsSeries = active.includes(key)
-          ? active.filter((item) => item !== key)
-          : [...active, key];
-        if (!state.analyticsSeries.length) state.analyticsSeries = [key];
-      }
-      localStorage.setItem("callhistory-analytics-series", JSON.stringify(state.analyticsSeries));
-      renderAnalytics();
       return;
     }
 
     const callTarget = event.target.closest("[data-call-id]");
     if (callTarget) {
       if (callTarget.closest(".transcript-list")) {
+        if (state.selectedTranscriptCallId !== callTarget.dataset.callId || state.selectedCallId !== callTarget.dataset.callId) copyRequestSequence += 1;
         state.selectedTranscriptCallId = callTarget.dataset.callId;
         if (state.selectedCallId !== callTarget.dataset.callId) {
           state.selectedCallId = callTarget.dataset.callId;
-          state.assignmentPreview = null;
+          state.transcript = null;
+
         }
         render();
+        focusCallSelection(callTarget.dataset.callId, true);
         loadSelectedTranscript();
         return;
       }
@@ -2009,21 +1479,11 @@ function bindEvents() {
       return;
     }
 
-    const crmTarget = event.target.closest("[data-crm-open-call-id], [data-crm-modal-call-id]");
-    if (crmTarget) {
-      const callId = crmTarget.dataset.crmOpenCallId || crmTarget.dataset.crmModalCallId;
-      state.crmModalCallId = callId;
-      state.selectedCallId = callId;
-      state.assignmentPreview = null;
-      renderCrm();
-      loadSelectedTranscript();
-      return;
-    }
-
     if (state.view === "transcripts" && state.selectedTranscriptCallId) {
       const transcriptArea = event.target.closest("#view-transcripts");
       const protectedTarget = event.target.closest(".transcript-list-row, .transcript-detail-card, [data-copy-call-id]");
       if (transcriptArea && !protectedTarget) {
+        copyRequestSequence += 1;
         state.selectedTranscriptCallId = "";
         state.transcript = null;
         renderTranscripts();
@@ -2031,101 +1491,25 @@ function bindEvents() {
       }
     }
 
-    const accountFilter = event.target.closest("[data-filter-account-key]");
-    if (accountFilter) {
-      state.crmAccountFilterKey = accountFilter.dataset.filterAccountKey;
-      renderCrm();
-      return;
-    }
-
-    if (event.target.closest("#clear-crm-filter")) {
-      state.crmAccountFilterKey = "";
-      renderCrm();
-      return;
-    }
-
-    if (event.target.closest("#assignment-preview")) {
-      previewAssignment();
-      return;
-    }
-
-    const removeImage = event.target.closest("#remove-customer-image");
-    if (removeImage) {
-      removeCustomerImage(removeImage.closest("#customer-edit-form")?.dataset.customerKey);
-      return;
-    }
-
-    const resetRecord = event.target.closest("#reset-customer-record");
-    if (resetRecord) {
-      resetCustomerRecord(resetRecord.closest("#customer-edit-form")?.dataset.customerKey);
-    }
   });
-
-  document.addEventListener("submit", (event) => {
-    const recordForm = event.target.closest("#customer-record-form");
-    if (recordForm) {
-      event.preventDefault();
-      saveManualCustomerRecord(recordForm).catch((error) => window.alert(error.message));
-      return;
-    }
-
-    const form = event.target.closest("#customer-edit-form");
-    if (!form) return;
-    event.preventDefault();
-    saveCustomerForm(form);
-  });
-
-  document.addEventListener("change", (event) => {
-    if (event.target.closest("#customer-record-image-input")) {
-      const input = event.target;
-      const file = input.files?.[0] || null;
-      readImageFile(file)
-        .then((imageData) => {
-          state.customerRecordImagePreview = imageData;
-          const preview = document.querySelector(".customer-image-preview");
-          if (preview) {
-            preview.innerHTML = imageData
-              ? `<img src="${escapeAttr(imageData)}" alt="">`
-              : "<strong>Bild</strong>";
-          }
-        })
-        .catch((error) => {
-          window.alert(error.message);
-          input.value = "";
-        });
-      return;
-    }
-
-    if (event.target.closest("#customer-image-input")) {
-      storeCustomerImage(event.target);
-    }
-  });
-
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.customerRecordsOpen) {
-      state.customerRecordsOpen = false;
-      renderCustomerRecordsModal();
-      return;
-    }
-    if (event.key === "Escape" && state.crmModalCallId) {
-      state.crmModalCallId = "";
-      renderCrm();
-      return;
-    }
     const row = event.target.closest(".history-row[data-call-id]");
     if (row && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       setSelectedCall(row.dataset.callId);
     }
   });
-
+  window.addEventListener("message", receiveCrmDemoMessage);
+  document.addEventListener("nfon:demo-pause", event => { crmParentPaused = event.detail?.paused === true; renderView(); });
   if (els.authLoginPanel) {
     els.authLoginPanel.addEventListener("click", (event) => {
       const logout = event.target.closest("#auth-logout");
       if (logout) {
+        const request = beginStatusRequest();
         apiJson("/api/auth/logout", { method: "POST" })
-          .then(loadAll)
+          .then(() => { if (!isCurrentStatusRequest(request)) return; clearCallData(); return loadAll(); })
           .catch((error) => {
+            if (!isCurrentStatusRequest(request, error)) return;
             state.authLoginError = error.message;
             renderAuthLoginPanel();
           });
@@ -2137,7 +1521,7 @@ function bindEvents() {
       state.authLoginMode = button.dataset.authMode;
       state.authLoginMessage = "";
       state.authLoginError = "";
-      localStorage.setItem("callhistory-auth-login-mode", state.authLoginMode);
+      storeValue("callhistory-auth-login-mode", state.authLoginMode);
       renderAuthLoginPanel();
     });
     els.authLoginPanel.addEventListener("submit", (event) => {
@@ -2148,5 +1532,40 @@ function bindEvents() {
   }
 }
 
+function refreshLocalizedView() {
+  const focused = document.activeElement;
+  const selection = focused && typeof focused.selectionStart === "number"
+    ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection } : null;
+  const forms = [...document.querySelectorAll("form[id]")].map((form) => ({ form, id: form.id }));
+  const expanded = [...document.querySelectorAll("details")].map((detail) => detail.open);
+  // In-progress filter typing may not yet have reached the debounce callback.
+  const partyValue = els.partyFilter.value;
+  const queueValue = els.queueFilter.value;
+  render();
+  forms.forEach(({ form, id }) => {
+    const replacement = document.getElementById(id);
+    if (replacement && replacement !== form) replacement.replaceWith(form);
+  });
+  document.querySelectorAll("details").forEach((detail, index) => { detail.open = expanded[index] || false; });
+  els.partyFilter.value = partyValue;
+  els.queueFilter.value = queueValue;
+  window.NFON_I18N?.refresh?.();
+  if (focused?.isConnected) {
+    focused.focus({ preventScroll: true });
+    if (selection) focused.setSelectionRange(selection.start, selection.end, selection.direction);
+  }
+}
+
+document.addEventListener("nfon:language-change", refreshLocalizedView);
+document.addEventListener("nfon:theme-change", () => {
+  if (state.view === "crm") renderCrmDemo();
+  fitVisibleTranscriptPopovers();
+});
+
+if (new URLSearchParams(window.location.search).get("auth") === "failed") {
+  state.view = "setup";
+  state.authLoginError = "Login with NFON is required for live call history";
+  try { const url = new URL(window.location.href); url.searchParams.delete("auth"); window.history.replaceState(window.history.state, "", url.href); } catch { /* Optional history. */ }
+}
 bindEvents();
 loadAll();

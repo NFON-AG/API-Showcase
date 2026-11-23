@@ -1,0 +1,462 @@
+/* Measured against Admin Portal and its preview on 2026-09-25. */
+@font-face {
+  font-family: "Pangram Sans";
+  src: url("assets/fonts/PPPangramSans-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+html[data-nfon-theme="admin-portal"] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-strong: #f5f6f7;
+  --text: #000000;
+  --muted: #525354;
+  --line: #e6e9eb;
+  --line-strong: #afb1b3;
+  --field-bg: #ffffff;
+  --field-line: #afb1b3;
+  --field-text: #000000;
+  --field-placeholder: #727476;
+  --accent: #00e682;
+  --accent-dark: #007b46;
+  --nfon-blue: #3200c8;
+  --purple-mid: #3200c8;
+  --shadow: none;
+  --nfon-type-caption: 12px;
+  --nfon-type-body: 14px;
+  --nfon-type-section: 16px;
+  --nfon-type-display: 24px;
+  --nfon-header-height: 64px;
+  --nfon-sidebar-width: 241px;
+  --nfon-navigation-inset: 24px;
+  --nfon-settings-inset: 24px;
+  /* NFON status palette: pastel surfaces with readable, darker labels. */
+  --nfon-success-bg: #f4fcf8;
+  --nfon-success-border: #c4e8d9;
+  --nfon-success-text: #007b46;
+  --nfon-warning-bg: #fffaf0;
+  --nfon-warning-border: #f5d7a9;
+  --nfon-warning-text: #805000;
+  --nfon-danger-bg: #fff6f8;
+  --nfon-danger-border: #efc6cb;
+  --nfon-danger-text: #a92334;
+  --nfon-info-bg: #f7f6ff;
+  --nfon-info-border: #e0dbff;
+  --nfon-info-text: #3200c8;
+  --nfon-neutral-bg: #fafafb;
+  --nfon-neutral-border: #e4e7e9;
+  --nfon-neutral-text: #525354;
+  --nfon-selection-bg: #f8fefb;
+  --nfon-hover-bg: #fbfaff;
+  --nfon-control-bg: #f7f5ff;
+  --nfon-control-border: #8b7bb7;
+  --nfon-control-hover: #eeeaff;
+}
+.nfon-sidebar, .nfon-menu-button, .nfon-sidebar-toggle { display: none; }
+.appearance-settings { display: grid; gap: 8px; align-content: start; max-width: 360px; margin: 24px 0; }
+html[data-nfon-theme="admin-portal"] .app-shell .appearance-settings { margin: 24px var(--nfon-settings-inset); }
+html[data-nfon-theme="admin-portal"] .app-shell > .appearance-settings { margin-inline: calc(2 * var(--nfon-settings-inset)); }
+.appearance-label { font-weight: 400; }
+/* Same compact track and thumb as the header's Demo switch. */
+.nfon-theme-switch { display: inline-flex; align-items: center; justify-content: flex-start; gap: 8px; width: max-content; max-width: 100%; min-height: 40px; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: #525354; font: inherit; font-size: 14px; font-weight: 400; line-height: 20px; cursor: pointer; }
+.nfon-theme-switch > span:not(.nfon-theme-track) { white-space: nowrap; }
+.nfon-theme-track { display: block; position: relative; flex: 0 0 30px; width: 30px; height: 16px; border-radius: 999px; background: #3b4542; }
+.nfon-theme-track::before { content: ""; position: absolute; width: 12px; height: 12px; left: 2px; top: 2px; border-radius: 50%; background: #aeb8b6; transition: transform 160ms ease, background 160ms ease; }
+.nfon-theme-switch[aria-checked="true"] .nfon-theme-track { background: rgba(0, 217, 129, .24); }
+.nfon-theme-switch[aria-checked="true"] .nfon-theme-track::before { transform: translateX(14px); background: var(--accent, #00e682); }
+.nfon-theme-switch[aria-checked="false"] .nfon-theme-classic,
+.nfon-theme-switch[aria-checked="true"] .nfon-theme-modern { color: #000; }
+.nfon-theme-switch:is(:hover, :focus-visible) { background: transparent; }
+.nfon-theme-switch:focus-visible { outline: 2px solid #3200c8; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .nfon-theme-track::before { transition: none; } }
+.header-actions .appearance-settings { display: flex; margin: 0; color: inherit; }
+.header-actions .appearance-label { display: none; }
+.nfon-cockpit-header .header-actions { gap: 16px; }
+html[data-nfon-theme="admin-portal"] body { background: #fff; color: #000; font-family: "Pangram Sans", Helvetica, Arial, sans-serif; font-size: var(--nfon-type-body); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] .app-header {
+  position: sticky; top: 0; z-index: 50; height: 64px; min-height: 64px;
+  padding: 0 24px 0 var(--nfon-navigation-inset); gap: 16px; border: 0; background: #3200c8; color: #fff; flex-wrap: nowrap; flex-direction: row; align-items: center;
+}
+html[data-nfon-theme="admin-portal"] .header-title-row { min-width: 0; flex: 1; gap: 16px; }
+html[data-nfon-theme="admin-portal"] .app-header h1 { font-size: var(--nfon-type-section); line-height: 24px; font-weight: 700; white-space: nowrap; }
+html[data-nfon-theme="admin-portal"] .app-header p { font-size: 12px; line-height: 16px; color: #fff; margin: 0; }
+html[data-nfon-theme="admin-portal"] .header-actions { gap: 16px; min-width: 0; width: auto; flex-wrap: nowrap; }
+html[data-nfon-theme="admin-portal"] .header-status-group { gap: 16px; }
+html[data-nfon-theme="admin-portal"] .home-icon-button { border: 0; width: 40px; height: 40px; min-width: 40px; border-radius: 0; }
+html[data-nfon-theme="admin-portal"] .nfon-menu-button { display: none; place-items: center; width: 40px; height: 40px; flex: 0 0 40px; padding: 8px; border: 0; border-radius: 0; background: transparent; cursor: pointer; }
+html[data-nfon-theme="admin-portal"] .nfon-menu-button img { filter: invert(1); }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar {
+  display: block; position: fixed; top: var(--nfon-header-height); bottom: 0; left: 0;
+  width: var(--nfon-sidebar-width); padding: 16px 0; background: #fff; border-right: 1px solid #e6e9eb; z-index: 40; overflow-y: auto;
+}
+html[data-nfon-theme="admin-portal"] .nfon-sidebar nav { display: flex; flex-direction: column; gap: 0; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button {
+  display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-start; gap: 16px; width: 100%; min-width: 0; min-height: 54px;
+  position: relative; padding: 16px var(--nfon-navigation-inset); border: 0; border-radius: 0;
+  background: #fff; color: #3200c8; font: inherit; font-size: 14px; font-weight: 400; text-decoration: none;
+  text-align: left; white-space: normal; box-shadow: none;
+}
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button.is-active,
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button[aria-current="page"] {
+  color: #3200c8; background: transparent; font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] .nav-button[data-nfon-icon]::before { content: ""; width: 40px; height: 22px; flex: 0 0 40px; background: currentColor; mask: var(--navigation-icon) center / 22px 22px no-repeat; }
+html[data-nfon-theme="admin-portal"] .nav-button.is-active::before,
+html[data-nfon-theme="admin-portal"] .nav-button[aria-current="page"]::before { background: #00cc74; }
+[data-nfon-icon="dashboard"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M3%2013h8V3H3v10zm0%208h8v-6H3v6zm10%200h8V11h-8v10zm0-18v6h8V3h-8z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="history"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M13%203c-4.97%200-9%204.03-9%209H1l3.89%203.89.07.14L9%2012H6c0-3.87%203.13-7%207-7s7%203.13%207%207-3.13%207-7%207c-1.93%200-3.68-.79-4.94-2.06l-1.42%201.42C8.27%2019.99%2010.51%2021%2013%2021c4.97%200%209-4.03%209-9s-4.03-9-9-9zm-1%205v5l4.28%202.54.72-1.21-3.5-2.08V8H12z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="description"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M14%202H6c-1.1%200-1.99.9-1.99%202L4%2020c0%201.1.89%202%201.99%202H18c1.1%200%202-.9%202-2V8l-6-6zm2%2016H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5%209H13z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="contacts"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0zm0%200h24v24H0zm0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M20%200H4v2h16V0zM4%2024h16v-2H4v2zM20%204H4c-1.1%200-2%20.9-2%202v12c0%201.1.9%202%202%202h16c1.1%200%202-.9%202-2V6c0-1.1-.9-2-2-2zm-8%202.75c1.24%200%202.25%201.01%202.25%202.25s-1.01%202.25-2.25%202.25S9.75%2010.24%209.75%209%2010.76%206.75%2012%206.75zM17%2017H7v-1.5c0-1.67%203.33-2.5%205-2.5s5%20.83%205%202.5V17z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="settings"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20enable-background%3D%22new%200%200%2024%2024%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cg%3E%3Cpath%20d%3D%22M0%2C0h24v24H0V0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M19.14%2C12.94c0.04-0.3%2C0.06-0.61%2C0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14%2C0.23-0.41%2C0.12-0.61%20l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39%2C0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4%2C2.81c-0.04-0.24-0.24-0.41-0.48-0.41%20h-3.84c-0.24%2C0-0.43%2C0.17-0.47%2C0.41L9.25%2C5.35C8.66%2C5.59%2C8.12%2C5.92%2C7.63%2C6.29L5.24%2C5.33c-0.22-0.08-0.47%2C0-0.59%2C0.22L2.74%2C8.87%20C2.62%2C9.08%2C2.66%2C9.34%2C2.86%2C9.48l2.03%2C1.58C4.84%2C11.36%2C4.8%2C11.69%2C4.8%2C12s0.02%2C0.64%2C0.07%2C0.94l-2.03%2C1.58%20c-0.18%2C0.14-0.23%2C0.41-0.12%2C0.61l1.92%2C3.32c0.12%2C0.22%2C0.37%2C0.29%2C0.59%2C0.22l2.39-0.96c0.5%2C0.38%2C1.03%2C0.7%2C1.62%2C0.94l0.36%2C2.54%20c0.05%2C0.24%2C0.24%2C0.41%2C0.48%2C0.41h3.84c0.24%2C0%2C0.44-0.17%2C0.47-0.41l0.36-2.54c0.59-0.24%2C1.13-0.56%2C1.62-0.94l2.39%2C0.96%20c0.22%2C0.08%2C0.47%2C0%2C0.59-0.22l1.92-3.32c0.12-0.22%2C0.07-0.47-0.12-0.61L19.14%2C12.94z%20M12%2C15.6c-1.98%2C0-3.6-1.62-3.6-3.6%20s1.62-3.6%2C3.6-3.6s3.6%2C1.62%2C3.6%2C3.6S13.98%2C15.6%2C12%2C15.6z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="contact_phone"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M22%203H2C.9%203%200%203.9%200%205v14c0%201.1.9%202%202%202h20c1.1%200%201.99-.9%201.99-2L24%205c0-1.1-.9-2-2-2zM8%206c1.66%200%203%201.34%203%203s-1.34%203-3%203-3-1.34-3-3%201.34-3%203-3zm6%2012H2v-1c0-2%204-3.1%206-3.1s6%201.1%206%203.1v1zm3.85-4h1.64L21%2016l-1.99%201.99c-1.31-.98-2.28-2.38-2.73-3.99-.18-.64-.28-1.31-.28-2s.1-1.36.28-2c.45-1.62%201.42-3.01%202.73-3.99L21%208l-1.51%202h-1.64c-.22.63-.35%201.3-.35%202s.13%201.37.35%202z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="dialpad"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M12%2019c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zM6%201c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm0%206c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm0%206c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm12-8c1.1%200%202-.9%202-2s-.9-2-2-2-2%20.9-2%202%20.9%202%202%202zm-6%208c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm6%200c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm0-6c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm-6%200c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2zm0-6c-1.1%200-2%20.9-2%202s.9%202%202%202%202-.9%202-2-.9-2-2-2z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="groups"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20enable-background%3D%22new%200%200%2024%2024%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Crect%20fill%3D%22none%22%20height%3D%2224%22%20width%3D%2224%22%2F%3E%3Cg%3E%3Cpath%20d%3D%22M12%2C12.75c1.63%2C0%2C3.07%2C0.39%2C4.24%2C0.9c1.08%2C0.48%2C1.76%2C1.56%2C1.76%2C2.73L18%2C18H6l0-1.61c0-1.18%2C0.68-2.26%2C1.76-2.73%20C8.93%2C13.14%2C10.37%2C12.75%2C12%2C12.75z%20M4%2C13c1.1%2C0%2C2-0.9%2C2-2c0-1.1-0.9-2-2-2s-2%2C0.9-2%2C2C2%2C12.1%2C2.9%2C13%2C4%2C13z%20M5.13%2C14.1%20C4.76%2C14.04%2C4.39%2C14%2C4%2C14c-0.99%2C0-1.93%2C0.21-2.78%2C0.58C0.48%2C14.9%2C0%2C15.62%2C0%2C16.43V18l4.5%2C0v-1.61C4.5%2C15.56%2C4.73%2C14.78%2C5.13%2C14.1z%20M20%2C13c1.1%2C0%2C2-0.9%2C2-2c0-1.1-0.9-2-2-2s-2%2C0.9-2%2C2C18%2C12.1%2C18.9%2C13%2C20%2C13z%20M24%2C16.43c0-0.81-0.48-1.53-1.22-1.85%20C21.93%2C14.21%2C20.99%2C14%2C20%2C14c-0.39%2C0-0.76%2C0.04-1.13%2C0.1c0.4%2C0.68%2C0.63%2C1.46%2C0.63%2C2.29V18l4.5%2C0V16.43z%20M12%2C6c1.66%2C0%2C3%2C1.34%2C3%2C3%20c0%2C1.66-1.34%2C3-3%2C3s-3-1.34-3-3C9%2C7.34%2C10.34%2C6%2C12%2C6z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="account_tree"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cpath%20d%3D%22M0%200h24v24H0z%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M22%2011V3h-7v3H9V3H2v8h7V8h2v10h4v3h7v-8h-7v3h-2V8h2v3z%22%2F%3E%3C%2Fsvg%3E"); }
+[data-nfon-icon="bar_chart"] { --navigation-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20enable-background%3D%22new%200%200%2024%2024%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%3E%3Cg%3E%3Crect%20fill%3D%22none%22%20height%3D%2224%22%20width%3D%2224%22%2F%3E%3C%2Fg%3E%3Cg%3E%3Cg%3E%3Crect%20height%3D%2211%22%20width%3D%224%22%20x%3D%224%22%20y%3D%229%22%2F%3E%3Crect%20height%3D%227%22%20width%3D%224%22%20x%3D%2216%22%20y%3D%2213%22%2F%3E%3Crect%20height%3D%2216%22%20width%3D%224%22%20x%3D%2210%22%20y%3D%224%22%2F%3E%3C%2Fg%3E%3C%2Fg%3E%3C%2Fsvg%3E"); }
+html[data-nfon-theme="admin-portal"] .app-shell { width: auto; max-width: none; margin: 0 0 0 var(--nfon-sidebar-width); padding: 0; min-width: 0; }
+html[data-nfon-theme="admin-portal"] .app-shell { container: nfon-content / inline-size; }
+html[data-nfon-theme="admin-portal"] .app-shell > * { min-width: 0; }
+html[data-nfon-theme="admin-portal"] :is(button,input,select,textarea) { font-family: inherit; }
+html[data-nfon-theme="admin-portal"] :is(input:not([type="checkbox"]):not([type="radio"]),select,textarea) { border-radius: 0; }
+html[data-nfon-theme="admin-portal"] :is(.primary-button,.primary) { background: #00e682; color: #000; border-color: #00e682; border-radius: 0; min-height: 40px; }
+html[data-nfon-theme="admin-portal"] :is(.secondary-button,.ghost-button) { border-radius: 0; min-height: 40px; }
+html[data-nfon-theme="admin-portal"] :is(.panel,.setup-panel,.metric-card,.stat-card) { border-radius: 0; box-shadow: none; }
+html[data-nfon-theme="admin-portal"] :is(h2,h3) { font-size: 16px; font-weight: 400; }
+html[data-nfon-theme="admin-portal"] table { font-size: 14px; }
+html[data-nfon-theme="admin-portal"] :is(th,td) { height: 44px; border-color: #e6e9eb; }
+html[data-nfon-theme="admin-portal"] :focus-visible { outline: 2px solid #3200c8; outline-offset: 3px; }
+html[data-nfon-theme="admin-portal"] .app-header :focus-visible { outline-color: #fff; }
+html[data-nfon-theme="admin-portal"] .language-menu { max-height: calc(100vh - 80px); overflow-y: auto; border-color: #d7d9db; padding: 0; box-shadow: 0 3px 5px #0003; }
+html[data-nfon-theme="admin-portal"] .language-option { min-height: 40px; font-size: 14px; font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .language-option:is(:hover,:focus-visible,.is-active) { background: #e6e9eb; color: #000; }
+@media (min-width: 1001px) {
+  html[data-nfon-theme="admin-portal"][data-nfon-navigation-collapsed="true"] { --nfon-sidebar-width: 65px; --nfon-navigation-inset: 12px; }
+  html[data-nfon-theme="admin-portal"][data-nfon-navigation-collapsed="true"] .nfon-sidebar .nav-button { justify-content: center; gap: 0; padding: 16px 8px; font-size: 0; }
+  html[data-nfon-theme="admin-portal"][data-nfon-navigation-collapsed="true"] .nfon-sidebar .nav-button::after { left: calc(50% - 12px); }
+}
+@media (max-width: 1000px) {
+  html[data-nfon-theme="admin-portal"] { --nfon-navigation-inset: 16px; }
+  html[data-nfon-theme="admin-portal"] .nfon-menu-button { display: grid; }
+  html[data-nfon-theme="admin-portal"] .app-header { padding: 0 16px; gap: 8px; }
+  html[data-nfon-theme="admin-portal"] .nfon-sidebar { display: none; box-shadow: 4px 0 12px #0002; }
+  html[data-nfon-theme="admin-portal"].nfon-navigation-open .nfon-sidebar { display: block; }
+  html[data-nfon-theme="admin-portal"] .app-shell { margin-left: 0; padding: 0; }
+}
+@media (max-width: 620px) {
+  html[data-nfon-theme="classic"] .nfon-cockpit-header { flex-direction: column; align-items: stretch; gap: 12px; }
+  html[data-nfon-theme="classic"] .nfon-cockpit-header .header-actions { width: 100%; gap: 8px; }
+  html[data-nfon-theme="admin-portal"] { --nfon-header-height: 112px; --nfon-navigation-inset: 12px; }
+  html[data-nfon-theme="admin-portal"] .app-header { display: grid; grid-template-columns: 40px minmax(0, 1fr); grid-template-rows: 40px auto; gap: 8px; padding: 12px; height: auto; min-height: 112px; }
+  html[data-nfon-theme="admin-portal"] .header-title-row { width: 100%; }
+  html[data-nfon-theme="admin-portal"] .header-actions { grid-column: 1 / -1; width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  html[data-nfon-theme="admin-portal"] .app-header h1 { font-size: 14px; white-space: normal; line-height: 18px; }
+  html[data-nfon-theme="admin-portal"] .app-header p { display: none; }
+  html[data-nfon-theme="admin-portal"] .header-actions, html[data-nfon-theme="admin-portal"] .header-status-group { gap: 8px; }
+  html[data-nfon-theme="admin-portal"] .home-icon-button { display: none; }
+  html[data-nfon-theme="admin-portal"] .app-shell { padding: 0; }
+}
+@media (max-width: 760px) {
+  html[data-nfon-theme="admin-portal"] { --nfon-settings-inset: 16px; }
+}
+
+/* The portal puts rail control below navigation, separate from page actions. */
+html[data-nfon-theme="admin-portal"] .nfon-sidebar-toggle { display: grid; place-items: center; width: 40px; height: 40px; padding: 8px; margin: 40px var(--nfon-navigation-inset) 8px; border: 0; border-radius: 0; background: transparent; color: #525354; cursor: pointer; }
+.nfon-sidebar-toggle::before { content: ""; width: 24px; height: 24px; background: currentColor; mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M4%203h3v18H4V3Zm8%202%201.4%201.4L8.8%2011H22v2H8.8l4.6%204.6L12%2019l-7-7%207-7Z%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat; }
+.nfon-sidebar-toggle[aria-expanded="false"]::before { transform: scaleX(-1); }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar-toggle:focus-visible { outline: 2px solid #3200c8; }
+.nfon-appearance-strip { display: flex; align-items: center; justify-content: center; height: 36px; background: #f5f6f7; color: #000; }
+.nfon-appearance-strip .appearance-settings { display: flex; margin: 0; }
+.nfon-appearance-strip .appearance-label { display: none; }
+.nfon-appearance-strip .nfon-theme-switch { min-height: 36px; }
+html:has(.nfon-appearance-strip) .app-header { top: 36px; }
+html[data-nfon-theme="admin-portal"]:has(.nfon-appearance-strip) .nfon-sidebar { top: calc(var(--nfon-header-height) + 36px); }
+.nfon-appearance-strip { position: sticky; top: 0; z-index: 51; }
+
+/* Unclassified metadata receives the same quiet neutral capsule. */
+html[data-nfon-theme="admin-portal"] :is(.chip,.node-type) {
+  background: var(--nfon-neutral-bg); border-color: var(--nfon-neutral-border); color: var(--nfon-neutral-text);
+}
+/* Shared semantic mapping for standalone apps and static demos. Labels retain
+   meaning without colour; status rules follow the informational defaults. */
+html[data-nfon-theme="admin-portal"] :is(
+  .status-note, .extension-type, .resource-type, .service-kind, .step-label,
+  .endpoint-badge.is-optional,
+  .chip.is-transcript, .chip.is-inbound, .chip.is-outbound,
+  .status-chip.start, .status-chip.caller-dial, .status-chip.caller-ring,
+  .status-chip.dial, .status-chip.ring, .status-chip.outbound
+) {
+  --nfon-status-dot: #3200c8;
+  background: var(--nfon-info-bg);
+  border-color: var(--nfon-info-border);
+  color: var(--nfon-info-text);
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .status-chip.available, .status-chip.idle, .status-chip.online,
+  .status-chip.caller-answer, .status-chip.answer, .status-chip.answered,
+  .chip.is-answered, .chip.is-billable,
+  .auth-login-state.is-configured, .auth-login-state.is-connected,
+  .pill.is-ok, .batch-status-pill.is-ok, .batch-row-state.is-ok,
+  .endpoint-badge.is-ok, .phonebook-row-state.is-create,
+  .phonebook-row-state.is-unchanged, .status-note.is-ok
+) {
+  --nfon-status-dot: #00cc74;
+  background: var(--nfon-success-bg);
+  border-color: var(--nfon-success-border);
+  color: var(--nfon-success-text);
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .status-chip.busy, .status-chip.in-use, .status-chip.ringing,
+  .status-chip.away, .status-chip.warning, .chip.is-busy, .chip.is-callback,
+  .auth-login-state.is-required, .auth-login-state.is-pending,
+  .pill.is-warning, .batch-status-pill.is-warning, .phonebook-row-state.is-update,
+  .status-note.is-warning
+) {
+  --nfon-status-dot: #e6ad38;
+  background: var(--nfon-warning-bg);
+  border-color: var(--nfon-warning-border);
+  color: var(--nfon-warning-text);
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .status-chip.dnd, .status-chip.missed, .status-chip.cancelled,
+  .status-chip.failed, .status-chip.error,
+  .chip.is-missed, .chip.is-cancelled, .chip.is-failed,
+  .pill.is-error, .batch-row-state.is-error, .endpoint-badge.is-error,
+  .phonebook-row-state.is-skipped, .phonebook-row-state.is-no-phone,
+  .status-note.is-error
+) {
+  --nfon-status-dot: #df5d70;
+  background: var(--nfon-danger-bg);
+  border-color: var(--nfon-danger-border);
+  color: var(--nfon-danger-text);
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .status-chip.offline, .status-chip.unknown, .status-chip.checking,
+  .status-chip.hangup, .status-chip.end, .chip.is-review,
+  .phonebook-row-state.is-present
+) {
+  --nfon-status-dot: #8c9298;
+  background: var(--nfon-neutral-bg);
+  border-color: var(--nfon-neutral-border);
+  color: var(--nfon-neutral-text);
+}
+html[data-nfon-theme="admin-portal"] .status-note span { color: inherit; }
+
+/* Action controls stay distinct from the intentionally faint status surfaces. */
+html[data-nfon-theme="admin-portal"] :is(
+  .secondary-button, .ghost-button, .wide-button, .text-button, .editor-reset,
+  .service-start, .crm-filter-clear, .auth-link
+) {
+  border: 1px solid var(--nfon-control-border);
+  background: var(--nfon-control-bg);
+  color: #3200c8;
+  font-weight: 400;
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .icon-button, .direction-button, .card-edit, .editor-close,
+  .helper-close-button, .modal-close-button, .modal-close, .plan-close,
+  .call-popup-minimize, .call-popup-close, .phonebook-format-help-button,
+  .node-action-button, .node-edit-button, .service-edit-button
+) {
+  border: 1px solid var(--nfon-control-border);
+  background: var(--nfon-control-bg);
+  color: #3200c8;
+  opacity: 1;
+}
+html[data-nfon-theme="admin-portal"] :is(
+  .secondary-button, .ghost-button, .wide-button, .text-button, .editor-reset,
+  .service-start, .crm-filter-clear, .auth-link, .icon-button, .direction-button,
+  .card-edit, .editor-close, .helper-close-button, .modal-close-button,
+  .modal-close, .plan-close, .call-popup-minimize, .call-popup-close,
+  .phonebook-format-help-button, .node-action-button, .node-edit-button, .service-edit-button
+):not(:disabled):not([aria-disabled="true"]):is(:hover, :focus-visible) {
+  border-color: #3200c8;
+  background: var(--nfon-control-hover);
+  color: #240090;
+}
+html[data-nfon-theme="admin-portal"] :is(.primary-button, .primary, .editor-save):not(:disabled):is(:hover, :focus-visible) {
+  background: #00cc74;
+  border-color: #007b46;
+}
+html[data-nfon-theme="admin-portal"] :is(.danger-button, .node-action-button.is-danger, .resource-delete) {
+  border: 1px solid #b24b59;
+  background: #fff6f8;
+  color: #a92334;
+}
+html[data-nfon-theme="admin-portal"] :is(.danger-button, .node-action-button.is-danger, .resource-delete):not(:disabled):is(:hover, :focus-visible) {
+  border-color: #a92334;
+  background: #ffecef;
+  color: #8d1d2c;
+}
+html[data-nfon-theme="admin-portal"] .nfon-sidebar-toggle {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: #3200c8;
+}
+html[data-nfon-theme="admin-portal"] :is(.extension-section-tab, .segmented-button, .flow-menu-tab, .auth-mode-switch button):not(:disabled):is(:hover, :focus-visible) {
+  background: var(--nfon-control-hover);
+  color: #3200c8;
+}
+html[data-nfon-theme="admin-portal"] :is(
+  button.metric, .extension-action-choice, .flow-palette-item, .flow-insert, .node-detail-toggle
+) { border: 1px solid var(--nfon-control-border); }
+html[data-nfon-theme="admin-portal"] :is(
+  button.metric, .extension-action-choice, .flow-palette-item, .flow-insert,
+  .node-detail-toggle, .extension-row, .did-row, .history-row, .crm-ticket-row,
+  .related-ticket-row, .transcript-list-row, .service-card-hit
+):not(:disabled):is(:hover, :focus-visible) { background: var(--nfon-control-hover); }
+html[data-nfon-theme="admin-portal"] .app-header :is(.icon-button, .home-icon-button, .nfon-menu-button, .language-trigger) {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #fff;
+}
+html[data-nfon-theme="admin-portal"] .app-header :is(.icon-button, .home-icon-button, .nfon-menu-button, .language-trigger):not(:disabled):is(:hover, :focus-visible) {
+  border: 0;
+  background: transparent;
+  color: #fff;
+}
+/* Quiet navigation affordances: short underlines, with unchanged hit areas. */
+html[data-nfon-theme="admin-portal"] .app-header :is(.icon-button, .home-icon-button, .nfon-menu-button, .language-trigger)::after,
+html[data-nfon-theme="admin-portal"] .nfon-sidebar :is(.nav-button, .nfon-sidebar-toggle)::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 12px);
+  bottom: 2px;
+  width: 24px;
+  height: 1px;
+  background: #ffffff59;
+  pointer-events: none;
+}
+html[data-nfon-theme="admin-portal"] .app-header :is(.icon-button, .home-icon-button, .nfon-menu-button, .language-trigger):not(:disabled):is(:hover, :focus-visible, [aria-expanded="true"])::after {
+  height: 2px;
+  background: #fff;
+}
+html[data-nfon-theme="admin-portal"] .nfon-sidebar :is(.nav-button, .nfon-sidebar-toggle)::after { background: #3200c833; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button::after { left: calc(var(--nfon-navigation-inset) + 8px); bottom: 5px; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar :is(.nav-button, .nfon-sidebar-toggle):is(:hover, :focus-visible) { background: transparent; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar :is(.nav-button, .nfon-sidebar-toggle):is(:hover, :focus-visible)::after { height: 2px; background: #3200c8; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button:is(.is-active, [aria-current="page"])::after { height: 2px; background: #00cc74; }
+html[data-nfon-theme="admin-portal"] .nfon-sidebar .nav-button:focus-visible { outline-offset: -3px; }
+html[data-nfon-theme="admin-portal"] :is(button, a[href]):not(:disabled):not([aria-disabled="true"]) { cursor: pointer; }
+html[data-nfon-theme="admin-portal"] button:disabled {
+  border-color: #d6dadd;
+  background: #f3f5f6;
+  color: #73777b;
+  opacity: 1;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+html[data-nfon-theme="admin-portal"] :is(button, a[href]):focus-visible { outline: 2px solid #3200c8; outline-offset: 3px; }
+html[data-nfon-theme="admin-portal"] .app-header :is(button, a[href]):focus-visible { outline-color: #fff; }
+
+/* A table/grid must not compress a short label below its text plus padding. */
+html[data-nfon-theme="admin-portal"] :is(
+  .status-chip, .chip, .contact-badge, .pill, .batch-status-pill,
+  .batch-row-state, .endpoint-badge, .phonebook-row-state,
+  .extension-type, .resource-type, .service-kind
+) {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  flex-shrink: 0;
+  justify-self: start;
+  white-space: nowrap;
+}
+/* Authentication messages can be sentences, rather than compact status labels. */
+html[data-nfon-theme="admin-portal"] .auth-login-state {
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Shared Modern type and component geometry, audited across all apps. */
+html[data-nfon-theme="admin-portal"] :is(button,input,select,textarea) { font-size: var(--nfon-type-body); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] :is(small,.app-header p) { font-size: var(--nfon-type-caption); font-weight: 400; }
+html[data-nfon-theme="admin-portal"] :is(.connection,.demo-switch) { font-size: var(--nfon-type-caption); font-weight: 400; }
+html[data-nfon-theme="admin-portal"] .app-header .connection {
+  box-sizing: border-box; height: 28px; min-height: 28px;
+  padding-block: 0; line-height: 20px;
+}
+.app-header .connection[data-status-mode="demo"] { color: inherit; }
+.app-header .connection[data-status-mode="demo"]::before {
+  background: #8b9098; box-shadow: 0 0 0 4px #8b90981a;
+}
+.app-header .connection[data-status-mode="demo"] .status-dot {
+  background: #8b9098; box-shadow: 0 0 0 4px #8b90981a;
+}
+html[data-nfon-theme="admin-portal"] :is(.primary-button,.primary,.editor-save) { font-weight: 400; }
+html[data-nfon-theme="admin-portal"] :is(.status-chip,.chip,.pill,.batch-status-pill,.batch-row-state,.endpoint-badge,.phonebook-row-state,.extension-type,.resource-type,.service-kind,.node-type,.step-label) {
+  display: inline-flex; align-items: center; min-height: 28px; padding: 0 12px; gap: 8px; border-radius: 999px; border-width: 1px; border-style: solid;
+  font-size: var(--nfon-type-caption); font-weight: 400; line-height: 20px;
+}
+html[data-nfon-theme="admin-portal"] .status-dot { width: 8px; height: 8px; flex: 0 0 8px; }
+/* Cockpit navigates through its cards and has no section rail. */
+html[data-nfon-theme="admin-portal"] .nfon-cockpit-header { padding-inline: 24px; }
+html[data-nfon-theme="admin-portal"] .nfon-cockpit-header ~ .app-shell { margin-left: 0; }
+@media (max-width: 620px) {
+  html[data-nfon-theme="admin-portal"] .nfon-cockpit-header { grid-template-columns: minmax(0,1fr); padding-inline: 16px; }
+}
+
+html[data-nfon-theme="admin-portal"] .demo-readonly-note { font-size: var(--nfon-type-body); font-weight: 400; line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] .appearance-label { font-size: var(--nfon-type-section); line-height: 1.5; }
+html[data-nfon-theme="admin-portal"] :is(strong,b) { font-weight: 400; }
+
+/* The Cockpit proportion is shared by every compact status and icon action.
+   The visible circle is28px; the transparent40px target remains easy to hit. */
+html[data-nfon-theme="admin-portal"] :is(.status-chip,.chip.is-answered,.chip.is-missed,.chip.is-busy,.chip.is-cancelled,.chip.is-failed,.chip.is-callback,.chip.is-billable,.chip.is-review,.pill,.batch-status-pill,.batch-row-state,.phonebook-row-state):not(:has(.status-dot))::before {
+  content: ""; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%;
+  background: var(--nfon-status-dot, currentColor);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--nfon-status-dot, currentColor) 9%, transparent);
+}
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button) {
+  isolation: isolate; display: inline-grid; place-items: center;
+  box-sizing: border-box; width: 40px; min-width: 40px; height: 40px; min-height: 40px;
+  padding: 0; border: 0; border-radius: 50%; background: transparent; box-shadow: none;
+  color: #3200c8; font-size: var(--nfon-type-section); font-weight: 400; line-height: 1;
+  flex: 0 0 40px; transform: none;
+}
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button)::before {
+  content: ""; position: absolute; inset: 6px; box-sizing: border-box; pointer-events: none;
+  border: 1px solid var(--nfon-control-border); border-radius: 50%; background: var(--nfon-control-bg); z-index: -1;
+}
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button):not(:disabled):is(:hover,:focus-visible) {
+  border: 0; background: transparent; transform: none;
+}
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button):not(:disabled):is(:hover,:focus-visible)::before {
+  border-color: #3200c8; background: var(--nfon-control-hover);
+}
+html[data-nfon-theme="admin-portal"] .node-action-button.is-danger { color: #a92334; }
+html[data-nfon-theme="admin-portal"] .node-action-button.is-danger::before { border-color: #b24b59; background: #fff6f8; }
+html[data-nfon-theme="admin-portal"] .node-action-button.is-danger:not(:disabled):is(:hover,:focus-visible)::before { border-color: #a92334; background: #ffecef; }
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button):disabled { background: transparent; border: 0; color: #73777b; }
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.card-edit,.editor-close,.helper-close-button,.modal-close-button,.modal-close,.plan-close,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button):disabled::before { border-color: #d6dadd; background: #f3f5f6; }
+html[data-nfon-theme="admin-portal"] :is(.direction-button,.card-edit,.node-action-button) svg { width: 16px; height: 16px; }
+html[data-nfon-theme="admin-portal"] .card-front .card-edit { position: absolute; }
+html[data-nfon-theme="admin-portal"] :is(.modal-close,.plan-close) { position: absolute; }
+html[data-nfon-theme="admin-portal"] .modal-close-button { position: sticky; }
+html[data-nfon-theme="admin-portal"] .auth-login-state {
+  display: inline-flex; align-items: center; gap: 8px; box-sizing: border-box;
+  min-height: 28px; padding: 3px 12px; border-radius: 999px;
+  font-size: var(--nfon-type-caption); font-weight: 400; line-height: 20px;
+}
+html[data-nfon-theme="admin-portal"] .auth-login-state::before {
+  content: ""; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%;
+  background: var(--nfon-status-dot, currentColor);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--nfon-status-dot, currentColor) 9%, transparent);
+}
+
+html[data-nfon-theme="admin-portal"] :is(.icon-button.is-light,.direction-button,.editor-close,.helper-close-button,.call-popup-minimize,.call-popup-close,.phonebook-format-help-button,.node-action-button) { position: relative; }
+
+/* Status text may wrap in long translations; the measured header keeps navigation below it. */
+@media (max-width: 620px) {
+  .header-status-group.is-after-header-control { margin-left: 0; }
+  .header-status-group { flex: 1 1 0; min-width: 0; justify-content: flex-end; }
+  html[data-nfon-theme="admin-portal"] .app-header .connection { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; }
+}
